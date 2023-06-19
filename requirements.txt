@@ -1,0 +1,3 @@
+ray==2.5.0
+ray[serve]==2.5.0
+horovod[ray]==0.28.1
