@@ -22,7 +22,6 @@ def step(game_id, round_id, kind, data):
 
 def make_env(gym_id: str):
     env = gym.make(gym_id)
-    env.gym_env = env
     env = wrap_deepmind(env)
     return env
 
