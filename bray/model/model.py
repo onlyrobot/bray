@@ -30,7 +30,8 @@ class RemoteModel:
     def __init__(self, name: str, model) -> None:
         self.model = model
         self.workers = [ModelWorker.remote(model) for _ in range(10)]
-        self.model_weights = ModelWeights.remote(self.workers, model.get_weights())
+        initial_weights = model.get_weights()
+        self.model_weights = ModelWeights.remote(self.workers, initial_weights)
 
     def forward(self, input):
         return ray.get(self.workers[0].forward.remote(input))

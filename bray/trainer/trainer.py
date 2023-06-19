@@ -11,8 +11,9 @@ def buffer_generator(buffer):
 
 
 class TrainerWorker:
-    def __init__(self, trainer):
-        self.trainer = trainer
+    def __init__(self, Trainer, config):
+        self.trainer = Trainer(config)
+        self.config = config
         self.buffers = {}
 
     def train(self, remote_model, buffer_name):
@@ -33,10 +34,10 @@ class TrainerWorker:
 
 
 class RemoteTrainer:
-    def __init__(self, trainer):
+    def __init__(self, Trainer, config):
         settings = RayExecutor.create_settings()
         self.executor = RayExecutor(settings, num_workers=2, use_gpu=False)
-        self.executor.start(executable_cls=TrainerWorker, executable_args=[trainer])
+        self.executor.start(executable_cls=TrainerWorker, executable_args=[Trainer, config])
         self.remote_buffers = {}
 
     def train(self, remote_model, remote_buffer):

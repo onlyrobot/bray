@@ -2,44 +2,51 @@ import requests
 from threading import Thread
 
 
-url = "http://localhost:8000/step"
+actor_url = "http://localhost:8000/step"
 
-def step(game_id, data):
+
+def step(game_id, round_id, kind, data):
+    return requests.post(
+        actor_url,
+        json={
+            "game_id": game_id,
+            "round_id": round_id,
+            "kind": kind,
+            "data": data,
+        },
+    ).json()
+
+
+def rollout(game_id, data):
     print(
-        requests.post(
-            url,
-            json={
-                "game_id": game_id,
-                "round_id": 0,
-                "kind": "start",
-                "data": data,
-            },
-        ).json()
+        step(
+            game_id,
+            0,
+            "start",
+            "",
+        )
     )
-    for i in range(100):
+    for i in range(1000000):
+        import time
+
+        time.sleep(0.5)
         print(
-            requests.post(
-                url,
-                json={
-                    "game_id": game_id,
-                    "round_id": i,
-                    "kind": "tick",
-                    "data": data,
-                },
-            ).json()
+            step(
+                game_id,
+                i,
+                "tick",
+                data,
+            )
         )
     print(
-        requests.post(
-            url,
-            json={
-                "game_id": game_id,
-                "round_id": 0,
-                "kind": "end",
-                "data": data,
-            },
-        ).json()
+        step(
+            game_id,
+            0,
+            "end",
+            "",
+        )
     )
 
 
-for i in range(10):
-    Thread(target=step, args=("game: " + str(i), "hello")).start()
+for i in range(2):
+    Thread(target=rollout, args=("game: " + str(i), "hello")).start()
