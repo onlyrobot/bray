@@ -1,7 +1,6 @@
 import requests
 import gym
 from threading import Thread
-# from ray.rllib.env.wrappers.atari_wrappers import wrap_deepmind
 from .atari_wrappers import wrap_deepmind
 
 actor_url = "http://localhost:8000/step"
@@ -9,7 +8,9 @@ gym_id = "BeamRiderNoFrameskip-v4"
 
 
 def step(game_id, round_id, kind, data):
-    return requests.post(
+    import pickle, base64
+    data = base64.b64encode(pickle.dumps(data)).decode("utf-8")
+    res = requests.post(
         actor_url,
         json={
             "game_id": game_id,
@@ -17,7 +18,11 @@ def step(game_id, round_id, kind, data):
             "kind": kind,
             "data": data,
         },
-    ).json()
+    )
+    if res.status_code != 200:
+        raise Exception(res.text)
+    res = res.json()
+    return pickle.loads(base64.b64decode(res["data"]))
 
 
 def make_env(gym_id: str):
@@ -32,10 +37,12 @@ def rollout(gym_id: str, game_id: str):
     print(game_start_res)
     done, round_id, reward = False, 0, 0.0
     obs = env.reset()
+    print(obs.shape)
     while not done:
         data = {"obs": obs, "reward": reward}
         cmd = step(game_id, round_id, "tick", data)
         round_id += 1
+        cmd = int(cmd["action"])
         obs, reward, done, _ = env.step(cmd)
     data = {"reward": reward}
     game_end_res = step(game_id, 0, "end", data)
@@ -43,7 +50,7 @@ def rollout(gym_id: str, game_id: str):
 
 
 # parallel rollout (may be thread or process)
-for i in range(1):
+for i in range(10):
     import uuid
     game_id = "game_" + str(uuid.uuid4())
-    Thread(target=rollout, args=(gym_id, str(uuid.uuid4()))).start()
+    Thread(target=rollout, args=(gym_id, game_id)).start()

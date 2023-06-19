@@ -50,27 +50,19 @@ class RemoteActor:
             self.workers[game_id] = worker
         else:
             raise Exception(f"Game {game_id} already started.")
-        return StepRespone(
-            game_id=game_id, round_id=0, kind=StepKind.start, data="Game started."
-        )
+        return "Game started."
 
     async def _handle_tick(self, game_id, round_id, data):
         worker = self.workers.get(game_id, None)
         if not worker:
             raise Exception(f"Game {game_id} not started.")
-        data = await worker.tick.remote(round_id, data)
-        return StepRespone(
-            game_id=game_id, round_id=round_id, kind=StepKind.tick, data=data
-        )
+        return await worker.tick.remote(round_id, data)
 
     async def _handle_end(self, game_id, round_id, data):
         worker = self.workers.pop(game_id, None)
         if not worker:
             raise Exception(f"Game {game_id} not started.")
-        data = await worker.end.remote(round_id, data)
-        return StepRespone(
-            game_id=game_id, round_id=round_id, kind=StepKind.end, data=data
-        )
+        return await worker.end.remote(round_id, data)
 
     # for stateless actors, we can just use the actor class directly.
     async def _handle_auto(self, game_id, round_id, data):
@@ -84,21 +76,24 @@ class RemoteActor:
         import uuid
 
         self.workers[uuid.uuid4().hex] = worker
-        return StepRespone(
-            game_id=game_id, round_id=round_id, kind=StepKind.auto, data=data
-        )
+        return data
 
     async def step(self, req: StepRequest) -> StepRespone:
+        import base64, pickle
+
+        data = pickle.loads(base64.b64decode(req.data))
         if req.kind == StepKind.start:
-            return await self._handle_start(req.game_id, req.data)
+            data = await self._handle_start(req.game_id, data)
         elif req.kind == StepKind.tick:
-            return await self._handle_tick(req.game_id, req.round_id, req.data)
+            data = await self._handle_tick(req.game_id, req.round_id, data)
         elif req.kind == StepKind.end:
-            return await self._handle_end(req.game_id, req.round_id, req.data)
+            data = await self._handle_end(req.game_id, req.round_id, data)
         elif req.kind == StepKind.auto:
-            return await self._handle_auto(req.game_id, req.round_id, req.data)
+            data = await self._handle_auto(req.game_id, req.round_id, data)
         else:
             raise Exception(f"Invalid step kind: {req.kind}")
+        data = base64.b64encode(pickle.dumps(data)).decode("utf-8")
+        return StepRespone(data=data)
 
     def serve_background(self):
         actor_gateway = ActorGateway.bind(remote_actor=self)

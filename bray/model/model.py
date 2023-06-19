@@ -1,13 +1,19 @@
+import torch
 import ray
 
 
 @ray.remote
-class ModelWorker:
+class TorchModelWorker:
     def __init__(self, model) -> None:
+        model.requires_grad_(False)
+        model.eval()
         self.model = model
 
     async def forward(self, input):
-        return self.model(input)
+        input = torch.as_tensor(input)
+        input.unsqueeze_(0)
+        output = self.model(input)
+        return [o.squeeze(0).numpy() for o in output]
 
     def set_weights(self, weights, version):
         self.model.set_weights(weights, version)
@@ -29,7 +35,7 @@ class ModelWeights:
 class RemoteModel:
     def __init__(self, name: str, model) -> None:
         self.model = model
-        self.workers = [ModelWorker.remote(model) for _ in range(10)]
+        self.workers = [TorchModelWorker.remote(model) for _ in range(10)]
         initial_weights = model.get_weights()
         self.model_weights = ModelWeights.remote(self.workers, initial_weights)
 

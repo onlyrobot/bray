@@ -13,11 +13,8 @@ class StepRequest(BaseModel):
     game_id: str
     round_id: int
     kind: StepKind
-    data: bytes
+    data: str
 
 
 class StepRespone(BaseModel):
-    game_id: str
-    round_id: int
-    kind: StepKind
-    data: bytes
+    data: str

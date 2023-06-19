@@ -41,7 +41,7 @@ class MonitorEnv(gym.Wrapper):
         self._num_returned = 0
 
     def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
+        obs, _ = self.env.reset(**kwargs)
 
         if self._total_steps is None:
             self._total_steps = sum(self._episode_lengths)
@@ -57,7 +57,7 @@ class MonitorEnv(gym.Wrapper):
         return obs
 
     def step(self, action):
-        obs, rew, done, info = self.env.step(action)
+        obs, rew, done, _, info = self.env.step(action)
         self._current_reward += rew
         self._num_steps += 1
         self._total_steps += 1
@@ -95,7 +95,7 @@ class NoopResetEnv(gym.Wrapper):
         if self.override_num_noops is not None:
             noops = self.override_num_noops
         else:
-            noops = self.unwrapped.np_random.randint(1, self.noop_max + 1)
+            noops = self.unwrapped.np_random.integers(1, self.noop_max + 1)
         assert noops > 0
         obs = None
         for _ in range(noops):
@@ -208,12 +208,28 @@ class MaxAndSkipEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
+    
+
+class ObservationWrapper(gym.Wrapper):
+    def reset(self, **kwargs):
+        """Resets the environment, returning a modified observation using :meth:`self.observation`."""
+        obs = self.env.reset(**kwargs)
+        return self.observation(obs)
+
+    def step(self, action):
+        """Returns a modified observation using :meth:`self.observation` after calling :meth:`env.step`."""
+        observation, reward, terminated, info = self.env.step(action)
+        return self.observation(observation), reward, terminated, info
+
+    def observation(self, observation):
+        """Returns a modified observation."""
+        raise NotImplementedError
 
 
-class WarpFrame(gym.ObservationWrapper):
+class WarpFrame(ObservationWrapper):
     def __init__(self, env, dim):
         """Warp frames to the specified size (dim x dim)."""
-        gym.ObservationWrapper.__init__(self, env)
+        ObservationWrapper.__init__(self, env)
         self.width = dim
         self.height = dim
         self.observation_space = spaces.Box(
@@ -258,9 +274,9 @@ class FrameStack(gym.Wrapper):
         return np.concatenate(self.frames, axis=2)
 
 
-class ScaledFloatFrame(gym.ObservationWrapper):
+class ScaledFloatFrame(ObservationWrapper):
     def __init__(self, env):
-        gym.ObservationWrapper.__init__(self, env)
+        ObservationWrapper.__init__(self, env)
         self.observation_space = gym.spaces.Box(
             low=0, high=1, shape=env.observation_space.shape, dtype=np.float32)
 
@@ -270,7 +286,7 @@ class ScaledFloatFrame(gym.ObservationWrapper):
         return np.array(observation).astype(np.float32) / 255.0
 
 
-def wrap_deepmind(env, dim=84, framestack=True):
+def wrap_deepmind(env, dim=42, framestack=True):
     """Configure environment for DeepMind-style Atari.
 
     Note that we assume reward clipping is done outside the wrapper.
@@ -287,7 +303,7 @@ def wrap_deepmind(env, dim=84, framestack=True):
     if "FIRE" in env.unwrapped.get_action_meanings():
         env = FireResetEnv(env)
     env = WarpFrame(env, dim)
-    # env = ScaledFloatFrame(env)  # TODO: use for dqn?
+    env = ScaledFloatFrame(env)
     # env = ClipRewardEnv(env)  # reward clipping is handled by policy eval
     if framestack:
         env = FrameStack(env, 4)
