@@ -4,6 +4,8 @@ from ray import serve
 from starlette.requests import Request
 import time
 import asyncio
+from bray.actor.actor import Actor
+from bray.actor.base import Agent
 
 from enum import Enum
 
@@ -21,14 +23,14 @@ class ActorWorker:
         self.active_time = time.time()
         self.actor = Actor(agents, config, game_id, data)
 
-    def tick(self, round_id, data):
+    def tick(self, round_id, data) -> bytes:
         self.active_time = time.time()
         return self.actor.tick(round_id, data)
 
-    def end(self, round_id, data):
+    def end(self, round_id, data) -> bytes:
         return self.actor.end(round_id, data)
-    
-    async def is_active(self):
+
+    async def is_active(self) -> bool:
         return time.time() - self.active_time < 60 * 3
 
 
@@ -39,7 +41,7 @@ app = FastAPI()
 @serve.deployment(route_prefix="/")
 @serve.ingress(app)
 class ActorGateway:
-    def __init__(self, remote_actor):
+    def __init__(self, remote_actor: "RemoteActor"):
         self.remote_actor = remote_actor
 
     # FastAPI will automatically parse the HTTP request for us.
@@ -56,10 +58,8 @@ class ActorGateway:
 
 
 class RemoteActor:
-    def __init__(self, Actor, agents, config):
-        self.Actor = Actor
-        self.agents = agents
-        self.config = config
+    def __init__(self, Actor: Actor, agents: dict[str:Agent], config: any):
+        self.Actor, agents, config = Actor, agents, config
         self.workers = {}
 
     async def _check_workers(self, game_id):
