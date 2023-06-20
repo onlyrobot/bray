@@ -1,8 +1,10 @@
 # Bray强化学习推理训练框架
 
+Bray for base on ray and better than ray
+
 ## 定位
 
-面向分布式强化学习在游戏场景下的落地进行优化，主要解决以下几个痛点问题：
+针对分布式强化学习在游戏场景下的落地进行优化，主要解决以下几个痛点问题：
 
 1. 线上推理和离线训练框架不统一，存在较大的迁移成本
 2. 游戏接入困难，涉及到多方联调
@@ -12,19 +14,24 @@
 1. 规范化游戏AI强化学习的接入的流程
 2. 提供简单干净的API，让游戏接入、算法调优、性能优化解耦
 
-具体的，下面是流程的接入细节：
+架构图（初版）：
+
+[架构图](./docs/structure.jpg)
+
+
+具体的，下面是详细的游戏接入流程：
 
 ## 推理接入流程
 
-这个阶段的目标是跑通，完成游戏服务器和游戏AI机器人交互过程，同时也为后续的强化训练打下基础。
+这个阶段的目标是跑通游戏服务器和游戏AI机器人交互过程，同时也为后续的强化训练打下基础。
 
 ### 一、Gamecore接入
 
-在真实的游戏业务场景下，Gamecore和Actor的软件依赖、算力需求、部署方案都有巨大的差异，本着通用性的原则，它们间的接口设计为Http协议的网络传输。部署方式可以采用容器化部署或软件包形式。
+在真实的游戏业务场景下，Gamecore和Actor的软件依赖、算力需求、部署方案都有巨大的差异，本着通用性的原则，它们间的接口设计为Http协议的网络传输。
 
 Http协议的完整定义如下：
 
-#### 请求包：
+#### 1. 请求包：
 
 > Http Header
 
@@ -38,11 +45,11 @@ Http协议的完整定义如下：
 
 任意的二进制数据，框架本身不会对其解析，Gamecore和Actor协商好序列化方式（json、protobuf）后，在Gamecore中进行序列化，在Actor中进行反序列化。
 
-#### 回复包：
+#### 2. 回复包：
 
 回复仅包含Http Body，里面是Actor序列化后返回的二进制数据。同样是和Gamecore协商好序列化方式。
 
-#### Gamecore接入示例
+#### 3. Gamecore接入示例
 
 [Python下的Gym Atari例子](./bray/benchmark/atari/gamecore.py)
 
@@ -50,9 +57,9 @@ Http协议的完整定义如下：
 
 Model指的是模仿学习或强化学习的模型，算法同学设计好网络结构后，交由框架进行优化。其中自动化部分包括计算图优化、算子优化、量化等，另外还有模型剪枝、蒸馏等需要手动调整。优化后的模型将会进行正确性验证，对比前后输出的绝对、相对误差。
 
-#### 模型优化流水线
+#### 1. 模型优化流水线
 
-#### 模型接入示例
+#### 2. 模型接入示例
 
 [Python下的Gym Atari简单PyTorch模型](./bray/benchmark/atari/model.py)
 
@@ -126,7 +133,7 @@ class Actor:
 
 Gamecore/Model/Actor可以并行开发，每个组件可以单独测试：
 
-1. Gamecore
+#### 1. Gamecore
 
 启动 [fake_actor.py](./bray/fake_actor.py) ，在里面的config中配置：
 
@@ -140,7 +147,7 @@ actor_port = 8000
 
 再启动需要测试的Gamecore连接到该Actor
 
-2. Model
+#### 2. Model
 
 Model的测试示例：
 
@@ -159,7 +166,7 @@ outputs = remote_model.forward(inputs)
 print(outputs)
 ```
 
-3. Actor
+#### 3. Actor
 
 启动 [fake_gamecore.py](./bray/fake_gamecore.py) ，在里面的config中配置：
 
