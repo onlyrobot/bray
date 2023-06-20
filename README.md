@@ -16,7 +16,7 @@ Bray for base on ray and better than ray
 
 架构图（初版）：
 
-[架构图](./docs/structure.jpg)
+![架构图](./docs/structure.jpg)
 
 
 具体的，下面是详细的游戏接入流程：
