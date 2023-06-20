@@ -9,7 +9,7 @@ actor_url = "http://localhost:8000/step"
 gym_id = "BeamRiderNoFrameskip-v4"
 
 
-def step(game_id, round_id, step_kind, data):
+def actor_step(game_id, round_id, step_kind, data):
     res = requests.post(
         actor_url,
         headers={
@@ -32,20 +32,20 @@ def make_env(gym_id: str):
 
 def rollout(gym_id: str, game_id: str):
     env = make_env(gym_id)
-    game_start_res = step(game_id, 0, "start", b"")
+    game_start_res = actor_step(game_id, 0, "start", b"")
     print(game_start_res)
     done, round_id, reward = False, 0, 0.0
     obs = env.reset()
     while not done:
         data = {"obs": obs.tolist(), "reward": reward}
-        res = step(game_id, round_id, "tick", json.dumps(data))
+        res = actor_step(game_id, round_id, "tick", json.dumps(data))
         cmd = json.loads(res)
         round_id += 1
         cmd = int(cmd["action"])
         obs, reward, done, _ = env.step(cmd)
     # final reward
     data = {"reward": reward}
-    game_end_res = step(game_id, 0, "end", json.dumps(data))
+    game_end_res = actor_step(game_id, 0, "end", json.dumps(data))
     print(game_end_res)
 
 

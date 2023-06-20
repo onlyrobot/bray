@@ -38,9 +38,12 @@ class RemoteModel:
         self.workers = [TorchModelWorker.remote(model) for _ in range(10)]
         initial_weights = model.get_weights()
         self.model_weights = ModelWeights.remote(self.workers, initial_weights)
+        self.worker_index = 0
 
     def forward(self, input):
-        return ray.get(self.workers[0].forward.remote(input))
+        worker_index = self.worker_index % len(self.workers)
+        self.worker_index += 1
+        return ray.get(self.workers[worker_index].forward.remote(input))
 
     def publish_weights(self, weights, version):
         self.model_weights.set_weights.remote(weights, version)
