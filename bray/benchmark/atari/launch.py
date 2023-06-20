@@ -5,7 +5,7 @@ import bray
 
 model = AtariModel()
 
-remote_model = bray.RemoteModel("model1", model)
+remote_model = bray.RemoteModel(model)
 
 remote_trainer = bray.RemoteTrainer(AtariTrainer, None)
 

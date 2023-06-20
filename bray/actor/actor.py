@@ -4,7 +4,7 @@ from ray import serve
 from starlette.requests import Request
 import time
 import asyncio
-from bray.actor.actor import Actor
+from bray.actor.base import Actor
 from bray.actor.base import Agent
 
 from enum import Enum
@@ -59,7 +59,7 @@ class ActorGateway:
 
 class RemoteActor:
     def __init__(self, Actor: Actor, agents: dict[str:Agent], config: any):
-        self.Actor, agents, config = Actor, agents, config
+        self.Actor, self.agents, self.config = Actor, agents, config
         self.workers = {}
 
     async def _check_workers(self, game_id):

@@ -10,7 +10,7 @@ NestedArray = NewType("NestedArray", any)
 
 
 def handle_nested_array(inputs: NestedArray, handler) -> NestedArray:
-    if isinstance(inputs, (np.array, torch.Tensor)):
+    if isinstance(inputs, (np.ndarray, torch.Tensor)):
         return handler(inputs)
     elif isinstance(inputs, (list, tuple)):
         return [handle_nested_array(i, handler) for i in inputs]
