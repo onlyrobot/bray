@@ -22,13 +22,16 @@ class ActorWorker:
 
     async def is_active(self) -> bool:
         return time.time() - self.active_time < 60
-
+    
 
 @serve.deployment(route_prefix="/step")
 class _RemoteActor:
     def __init__(self, Actor: type[Actor], agents: dict[str:Agent], config: any):
         self.Actor, self.agents, self.config = Actor, agents, config
         self.workers = {}
+        import logging
+        logger = logging.getLogger("ray.serve")
+        logger.setLevel(logging.WARNING)
 
     async def _check_workers(self, game_id):
         worker = self.workers.get(game_id, None)

@@ -39,16 +39,12 @@ class AtariModel(torch.nn.Module):
         logits = self.base_net(images)
         values = torch.squeeze(self.values_net(logits), dim=1)
         logits = self.logits_net(logits)
-        """ not support torch.jit.script version
-        actions = torch.distributions.categorical.Categorical(
-                logits=logits).sample()
-        """
         actions = torch.multinomial(torch.exp(logits), num_samples=1)
         actions = torch.squeeze(actions, dim=1)
         return values, logits, actions
     
     def get_weights(self) -> list[np.ndarray]:
-        [p.cpu().detach().numpy() for p in self.parameters()]
+        return [p.cpu().detach().numpy() for p in self.parameters()]
 
     def set_weights(self, weights: list[np.ndarray]):
         for target_p, p in zip(self.parameters(), weights):

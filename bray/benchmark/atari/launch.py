@@ -1,3 +1,5 @@
+import logging
+
 from .model import AtariModel
 from .actor import AtariActor
 from .trainer import AtariTrainer

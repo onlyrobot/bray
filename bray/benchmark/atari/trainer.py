@@ -29,13 +29,17 @@ class AtariTrainer(bray.Trainer):
     def __init__(self, config):
         self.config = config
 
-    def train(self, model, replays):
-        version = 0
-        for replay in replays:
-            print("Trainer.train")
-            print("replay", replay)
-            import time
 
-            time.sleep(1)
+    def train_step(self, model, replay):
+        pass
+
+    def train(self, remote_model, replays):
+        model = remote_model.get_model()
+        version = 1
+        for replay in replays:
+            self.train_step(model, replay)
+            weights = model.get_weights()
+            remote_model.publish_weights(weights, version)
             version += 1
-            model.publish_weights(1, version)
+            import time 
+            time.sleep(1)

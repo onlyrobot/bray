@@ -33,12 +33,12 @@ class TorchModelWorker:
         outputs = self.model(inputs)
         return handle_nested_array(outputs, lambda x: x.squeeze(0).numpy())
 
-    def set_weights(self, weights: NestedArray, version):
-        self.model.set_weights(weights, version)
+    def set_weights(self, weights: NestedArray):
+        self.model.set_weights(weights)
 
 
 @ray.remote
-class ModelWeights:
+class WeightsManager:
     def __init__(self, model_workers, weights: NestedArray):
         self.version = 0
         self.model_workers = model_workers
@@ -46,7 +46,7 @@ class ModelWeights:
 
     def set_weights(self, weights: NestedArray, version):
         for model_worker in self.model_workers:
-            model_worker.set_weights.remote(weights, self.version)
+            model_worker.set_weights.remote(weights)
         self.version = version
 
 
@@ -63,7 +63,7 @@ class RemoteModel:
         self.model = model
         self.workers = [TorchModelWorker.remote(model) for _ in range(10)]
         initial_weights = model.get_weights()
-        self.model_weights = ModelWeights.remote(self.workers, initial_weights)
+        self.weights_manager = WeightsManager.remote(self.workers, initial_weights)
         self.worker_index = 0
 
     def forward(self, inputs: NestedArray) -> NestedArray:
@@ -78,15 +78,6 @@ class RemoteModel:
         self.worker_index += 1
         return ray.get(self.workers[worker_index].forward.remote(inputs))
 
-    def publish_weights(self, weights: NestedArray, version):
-        """
-        发布模型的权重，会通知所有的ModelWorker更新权重
-        Args:
-            weights: 模型的权重，为一个numpy数组
-            version: 权重的版本号
-        """
-        self.model_weights.set_weights.remote(weights, version)
-
     def get_model(self) -> torch.nn.Module:
         """
         获取被封装的原始模型，在Trainer里面会用到
@@ -94,3 +85,13 @@ class RemoteModel:
             被封装的Pytorch模型
         """
         return self.model
+    
+    
+    def publish_weights(self, weights: NestedArray, version: int):
+        """
+        发布模型的权重，会通知所有的ModelWorker更新权重
+        Args:
+            weights: 模型的权重，为一个numpy数组
+            version: 权重的版本号，每次更新权重都需要增加版本号
+        """
+        self.weights_manager.set_weights.remote(weights, version)
