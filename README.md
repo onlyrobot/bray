@@ -16,7 +16,7 @@ Bray for base on ray and better than ray
 
 架构图（初版）：
 
-![架构图](./docs/structure.jpg)
+![架构图](./docs/img/structure.jpg)
 
 
 具体的，下面是详细的游戏接入流程：
@@ -35,7 +35,7 @@ Http协议的完整定义如下：
 
 > Http Header
 
-![Http Header](./docs/http_header.png)
+![Http Header](./docs/img/http_header.png)
 
 `step_kind` 用于区分有状态和无状态服务场景，有状态情况下请求的顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` ，无状态下固定为 `auto` 就行。
 
@@ -99,7 +99,7 @@ class Actor:
         """
         raise NotImplementedError
 
-    def tick(self, round_id: int, data: bytes) -> bytes:
+    def tick(self, data: bytes) -> bytes:
         """
         执行一步游戏，由Gamecore调用，在这里需要执行以下操作：
         1. 从data中解析出游戏状态
@@ -107,21 +107,19 @@ class Actor:
         3. 将action序列化为字节串，返回给Gamecore
         4. 收集trajectory，将其push到agent的remote_buffer中
         Args:
-            round_id: 当前游戏的回合数
             data: 一个任意的字节串，由Gamecore传入，通常是游戏状态
         Returns:
             一个任意的字节串，通常是序列化后的action
         """
         raise NotImplementedError
 
-    def end(self, round_id: int, data: bytes) -> bytes:
+    def end(self, data: bytes) -> bytes:
         """
         游戏结束时调用，由Gamecore调用，在这里需要执行以下操作：
         1. 从data中解析出游戏状态（通常是最后一帧的reward）
         2. 终止收集trajectory，将其push到agent的remote_buffer中
         3. 进行一些清理工作
         Args:
-            round_id: 当前游戏的回合数
             data: 一个任意的字节串，由Gamecore传入
         Returns:
             一个任意的字节串，通常是空的，或者一些统计信息

@@ -5,12 +5,12 @@ class FakeActor(bray.Actor):
         self.agents = agents
         print("FakeActor.__init__: ", agents, config, game_id, data)
 
-    def tick(self, round_id, data):
-        print("FakeActor.tick: ", round_id, data)
+    def tick(self, data):
+        print("FakeActor.tick: ", data)
         return self.config["fake_actor_tick_return"]
 
-    def end(self, round_id, data):
-        print("FakeActor.end: ", round_id, data)
+    def end(self, data):
+        print("FakeActor.end: ", data)
         return self.config["fake_actor_end_return"]
     
 config = {

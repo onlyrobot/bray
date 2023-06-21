@@ -37,16 +37,16 @@ class MyActor:
         self.agents = agents
         print("Actor.__init__: ", agents, config, game_id, data)
 
-    def tick(self, round_id, data):
+    def tick(self, data):
         state = data
         agents = self.agents["agent1"]
         action, value = agent.remote_model.forward(state)
         agent.remote_buffer.push((state, action, value))
-        print("Actor.step: ", round_id, data)
+        print("Actor.step: ", data)
         return data
 
-    def end(self, round_id, data):
-        print("Actor.end: ", round_id, data)
+    def end(self, data):
+        print("Actor.end: ", data)
         return data
 
 

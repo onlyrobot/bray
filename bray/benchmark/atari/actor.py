@@ -5,6 +5,7 @@ import json
 class AtariActor(bray.Actor):
     def __init__(self, agents, config, game_id, data):
         self.agents = agents
+        self.game_id = game_id
         print("Actor.__init__: ", agents, config, game_id, data)
 
     def _append_to_trajectory(self, trajectory, end=False):
@@ -12,20 +13,20 @@ class AtariActor(bray.Actor):
         # agent.remote_buffer.push(replay)
         pass
 
-    def tick(self, round_id, data):
+    def tick(self, data):
         data = json.loads(data)
-        print("Actor.tick: ", round_id)
+        print("Actor.tick: ", self.game_id)
         agent = self.agents["agent1"]
         obs = np.array(data["obs"], dtype=np.float32)
         reward = data["reward"]
         value, logit, action = agent.remote_model.forward(obs)
         self._append_to_trajectory((obs, action, reward, value, logit))
-        print("Actor.step: ", round_id)
+        print("Actor.step: ")
         return json.dumps({"action": action.tolist()})
 
-    def end(self, round_id, data):
+    def end(self, data):
         data = json.loads(data)
         reward = data["reward"]
         self._append_to_trajectory((None, None, reward, None, None), end=True)
-        print("Actor.end: ", round_id)
+        print("Actor.end: ", self.game_id)
         return b"Game ended."
