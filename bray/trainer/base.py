@@ -1,6 +1,7 @@
 from typing import Iterator
 
-from bray.model.model import NestedArray, RemoteModel
+from bray.model.model import RemoteModel
+from bray.utils.nested_array import NestedArray
 
 
 class Trainer:

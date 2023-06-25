@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 
 
 class AtariModel(torch.nn.Module):
@@ -42,10 +41,3 @@ class AtariModel(torch.nn.Module):
         actions = torch.multinomial(torch.exp(logits), num_samples=1)
         actions = torch.squeeze(actions, dim=1)
         return values, logits, actions
-    
-    def get_weights(self) -> list[np.ndarray]:
-        return [p.cpu().detach().numpy() for p in self.parameters()]
-
-    def set_weights(self, weights: list[np.ndarray]):
-        for target_p, p in zip(self.parameters(), weights):
-            target_p.copy_(torch.from_numpy(p))

@@ -1,4 +1,0 @@
-ray[all]==2.5.0
-torch
-horovod[ray]==0.28.1
-black

@@ -20,16 +20,17 @@ class ActorWorker:
     def end(self, data: bytes) -> bytes:
         return self.actor.end(data)
 
-    async def is_active(self) -> bool:
+    def is_active(self) -> bool:
         return time.time() - self.active_time < 60
-    
+
 
 @serve.deployment(route_prefix="/step")
-class _RemoteActor:
+class ActorGateway:
     def __init__(self, Actor: type[Actor], agents: dict[str:Agent], config: any):
         self.Actor, self.agents, self.config = Actor, agents, config
         self.workers = {}
         import logging
+
         logger = logging.getLogger("ray.serve")
         logger.setLevel(logging.WARNING)
 
@@ -45,16 +46,12 @@ class _RemoteActor:
         await asyncio.sleep(60)
         await asyncio.create_task(self._check_workers(game_id))
 
-    async def _parse_request(self, req: Request):
+    async def __call__(self, req: Request) -> bytes:
+        step_kind = req.headers.get("step_kind")
         game_id = req.headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
         data = await req.body()
-        return game_id, data
-
-    async def __call__(self, req: Request) -> bytes:
-        step_kind = req.headers.get("step_kind")
-        game_id, data = await self._parse_request(req)
         if step_kind == "start":
             return await self.start(game_id, data)
         elif step_kind == "tick":
@@ -107,13 +104,17 @@ class _RemoteActor:
 
 class RemoteActor:
     def __init__(
-        self,
-        port: int,
-        Actor: type[Actor],
-        agents: dict[str:Agent] = None,
-        config: any = None,
+        self, Actor: type[Actor], agents: dict[str:Agent] = None, config: any = None
     ):
+        self.gateway = ActorGateway.bind(Actor, agents, config)
+
+    def serve(self, port=8000, background=True):
         print("Starting ActorGateway.")
-        self._remote_actor = _RemoteActor.bind(Actor, agents, config)
-        serve.run(self._remote_actor, port=port)
+        serve.run(self.gateway, port=port)
         print("ActorGateway started.")
+        if background:
+            return
+        # wait for SIGTERM or SIGINT (i.e. Ctrl+C) to stop the actor
+        import signal
+
+        signal.sigwait([signal.SIGTERM, signal.SIGINT])

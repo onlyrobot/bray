@@ -1,53 +1,101 @@
-import numpy as np
+import asyncio
+
 import torch
 import ray
-
-from typing import NewType
-
-# 可以是单个 numpy/tensor 数组，也可以是一个 numpy/tensor 数组的列表，
-# 或者是一个 numpy/tensor 数组的字典，或者是它们的嵌套
-NestedArray = NewType("NestedArray", any)
+from bray.utils.nested_array import NestedArray, make_batch, handle_nested_array
 
 
-def handle_nested_array(inputs: NestedArray, handler) -> NestedArray:
-    if isinstance(inputs, (np.ndarray, torch.Tensor)):
-        return handler(inputs)
-    elif isinstance(inputs, (list, tuple)):
-        return [handle_nested_array(i, handler) for i in inputs]
-    elif isinstance(inputs, dict):
-        return {k: handle_nested_array(v, handler) for k, v in inputs.items()}
-    else:
-        raise TypeError("Unsupported type: {}".format(type(inputs)))
+def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
+    return [p.cpu().detach().numpy() for p in model.parameters()]
+
+
+def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
+    for p, w in zip(model.parameters(), weights):
+        p.copy_(torch.as_tensor(w))
 
 
 @ray.remote
 class TorchModelWorker:
-    def __init__(self, model: torch.nn.Module):
-        model.requires_grad_(False)
-        model.eval()
+    async def __init__(self, model):
         self.model = model
+        weights, self.current_step = await model.get_weights.remote()
+        torch_model = ray.get(model.get_model.remote())
+        self.torch_model = torch_model
+        torch_model.requires_grad_(False)
+        torch_model.eval()
+        set_torch_model_weights(torch_model, weights)
+        asyncio.create_task(self._subscribe_weights())
 
     async def forward(self, inputs: NestedArray) -> NestedArray:
+        inputs = make_batch([inputs])
         inputs = handle_nested_array(inputs, torch.as_tensor)
-        inputs = handle_nested_array(inputs, lambda x: x.unsqueeze(0))
-        outputs = self.model(inputs)
-        return handle_nested_array(outputs, lambda x: x.squeeze(0).numpy())
+        outputs = self.torch_model(inputs)
+        return handle_nested_array(
+            outputs, lambda x: x.squeeze(0).numpy(), type_check=False
+        )
 
-    def set_weights(self, weights: NestedArray):
-        self.model.set_weights(weights)
+    async def _subscribe_weights(self):
+        weights, step = await self.model.subscribe_weights.remote(self.current_step)
+        assert step > self.current_step
+        self.current_step = step
+        set_torch_model_weights(self.torch_model, weights)
+        asyncio.create_task(self._subscribe_weights())
 
 
 @ray.remote
-class WeightsManager:
-    def __init__(self, model_workers, weights: NestedArray):
-        self.version = 0
-        self.model_workers = model_workers
-        self.weights = weights
+class Model:
+    async def __init__(self, torch_model: torch.nn.Module):
+        self.torch_model = torch_model
+        self.weights = get_torch_model_weights(torch_model)
+        self.step = 0
+        self.step_cond = asyncio.Condition()
+        self_handle = ray.get_runtime_context().current_actor
+        self.workers = [TorchModelWorker.remote(self_handle) for _ in range(4)]
+        asyncio.create_task(self._health_check())
 
-    def set_weights(self, weights: NestedArray, version):
-        for model_worker in self.model_workers:
-            model_worker.set_weights.remote(weights)
-        self.version = version
+    async def set_weights(self, weights: NestedArray, step):
+        if step <= self.step:
+            return
+        self.weights = weights
+        self.step = step
+        async with self.step_cond:
+            self.step_cond.notify_all()
+
+    def get_model(self) -> torch.nn.Module:
+        return self.torch_model
+
+    def get_workers(self) -> list[TorchModelWorker]:
+        return self.workers
+
+    def get_weights(self) -> tuple[NestedArray, int]:
+        return self.weights, self.step
+
+    async def subscribe_weights(self, current_step):
+        async with self.step_cond:
+            await self.step_cond.wait_for(lambda: self.step > current_step)
+        return self.weights, self.step
+
+    async def _is_health(self, worker):
+        try:
+            await worker.forward.remote("fake data here")
+            return True
+        except ray.exceptions.RayActorError:
+            return False
+        finally:
+            return True
+
+    async def _health_check(self):
+        worker_num = len(self.workers)
+        active_workers = [
+            worker
+            for worker in self.workers[:worker_num]
+            if await self._is_health(worker)
+        ]
+        old_workers = self.workers
+        self.workers = active_workers
+        self.workers.extend(old_workers[worker_num:])
+        await asyncio.sleep(60)
+        asyncio.create_task(self._health_check())
 
 
 class RemoteModel:
@@ -55,28 +103,32 @@ class RemoteModel:
     RemoteModel封装了一个PyTorch模型，它会在Ray集群中创建多个TorchModelWorker实现并行计算
     """
 
-    def __init__(self, model: torch.nn.Module):
+    def __init__(self, name: str, model: torch.nn.Module):
         """
         Args:
             model: 目前支持PyTorch模型
         """
-        self.model = model
-        self.workers = [TorchModelWorker.remote(model) for _ in range(10)]
-        initial_weights = model.get_weights()
-        self.weights_manager = WeightsManager.remote(self.workers, initial_weights)
-        self.worker_index = 0
+        self.model = Model.options(
+            name=name, get_if_exists=True, lifetime="detached"
+        ).remote(model)
+        self.workers, self.worker_index = [], 0
+        self.sync()
 
-    def forward(self, inputs: NestedArray) -> NestedArray:
+    def forward(self, inputs: NestedArray) -> ray.ObjectRef:
         """
-        执行模型的前向计算，返回模型的输出。
+        执行模型的前向计算，返回模型的输出
         Args:
             inputs: 模型的输入
         Returns:
             模型的输出
         """
-        worker_index = self.worker_index % len(self.workers)
+        index = self.worker_index % len(self.workers)
         self.worker_index += 1
-        return ray.get(self.workers[worker_index].forward.remote(inputs))
+        try:
+            return self.workers[index].forward.remote(inputs)
+        except ray.exceptions.RayActorError:
+            self.sync()
+            return self.forward(inputs)
 
     def get_model(self) -> torch.nn.Module:
         """
@@ -84,14 +136,24 @@ class RemoteModel:
         Returns:
             被封装的Pytorch模型
         """
-        return self.model
-    
-    
-    def publish_weights(self, weights: NestedArray, version: int):
+        return ray.get(self.model.get_model.remote())
+
+    def get_weights(self) -> tuple[NestedArray, int]:
+        """
+        获取模型的最新权重和版本号
+        Returns:
+            模型的权重和版本号
+        """
+        return ray.get(self.model.get_weights.remote())
+
+    def publish_weights(self, weights: NestedArray, step: int):
         """
         发布模型的权重，会通知所有的ModelWorker更新权重
         Args:
             weights: 模型的权重，为一个numpy数组
             version: 权重的版本号，每次更新权重都需要增加版本号
         """
-        self.weights_manager.set_weights.remote(weights, version)
+        self.model.set_weights.remote(weights, step)
+
+    def sync(self):
+        self.workers = ray.get(self.model.get_workers.remote())

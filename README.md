@@ -33,21 +33,17 @@ Http协议的完整定义如下：
 
 #### 1. 请求包：
 
-> Http Header
-
 ![Http Header](./docs/img/http_header.png)
 
-`step_kind` 用于区分有状态和无状态服务场景，有状态情况下请求的顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` ，无状态下固定为 `auto` 就行。
+Header中的 `step_kind` 用于区分有状态和无状态服务场景，有状态情况下请求的顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` ，无状态下固定为 `auto` 就行。
 
-强化训练过程中需要知道完整的trajectory序列所以一般都要求有状态，而为了让推理和训练复用同一套代码（降低接入成本、保证迁移正确性），线上推理也都尽量使用有状态服务。
+> 强化训练过程中需要知道完整的trajectory序列所以一般都要求有状态，而为了让推理和训练复用同一套代码（降低接入成本、保证迁移正确性），线上推理也都尽量使用有状态服务。
 
-> Http Body
-
-任意的二进制数据，框架本身不会对其解析，Gamecore和Actor协商好序列化方式（json、protobuf）后，在Gamecore中进行序列化，在Actor中进行反序列化。
+Http的body为任意数据，框架本身不会对其解析，Gamecore和Actor协商好序列化方式（json、protobuf）后，在Gamecore中进行序列化，在Actor中进行反序列化。
 
 #### 2. 回复包：
 
-回复仅包含Http Body，里面是Actor序列化后返回的二进制数据。同样是和Gamecore协商好序列化方式。
+回复仅包含Http Body，里面是Actor序列化后返回的数据。同样是和Gamecore协商好序列化方式。
 
 #### 3. Gamecore接入示例
 
@@ -151,6 +147,7 @@ Model的测试示例：
 
 ```python
 import bray
+import ray
 
 model = MyModel()   # tf/torch model
 
@@ -160,7 +157,7 @@ inputs = {
     "image": np.array([1, 2, 3], dtype=np.float32)
 }
 
-outputs = remote_model.forward(inputs)
+outputs = ray.get(remote_model.forward(inputs))
 print(outputs)
 ```
 
