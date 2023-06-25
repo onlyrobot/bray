@@ -1,7 +1,11 @@
 from typing import Iterator
 import torch
 
-from bray.utils.nested_array import NestedArray, make_batch
+from bray.utils.nested_array import (
+    NestedArray,
+    make_batch,
+    handle_nested_array,
+)
 
 
 class BatchBuffer:
@@ -28,7 +32,10 @@ class TorchTensorBuffer:
         self.buffer = buffer
 
     def __next__(self) -> NestedArray:
-        return torch.from_numpy(next(self.buffer))
+        return handle_nested_array(
+            next(self.buffer),
+            torch.from_numpy,
+        )
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self

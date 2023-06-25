@@ -25,11 +25,11 @@ def cal_entroy(logits):
 
 def train_step(remote_model, replay, model, optimizer, weights_publish_interval, step):
     obs, value, logit, action, advantage = (
-        torch.as_tensor(replay["obs"]),
-        torch.as_tensor(replay["value"]),
-        torch.as_tensor(replay["logit"]),
-        torch.as_tensor(replay["action"]),
-        torch.as_tensor(replay["advantage"]),
+        replay["obs"],
+        replay["value"],
+        replay["logit"],
+        replay["action"],
+        replay["advantage"],
     )
     local_batch_size = advantage.shape[0]
     global_batch_size = local_batch_size * hvd.size()
@@ -75,13 +75,15 @@ def train_step(remote_model, replay, model, optimizer, weights_publish_interval,
     torch.nn.utils.clip_grad_norm_(model.parameters(), 40.0)
     with optimizer.skip_synchronize():
         optimizer.step()
+    if hvd.rank() != 0:
+        return
     bray.merge("loss", loss)
     bray.merge("policy_loss", policy_loss)
     bray.merge("value_loss", value_loss)
     bray.merge("entropy_loss", entropy_loss)
     bray.merge("kl_loss", kl_loss)
-    weights = bray.get_torch_model_weights(model)
-    if hvd.rank() == 0 and step % weights_publish_interval == 0:
+    if step % weights_publish_interval == 0:
+        weights = bray.get_torch_model_weights(model)
         remote_model.publish_weights(weights)
     print(f"Train step {step}, loss: {loss.item()}")
 
@@ -98,6 +100,7 @@ def train_atari(model, buffer, weights_publish_interval, num_steps):
     # initialize buffer
     remote_buffer = bray.RemoteBuffer(name=buffer)
     buffer = bray.BatchBuffer(remote_buffer, batch_size=8)
+    buffer = bray.TorchTensorBuffer(buffer)
     for i in range(num_steps):
         replay = next(buffer)
         train_step(

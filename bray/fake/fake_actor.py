@@ -2,9 +2,13 @@ import bray
 
 
 class FakeActor(bray.Actor):
-    def __init__(self, agents, config, game_id, data):
-        self.agents, self.config = agents, config
-        print("FakeActor.__init__: ", agents, config, game_id, data)
+    def __init__(self, config):
+        self.config = config
+        print("FakeActor.__init__: ", config)
+
+    def start(self, game_id, data):
+        print("FakeActor.start: ", game_id, data)
+        return self.config["fake_actor_start_return"]
 
     def tick(self, data):
         print("FakeActor.tick: ", data)
@@ -16,16 +20,13 @@ class FakeActor(bray.Actor):
 
 
 config = {
+    "fake_actor_start_return": b"fake_actor_start_return",
     "fake_actor_tick_return": b"fake_actor_tick_return",
     "fake_actor_end_return": b"fake_actor_end_return",
 }
 actor_port = 8000
 
-remote_actor = bray.RemoteActor(
-    port=actor_port, Actor=FakeActor, agents=None, config=config
-)
+remote_actor = bray.RemoteActor(port=actor_port)
+remote_actor.serve(Actor=FakeActor, config=config)
 
-# wait for SIGTERM or SIGINT (i.e. Ctrl+C) to stop the actor
-import signal
-
-signal.sigwait([signal.SIGTERM, signal.SIGINT])
+bray.run_until_asked_to_stop()

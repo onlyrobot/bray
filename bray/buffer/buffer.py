@@ -69,7 +69,9 @@ class Buffer:
 class RemoteBuffer:
     def __init__(self, name: str):
         self.name = name
-        self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
+        self.buffer = Buffer.options(
+            name=name, get_if_exists=True, lifetime="detached"
+        ).remote()
         self.workers, self.worker_index = [], 0
         self.sync()
         self.buffer_worker = None

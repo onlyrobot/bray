@@ -119,5 +119,5 @@ class RemoteActor:
         """
         self.gateway = ActorGateway.bind(Actor, *args, **kwargs)
         print("Starting ActorGateway.")
-        serve.run(self.gateway, port=self.port)
+        serve.run(self.gateway, host="0.0.0.0", port=self.port)
         print("ActorGateway started.")

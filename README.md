@@ -14,122 +14,44 @@ Bray for based on ray and better than ray
 1. 规范化游戏AI强化学习的接入的流程
 2. 提供简单干净的API，让游戏接入、算法调优、性能优化解耦
 
-架构图（初版）：
+架构图：
 
 ![架构图](./docs/img/structure.jpg)
 
+## 环境依赖
 
-具体的，下面是详细的游戏接入流程：
+训练请使用镜像： xxx
 
-## 推理接入流程
+部署请使用镜像：
 
-这个阶段的目标是跑通游戏服务器和游戏AI机器人交互过程，同时也为后续的强化训练打下基础。
+新的游戏项目接入时，在根目录下以项目名创建文件夹，文件组织形式参考 [Atari Example](./benchmark/atari/)
 
-### 一、Gamecore接入
 
-在真实的游戏业务场景下，Gamecore和Actor的软件依赖、算力需求、部署方案都有巨大的差异，本着通用性的原则，它们间的接口设计为Http协议的网络传输。
+## 模块化接入
 
-Http协议的完整定义如下：
+一个强化学习任务需要定制化Gamecore、Model、Actor、Trainer这四个组件，其中Trainer只在训练阶段使用。
 
-#### 1. 请求包：
+Bray很好的将这四部分解耦开来，支持每个模块独立开发、测试和验证，最后无缝式集成。下面是具体的接入流程：
+
+### 1. Gamecore接入
+
+Gamecore指的是强化学习中的仿真环境。在真实的游戏业务场景下，Gamecore和Actor的软件依赖、算力需求、部署方案都有巨大的差异，本着通用性的原则，它们间的接口设计为Http协议。Gamecore为请求发起方，Actor为服务端。
+
+#### Http协议的完整定义如下：
 
 ![Http Header](./docs/img/http_header.png)
 
 Header中的 `step_kind` 用于区分有状态和无状态服务场景，有状态情况下请求的顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` ，无状态下固定为 `auto` 就行。
 
-> 强化训练过程中需要知道完整的trajectory序列所以一般都要求有状态，而为了让推理和训练复用同一套代码（降低接入成本、保证迁移正确性），线上推理也都尽量使用有状态服务。
+> 强化训练过程中需要知道完整的trajectory序列所以一般都要求有状态，而为了让推理和训练复用同一套代码（降低接入成本、保证迁移正确性），线上推理也都使用有状态服务。
 
 Http的body为任意数据，框架本身不会对其解析，Gamecore和Actor协商好序列化方式（json、protobuf）后，在Gamecore中进行序列化，在Actor中进行反序列化。
 
-#### 2. 回复包：
+> 注意： 回复包的Header被忽略，为空
 
-回复仅包含Http Body，里面是Actor序列化后返回的数据。同样是和Gamecore协商好序列化方式。
+#### 接入流程
 
-#### 3. Gamecore接入示例
-
-[Python下的Gym Atari例子](./bray/benchmark/atari/gamecore.py)
-
-### 二、Model接入
-
-Model指的是模仿学习或强化学习的模型，算法同学设计好网络结构后，交由框架进行优化。其中自动化部分包括计算图优化、算子优化、量化等，另外还有模型剪枝、蒸馏等需要手动调整。优化后的模型将会进行正确性验证，对比前后输出的绝对、相对误差。
-
-#### 1. 模型优化流水线
-
-#### 2. 模型接入示例
-
-[Python下的Gym Atari简单PyTorch模型](./bray/benchmark/atari/model.py)
-
-### 三、Actor接入
-
-Actor指的是强化学习中和环境交互，采样得到Replay的有状态执行单元，负责将Gamecore中的结构化状态（敌人、地图、Boss）转化为模型向量输入（numpy array形式），以及将模型输出转为Gamecore识别的结构化指令，一些模型无法实现的决策树逻辑也放在这里。
-
-Actor是Python中的一个类，暴露以下三个接口：
-
-```python
-@dataclasses.dataclass
-class Agent:
-    """
-    Agent代表了Actor中的一个智能体，这里定义了它的基本属性
-    """
-
-    remote_model: RemoteModel
-    remote_buffer: RemoteBuffer
-
-
-class Actor:
-    """
-    Actor是一个有状态服务接受来自Gamecore的step调用，调用的顺序是：
-    start(__init__) -> tick -> tick -> ... -> end
-    """
-
-    def __init__(
-        self, agents: dict[str, Agent], config: any, game_id: str, data: bytes
-    ):
-        """
-        初始化一个新的Actor，当一局新的游戏开始时，会调用这个方法
-        Args:
-            agents: 一个字典，key是agent的名字，value是agent的实例
-            config: 一个任意的配置对象，由RemoteActor传入
-            game_id: 一个唯一的游戏ID，由Gamecore传入
-            data: 一个任意的字节串，由Gamecore传入，通常是空的
-        """
-        raise NotImplementedError
-
-    def tick(self, data: bytes) -> bytes:
-        """
-        执行一步游戏，由Gamecore调用，在这里需要执行以下操作：
-        1. 从data中解析出游戏状态
-        2. 调用agent的remote_model.forward方法，获取action
-        3. 将action序列化为字节串，返回给Gamecore
-        4. 收集trajectory，将其push到agent的remote_buffer中
-        Args:
-            data: 一个任意的字节串，由Gamecore传入，通常是游戏状态
-        Returns:
-            一个任意的字节串，通常是序列化后的action
-        """
-        raise NotImplementedError
-
-    def end(self, data: bytes) -> bytes:
-        """
-        游戏结束时调用，由Gamecore调用，在这里需要执行以下操作：
-        1. 从data中解析出游戏状态（通常是最后一帧的reward）
-        2. 终止收集trajectory，将其push到agent的remote_buffer中
-        3. 进行一些清理工作
-        Args:
-            data: 一个任意的字节串，由Gamecore传入
-        Returns:
-            一个任意的字节串，通常是空的，或者一些统计信息
-        """
-        raise NotImplementedError
-```
-
-### 四、本地测试和联调
-
-Gamecore/Model/Actor可以并行开发，每个组件可以单独测试：
-
-#### 1. Gamecore
-
-启动 [fake_actor.py](./bray/fake_actor.py) ，在里面的config中配置：
+1. 启动 [FakeActor](./bray/fake/fake_actor.py) ，可以在config中修改FakeActor的行为：
 
 ```python
 config = {
@@ -139,47 +61,76 @@ config = {
 actor_port = 8000
 ```
 
-再启动需要测试的Gamecore连接到该Actor
+2. 启动Gamecore连接到该Actor，按照上面的 Http 协议发出请求，跑通流程
+3. 逐渐增加 Gamecore 的实例数量，得到CPU、内存和网络的压测数据
 
-#### 2. Model
+#### Gamecore的最佳实践
 
-Model的测试示例：
+* [Python下的Gym Atari使用requests库和多线程](./benchmark/atari/gamecore.py)
+* [C++待完善]()
+
+### 2. Model 接入
+
+Model指的是深度学习模型。算法同学设计好网络结构后，交由框架进行推理优化、权重检查点管理。
+
+Model接入主要是为了保证以下几点：
+
+* 模型能够正常地被序列化和反序列化，在分布式环境和异构计算设备上能够正确的输出结果
+* 框架集成的计算图优化、算子优化、量化等优化pipeline能够跑通，且通过正确性验证
+* 模型能够被正确的 `get_weights` 和 `set_weights` 
+
+模型接入流程非常简单：[Gym Atari的简单PyTorch模型](./benchmark/atari/model.py)
+
+### 3. Actor接入
+
+强化学习中的Actor一般指的是和环境交互，采样得到Replay的有状态执行单元。它的具体功能包括：
+
+* 充当Server被Gamecore调用
+* 将Gamecore发过来的结构化状态（敌人、地图）转为模型的向量输入（numpy.ndarray）
+* 调用模型的forward接口，得到模型输出
+* 将模型输出转为Gamecore识别的结构化指令并返回给Gamecore
+* 收集trajectory，计算奖励，push到Buffer中
+* 处理模型不擅长的决策树逻辑
+
+框架已经实现了Server和网关路由的功能，用户需要继承 [Actor基类](./bray/actor/base.py) ，实现其中的三个方法，并交给RemoteActor调度。
+
+Actor接入依赖Gamecore和Model，可以使用FakeGamecore和FakeModel来解耦。
+
+[Gym Atari的Actor示例](./benchmark/atari/actor.py)。
+
+### 4. Trainer接入
+
+Trainer从Buffer中获取Replay进行训练Model，用户需要实现一个train函数，交给RemoteTrainer进行分布式调度。
+
+[Gym Atari的Trainer示例](./benchmark/atari/trainer.py)
+
+## 启动脚本
+
+将上面的Gamecore、Actor、Model、Trainer集成到一起：
+
+[Gym Atari的训练脚本](./benchmark/atari/launch.py)
+
+[Gym Atari的部署脚本](./benchmark/atari/deploy.py)
+
+## 实验管理
+
+bray基于分布式文件存储做实验管理，通过下面的 `bray.init` 函数初始化当前训练任务：
 
 ```python
-import bray
-import ray
-
-model = MyModel()   # tf/torch model
-
-remote_model = bray.RemoteModel("model1", model)
-
-inputs = {
-    "image": np.array([1, 2, 3], dtype=np.float32)
-}
-
-outputs = ray.get(remote_model.forward(inputs))
-print(outputs)
+# 将会创建 ./atari-pengyao/ppo-v0 目录
+bray.init(project="./atari-pengyao", trial="ppo-v0")
 ```
 
-#### 3. Actor
+当前session创建的所有的Model、Actor、Trainer、Buffer都将位于该实验目录下。
 
-启动 [fake_gamecore.py](./bray/fake_gamecore.py) ，在里面的config中配置：
+使用 tensorboard 查看训练指标：
 
-```python
-config = {
-    "fake_gamecore_step_start_data": b"fake_gamecore_step_start_data",
-    "fake_gamecore_step_tick_data": b"fake_gamecore_step_tick_data",
-    "fake_gamecore_step_end_data": b"fake_gamecore_step_end_data",
-}
-actor_url = "http://localhost:8000/step"
+```bash
+tensorboard --logdir ./atari-pengyao/
 ```
 
-再启动需要测试的Actor，启动后FakeGamecore会自动连接过来并不间断发送请求。
+## 高级训练
 
-## 训练接入流程
+### SelfPlay
 
-### 一、Trainer接入
-
-### 二、Buffer接入
-
-### 三、高级训练方法
+### League
