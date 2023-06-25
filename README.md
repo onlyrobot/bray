@@ -1,6 +1,6 @@
 # Bray强化学习推理训练框架
 
-Bray for base on ray and better than ray
+Bray for based on ray and better than ray
 
 ## 定位
 

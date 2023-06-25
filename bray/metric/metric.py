@@ -88,7 +88,7 @@ def get_metrics_worker() -> MetricsWorker:
     return metrics_worker
 
 
-def merge(name: str, value: float, **kwargs) -> ray.ObjectRef:
+def merge(name: str, value: float, **kwargs):
     """
     输出指标到TensorBoard，支持在集群任何地方调用
     Args:
@@ -96,7 +96,7 @@ def merge(name: str, value: float, **kwargs) -> ray.ObjectRef:
         value: 指标的值
     """
     metrics_worker = get_metrics_worker()
-    return metrics_worker.merge(name, Metric(1, value), **kwargs)
+    metrics_worker.merge(name, Metric(1, value), **kwargs)
 
 
 def query(name: str, kind: str = "avg", **kwargs) -> float | int:
@@ -116,14 +116,3 @@ def query(name: str, kind: str = "avg", **kwargs) -> float | int:
         return metric.cnt
     else:
         raise ValueError(f"Unsupported kind: {kind}")
-
-
-if __name__ == "__main__":
-    ray.get(merge("test", 1))
-    assert query("test") == 1
-    ray.get(merge("test", 2))
-    assert query("test") == 1.5
-    merge("test", 3)
-    time.sleep(5)
-    assert query("test") == 2
-    print("pass")
