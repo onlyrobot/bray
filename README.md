@@ -20,7 +20,7 @@ Bray for based on ray and better than ray
 
 ## 环境依赖
 
-训练请使用镜像： xxx
+训练请使用镜像： `hub.fuxi.netease.com/zhiqi-gameai/bray/bray:dev`
 
 部署请使用镜像：
 
