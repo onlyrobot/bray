@@ -20,13 +20,18 @@ def gae(trajectory: list[NestedArray]) -> None:
 
 
 class AtariActor(bray.Actor):
-    def __init__(self, agents, config, game_id, data: bytes):
-        self.agents, self.config = agents, config
-        self.agent = agents["agent1"]
+    def __init__(self, model: str, buffer: str = None):
+        self.remote_model = bray.RemoteModel(name=model)
+        self.remote_buffer = None
+        if buffer:
+            self.remote_buffer = bray.RemoteBuffer(name=buffer)
+
+    def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
         self.trajectory = []
         self.episode_reward = 0.0
         print("Actor.start: ", game_id)
+        return b"Game started."
 
     def _append_to_trajectory(
         self,
@@ -37,8 +42,7 @@ class AtariActor(bray.Actor):
         logit: NestedArray,
         end=False,
     ):
-        remote_buffer = self.agent.remote_buffer
-        if not remote_buffer:
+        if not self.remote_buffer:
             return
         # clip reward
         reward = np.array(np.sign(reward), dtype=np.float32)
@@ -46,7 +50,7 @@ class AtariActor(bray.Actor):
             self.trajectory[-1]["reward"] = reward
         if end or len(self.trajectory) > 128:
             gae(self.trajectory)
-            remote_buffer.push(*self.trajectory)
+            self.remote_buffer.push(*self.trajectory)
             self.trajectory = []
         transition = {
             "obs": obs,
@@ -62,9 +66,7 @@ class AtariActor(bray.Actor):
         obs = np.array(data["obs"], dtype=np.float32)
         reward = data["reward"]
         self.episode_reward += reward
-        beg = time.time()
-        value, logit, action = ray.get(self.agent.remote_model.forward(obs))
-        bray.merge("forward_time_ms", (time.time() - beg) * 1000)
+        value, logit, action = ray.get(self.remote_model.forward(obs))
         self._append_to_trajectory(obs, action, reward, value, logit)
         return json.dumps({"action": action.tolist()})
 

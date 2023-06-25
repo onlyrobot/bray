@@ -1,36 +1,27 @@
-import dataclasses
-from bray.model.model import RemoteModel
-from bray.buffer.buffer import RemoteBuffer
-
-
-@dataclasses.dataclass
-class Agent:
-    """
-    Agent代表了Actor中的一个智能体，这里定义了它的基本属性
-    """
-
-    remote_model: RemoteModel
-    remote_buffer: RemoteBuffer
-
-
 class Actor:
     """
     Actor是一个有状态服务接受来自Gamecore的step调用，调用的顺序是：
-    start(__init__) -> tick -> tick -> ... -> end
+    start -> tick -> tick -> ... -> end
     """
 
-    def __init__(
-        self, agents: dict[str, Agent], config: any, game_id: str, data: bytes
-    ):
+    def __init__(self, *args, **kwargs):
         """
-        初始化一个新的Actor，当一局新的游戏开始时，会调用这个方法
+        初始化一个新的Actor，当一局新的游戏开始之前时，会调用这个方法
         Args:
-            agents: 一个字典，key是agent的名字，value是agent的实例
-            config: 一个任意的配置对象，由RemoteActor传入
-            game_id: 一个唯一的游戏ID，由Gamecore传入
-            data: 一个任意的字节串，由Gamecore传入，通常是空的
+            *args: 位置参数，由RemoteActor传入
+            **kwargs: 关键字参数，由RemoteActor传入
         """
         raise NotImplementedError
+
+    def start(self, game_id, data: bytes) -> bytes:
+        """
+        开始一局新的游戏，由Gamecore调用，请在这里初始化游戏状态
+        Args:
+            game_id: 一个唯一的游戏ID，由Gamecore传入
+            data: 一个任意的字节串，由Gamecore传入，通常是游戏状态
+        Returns:
+            一个任意的字节串，通常是游戏状态
+        """
 
     def tick(self, data: bytes) -> bytes:
         """

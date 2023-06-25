@@ -1,22 +1,36 @@
-from .model import AtariModel
-from .actor import AtariActor
-from .trainer import AtariTrainer
 import bray
 
-remote_model = bray.RemoteModel(name="model1", model=AtariModel())
+from .model import AtariModel
+from .actor import AtariActor
+from .trainer import train_atari
 
-remote_buffer = bray.RemoteBuffer(name="buffer1")
+bray.init(project="./atari-pengyao", trial="ppo-v0")
 
-agent = bray.Agent(remote_model=remote_model, remote_buffer=remote_buffer)
+remote_model = bray.RemoteModel(
+    name="atari_model",
+    model=AtariModel(),
+    override=True,
+)
 
-remote_actor = bray.RemoteActor(Actor=AtariActor, agents={"agent1": agent}, config=None)
+remote_actor = bray.RemoteActor(port=8000)
 
-remote_actor.serve(port=8000, background=True)
+remote_actor.serve(
+    Actor=AtariActor,
+    model="atari_model",
+    buffer="atari_buffer",
+)
 
 remote_trainer = bray.RemoteTrainer(
-    num_workers=4, use_gpu=False, Trainer=AtariTrainer, config=None
+    num_workers=4,
+    use_gpu=False,
 )
 
 remote_trainer.train(
-    remote_model=remote_model, remote_buffer=remote_buffer, num_steps=1000000
+    train=train_atari,
+    model="atari_model",
+    buffer="atari_buffer",
+    weights_publish_interval=4,
+    num_steps=100000,
 )
+
+bray.run_until_asked_to_stop()

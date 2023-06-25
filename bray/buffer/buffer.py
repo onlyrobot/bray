@@ -4,60 +4,33 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import asyncio
 
-from bray.utils.nested_array import NestedArray, make_batch
+from bray.utils.nested_array import NestedArray
+from bray.metric.metric import merge
 
 
 @ray.remote
 class BufferWorker:
-    def __init__(self, buffer: "Buffer"):
+    def __init__(self, name: str):
+        self.name, self.buffer = name, ray.get_actor(name)
         self.replays, self.size = [], 256
         self_handle = ray.get_runtime_context().current_actor
-        buffer.register.remote(self_handle)
+        self.buffer.register.remote(self_handle)
+        self.pop_cond = asyncio.Condition()
 
     async def push(self, *replays: NestedArray):
+        merge("push_rate_min", len(replays), buffer=self.name)
         if len(self.replays) > self.size:
-            print("buffer is full")
+            print(f"buffer {self.name} is full")
             return
         self.replays.extend(replays)
+        async with self.pop_cond:
+            self.pop_cond.notify_all()
 
     async def pop(self) -> NestedArray:
-        while len(self.replays) == 0:
-            await asyncio.sleep(0.01)
+        async with self.pop_cond:
+            await self.pop_cond.wait_for(lambda: len(self.replays) > 0)
+        merge("pop_rate_min", 1, buffer=self.name)
         return self.replays.pop()
-
-
-class BufferIterator:
-    def __init__(self, buffer_worker: BufferWorker):
-        self.buffer_worker = buffer_worker
-
-    def __next__(self) -> NestedArray:
-        return ray.get(self.buffer_worker.pop.remote())
-
-    def __iter__(self) -> Iterator[NestedArray]:
-        return self
-
-
-class BatchBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], batch_size):
-        self.buffer = buffer
-        self.batch_size = batch_size
-
-    def __next__(self) -> NestedArray:
-        batch = []
-        for _ in range(self.batch_size):
-            batch.append(next(self.buffer))
-        return make_batch(batch)
-
-    def __iter__(self) -> Iterator[NestedArray]:
-        return self
-
-
-class ReuseBuffer:
-    pass
-
-
-class PrefetchBuffer:
-    pass
 
 
 @ray.remote
@@ -95,9 +68,11 @@ class Buffer:
 
 class RemoteBuffer:
     def __init__(self, name: str):
+        self.name = name
         self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
         self.workers, self.worker_index = [], 0
         self.sync()
+        self.buffer_worker = None
 
     def push(self, *reploys: NestedArray):
         if len(self.workers) == 0:
@@ -116,7 +91,7 @@ class RemoteBuffer:
     def sync(self):
         self.workers = ray.get(self.buffer.get_workers.remote())
 
-    def new_local_worker(self) -> BufferWorker:
+    def _new_local_worker(self) -> BufferWorker:
         """
         创建一个本地的 BufferWorker，这个 BufferWorker 会在当前节点上运行，
         用于从本地的 Buffer 中读取数据，一般被 TrainerWorker 调用
@@ -126,5 +101,13 @@ class RemoteBuffer:
             soft=False,
         )
         return BufferWorker.options(scheduling_strategy=scheduling_local).remote(
-            self.buffer
+            self.name
         )
+
+    def __next__(self) -> NestedArray:
+        if not self.buffer_worker:
+            self.buffer_worker = self._new_local_worker()
+        return ray.get(self.buffer_worker.pop.remote())
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        return self

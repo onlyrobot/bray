@@ -4,14 +4,17 @@ from starlette.requests import Request
 import time
 import asyncio
 from bray.actor.base import Actor
-from bray.actor.base import Agent
 
 
 @ray.remote
 class ActorWorker:
-    def __init__(self, Actor, agents, config, game_id, data):
+    def __init__(self, Actor, *args, **kwargs):
         self.active_time = time.time()
-        self.actor = Actor(agents, config, game_id, data)
+        self.actor = Actor(*args, **kwargs)
+
+    def start(self, game_id, data: bytes) -> bytes:
+        self.active_time = time.time()
+        return self.actor.start(game_id, data)
 
     def tick(self, data: bytes) -> bytes:
         self.active_time = time.time()
@@ -26,8 +29,8 @@ class ActorWorker:
 
 @serve.deployment(route_prefix="/step")
 class ActorGateway:
-    def __init__(self, Actor: type[Actor], agents: dict[str:Agent], config: any):
-        self.Actor, self.agents, self.config = Actor, agents, config
+    def __init__(self, Actor: type[Actor], *args, **kwargs):
+        self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.workers = {}
         import logging
 
@@ -40,7 +43,7 @@ class ActorGateway:
             return
         is_active = await worker.is_active.remote()
         if not is_active:
-            print(f"Worker with game_id={game_id} inactive, shutting down.")
+            print(f"Actor with game_id={game_id} inactive.")
             self.workers.pop(game_id)
             return
         await asyncio.sleep(60)
@@ -60,15 +63,13 @@ class ActorGateway:
             return await self.end(game_id, data)
         elif step_kind == "auto":
             return await self.auto(game_id, data)
-        else:
-            raise Exception(f"Unknown step_kind: {step_kind}")
+        raise Exception(f"Unknown step_kind: {step_kind}")
 
     async def start(self, game_id, data) -> bytes:
         worker = self.workers.get(game_id, None)
         if not worker:
-            worker = ActorWorker.remote(
-                self.Actor, self.agents, self.config, game_id, data
-            )
+            worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+            worker.start.remote(game_id, data)
             self.workers[game_id] = worker
             asyncio.create_task(self._check_workers(game_id))
         else:
@@ -92,9 +93,8 @@ class ActorGateway:
         try:
             worker = self.workers.popitem()
         except KeyError:
-            worker = ActorWorker.remote(
-                self.Actor, self.agents, self.config, None, None
-            )
+            worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+            worker.start(None, None)
         data = await worker.tick.remote(data)
         import uuid
 
@@ -103,18 +103,21 @@ class ActorGateway:
 
 
 class RemoteActor:
-    def __init__(
-        self, Actor: type[Actor], agents: dict[str:Agent] = None, config: any = None
-    ):
-        self.gateway = ActorGateway.bind(Actor, agents, config)
+    def __init__(self, port: int = 8000):
+        """
+        Args:
+            port: ActorGateway 暴露给 Gamecore 的端口
+        """
+        self.port = port
 
-    def serve(self, port=8000, background=True):
+    def serve(self, Actor: type[Actor], *args, **kwargs):
+        """
+        Args:
+            Actor: 用户定义的 Actor 类
+            *args: Actor 的位置参数
+            **kwargs: Actor 的关键字参数
+        """
+        self.gateway = ActorGateway.bind(Actor, *args, **kwargs)
         print("Starting ActorGateway.")
-        serve.run(self.gateway, port=port)
+        serve.run(self.gateway, port=self.port)
         print("ActorGateway started.")
-        if background:
-            return
-        # wait for SIGTERM or SIGINT (i.e. Ctrl+C) to stop the actor
-        import signal
-
-        signal.sigwait([signal.SIGTERM, signal.SIGINT])
