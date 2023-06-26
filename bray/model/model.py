@@ -1,5 +1,7 @@
 import asyncio
 import time
+import random
+import os
 
 import ray
 import torch
@@ -8,7 +10,7 @@ from bray.utils.nested_array import (
     make_batch,
     handle_nested_array,
 )
-from bray.metric.metric import merge
+from bray.metric.metric import merge, query, flush_metrics_to_remote
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -21,9 +23,15 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
 
 
 @ray.remote
+def save_torch_model_weights(weights: NestedArray, path: str):
+    torch.save(weights, path)
+
+
+@ray.remote
 class TorchModelWorker:
     async def __init__(self, name: str):
         self.name, self.model = name, ray.get_actor(name)
+        self.forward_time_sum = 0.0
         weights, self.current_step = await self.model.get_weights.remote()
         torch_model = ray.get(self.model.get_model.remote(step=-1))
         self.torch_model = torch_model
@@ -31,15 +39,18 @@ class TorchModelWorker:
         torch_model.eval()
         set_torch_model_weights(torch_model, weights)
         asyncio.create_task(self._subscribe_weights())
+        asyncio.create_task(self._load_balance())
 
     async def forward(self, inputs: NestedArray) -> NestedArray:
         inputs = make_batch([inputs])
         inputs = handle_nested_array(inputs, torch.from_numpy)
         beg = time.time()
         outputs = self.torch_model(inputs)
+        forward_time = (time.time() - beg) * 1000
+        self.forward_time_sum += forward_time
         merge(
             "forward",
-            (time.time() - beg) * 1000,
+            forward_time,
             desc={
                 "time_window_avg": "forward latency ms",
                 "time_window_cnt": "forward per minute",
@@ -57,6 +68,28 @@ class TorchModelWorker:
         set_torch_model_weights(self.torch_model, weights)
         asyncio.create_task(self._subscribe_weights())
 
+    async def _load_balance(self):
+        await asyncio.sleep(60)
+        worker_num = len(await self.model.get_workers.remote())
+        load_rate = await self.model.load_rate.remote()
+        local_load_rate = self.forward_time_sum / (60 * 1000)
+        # 假设以概率p下掉当前worker，那么下掉后的worker数量为(1-p)*worker_num
+        # 目标负载率为0.75，那么下掉后的负载量为(1-p)*worker_num*0.75
+        # 它应该等于当前测得的负载量，
+        # 即(1-p)*worker_num*0.75 == worker_num * load_rate
+        # 解得p = 1 - load_rate / 0.75
+        # 为了避免过度下掉，我们加入平滑因子 0.5
+        p = 1 - load_rate / 0.75
+        if (
+            worker_num > 1
+            and load_rate * local_load_rate < 0.5
+            and random.random() < p * 0.5
+        ):
+            flush_metrics_to_remote()
+            ray.actor.exit_actor()
+        self.forward_time_sum = 0.0
+        asyncio.create_task(self._load_balance())
+
 
 @ray.remote
 class Model:
@@ -69,8 +102,19 @@ class Model:
         self.weights = get_torch_model_weights(torch_model)
         self.step = 0
         self.step_cond = asyncio.Condition()
-        self.workers = [TorchModelWorker.remote(self.name) for _ in range(8)]
+        self.workers = [TorchModelWorker.remote(self.name) for _ in range(4)]
         asyncio.create_task(self._health_check())
+        self.ckpt_step = 0
+        trial_path = ray.get_runtime_context().namespace
+        self.ckpt_dir = os.path.join(trial_path, f"checkpoint/{self.name}")
+        if os.path.exists(self.ckpt_dir):
+            try:
+                self._load_checkpoint()
+            except Exception as e:
+                print(f"load checkpoint failed: {e}")
+        else:
+            os.makedirs(self.ckpt_dir, exist_ok=True)
+        asyncio.create_task(self._save_checkpoint())
 
     async def set_weights(self, weights: NestedArray):
         self.weights = weights
@@ -102,6 +146,29 @@ class Model:
             await self.step_cond.wait_for(lambda: self.step > current_step)
         return self.weights, self.step
 
+    def load_rate(self) -> float:
+        forward_time_sum = query("forward", kind="sum", model=self.name)
+        total_time_sum = len(self.workers) * 60 * 1000
+        return forward_time_sum / total_time_sum
+
+    def _load_balance(self):
+        # 三级调控，保证负载均衡响应速度，同时避免过度调控
+        load_rate = self.load_rate()
+        merge(
+            "load",
+            load_rate,
+            desc={"time_window_avg": "load rate of model forward"},
+            model=self.name,
+        )
+        if load_rate < 0.8:
+            return
+        self.workers.append(TorchModelWorker.remote(self.name))
+        if load_rate > 0.9:
+            self.workers.append(TorchModelWorker.remote(self.name))
+        if load_rate < 0.95:
+            return
+        self.workers.append(TorchModelWorker.remote(self.name))
+
     async def _is_health(self, worker):
         try:
             await worker.forward.remote(self.inputs)
@@ -122,8 +189,40 @@ class Model:
         old_workers = self.workers
         self.workers = active_workers
         self.workers.extend(old_workers[worker_num:])
+        self._load_balance()
+        merge(
+            "worker",
+            len(self.workers),
+            desc={"time_window_avg": "smoothed model worker num"},
+            model=self.name,
+        )
         await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
+
+    def _load_checkpoint(self):
+        ckpts = os.listdir(self.ckpt_dir)
+        ckpts = [int(ckpt.split(".")[0].split("-")[1]) for ckpt in ckpts]
+        if not ckpts:
+            return
+        ckpts.sort()
+        self.ckpt_step = ckpts[-1]
+        self.step = self.ckpt_step
+        ckpt_path = os.path.join(self.ckpt_dir, f"step-{self.ckpt_step}.pt")
+        self.weights = torch.load(ckpt_path)
+        print(f"load checkpoint {ckpt_path}")
+
+    async def _save_checkpoint(self):
+        await asyncio.sleep(10 * 60)
+        if self.ckpt_step < self.step:
+            save_torch_model_weights.remote(
+                self.weights,
+                os.path.join(
+                    self.ckpt_dir,
+                    f"step-{self.step}.pt",
+                ),
+            )
+            self.ckpt_step = self.step
+        asyncio.create_task(self._save_checkpoint())
 
 
 class RemoteModel:

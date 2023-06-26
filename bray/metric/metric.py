@@ -124,19 +124,23 @@ class MetricsWorker:
         self.merge_remote_interval = 1
         self.merge_count = 0
 
+    def merge_to_remote(self):
+        for name, m in self.cached_metrics.items():
+            self.remote_metrics.merge.remote(name, m, None)
+        self.cached_metrics = {}
+
     def merge(self, name: str, metric: Metric, desc: dict[str:str], **kwargs):
+        self.merge_count += 1
         name = build_name(name, **kwargs)
         m = self.cached_metrics.get(name, None)
-        if m:
-            m.merge(metric)
+        if not m:
+            self.remote_metrics.merge.remote(name, metric, desc)
+            self.cached_metrics[name] = Metric()
         else:
-            self.cached_metrics[name] = metric
-        self.merge_count += 1
+            m.merge(metric)
         if self.merge_count < self.merge_remote_interval:
             return
-        for name, m in self.cached_metrics.items():
-            self.remote_metrics.merge.remote(name, m, desc)
-        self.cached_metrics = {}
+        self.merge_to_remote()
         merge_remote_time = time.time()
         self.merge_remote_interval = int(
             2
@@ -152,12 +156,7 @@ class MetricsWorker:
         return ray.get(self.remote_metrics.query.remote(name, time_window))
 
     def __del__(self):
-        ray.get(
-            [
-                self.remote_metrics.merge.remote(name, m, None)
-                for name, m in self.cached_metrics.items()
-            ]
-        )
+        self.merge_to_remote()
 
 
 metrics_worker = None
@@ -168,6 +167,13 @@ def get_metrics_worker() -> MetricsWorker:
     if metrics_worker is None:
         metrics_worker = MetricsWorker()
     return metrics_worker
+
+
+def flush_metrics_to_remote():
+    global metrics_worker
+    if not metrics_worker:
+        return
+    metrics_worker.merge_to_remote()
 
 
 def merge(name: str, value: float, desc: dict[str:str] = None, **kwargs):

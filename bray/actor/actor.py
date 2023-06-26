@@ -5,7 +5,7 @@ import time
 import asyncio
 from bray.actor.base import Actor
 
-from bray.metric.metric import merge
+from bray.metric.metric import merge, flush_metrics_to_remote
 
 
 @ray.remote
@@ -26,6 +26,9 @@ class ActorWorker:
 
     def end(self, data: bytes) -> bytes:
         return self.actor.end(data)
+
+    def __del__(self):
+        flush_metrics_to_remote()
 
     def is_active(self) -> bool:
         return time.time() - self.active_time < 60
@@ -51,7 +54,7 @@ class ActorGateway:
             self.workers.pop(game_id)
             return
         await asyncio.sleep(60)
-        await asyncio.create_task(self._check_workers(game_id))
+        asyncio.create_task(self._check_workers(game_id))
 
     async def __call__(self, req: Request) -> bytes:
         step_kind = req.headers.get("step_kind")
@@ -71,13 +74,18 @@ class ActorGateway:
 
     async def start(self, game_id, data) -> bytes:
         worker = self.workers.get(game_id, None)
-        if not worker:
-            worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
-            worker.start.remote(game_id, data)
-            self.workers[game_id] = worker
-            asyncio.create_task(self._check_workers(game_id))
-        else:
+        if worker:
             raise Exception(f"Game {game_id} already started.")
+        worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+        worker.start.remote(game_id, data)
+        self.workers[game_id] = worker
+        merge(
+            "worker",
+            len(self.workers),
+            desc={"time_window_avg": "smoothed actor worker num"},
+            actor="actor",
+        )
+        asyncio.create_task(self._check_workers(game_id))
         return b"Game started."
 
     async def tick(self, game_id, data) -> bytes:
