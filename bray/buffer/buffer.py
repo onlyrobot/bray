@@ -18,7 +18,12 @@ class BufferWorker:
         self.pop_cond = asyncio.Condition()
 
     async def push(self, *replays: NestedArray):
-        merge("push_rate_min", len(replays), buffer=self.name)
+        merge(
+            "push",
+            len(replays),
+            desc={"time_window_sum": "push per minute"},
+            buffer=self.name,
+        )
         if len(self.replays) > self.size:
             print(f"buffer {self.name} is full")
             return
@@ -29,7 +34,12 @@ class BufferWorker:
     async def pop(self) -> NestedArray:
         async with self.pop_cond:
             await self.pop_cond.wait_for(lambda: len(self.replays) > 0)
-        merge("pop_rate_min", 1, buffer=self.name)
+        merge(
+            "pop",
+            1,
+            desc={"time_window_sum": "pop per minute"},
+            buffer=self.name,
+        )
         return self.replays.pop()
 
 
@@ -51,7 +61,8 @@ class Buffer:
             return True
         except ray.exceptions.RayActorError:
             return False
-        finally:
+        except Exception as e:
+            print(f"worker is not health: ", e)
             return False
 
     async def _health_check(self):

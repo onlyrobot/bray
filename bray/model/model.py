@@ -37,7 +37,15 @@ class TorchModelWorker:
         inputs = handle_nested_array(inputs, torch.from_numpy)
         beg = time.time()
         outputs = self.torch_model(inputs)
-        merge("forward_time_ms", (time.time() - beg) * 1000, model=self.name)
+        merge(
+            "forward",
+            (time.time() - beg) * 1000,
+            desc={
+                "time_window_avg": "forward latency ms",
+                "time_window_cnt": "forward per minute",
+            },
+            model=self.name,
+        )
         return handle_nested_array(
             outputs, lambda x: x.squeeze(0).numpy(), type_check=False
         )
@@ -64,13 +72,15 @@ class Model:
         self.workers = [TorchModelWorker.remote(self.name) for _ in range(8)]
         asyncio.create_task(self._health_check())
 
-    async def set_weights(self, weights: NestedArray, step):
-        step = self.step + 1 if step == -1 else step
-        if step <= self.step:
-            print(f"Skip set_weights with step={step}, current_step={self.step}")
-            return
+    async def set_weights(self, weights: NestedArray):
         self.weights = weights
-        self.step = step
+        self.step += 1
+        merge(
+            "step",
+            1,
+            desc={"time_window_cnt": "step per minute", "cnt": "current step"},
+            model=self.name,
+        )
         async with self.step_cond:
             self.step_cond.notify_all()
 
@@ -98,7 +108,8 @@ class Model:
             return True
         except ray.exceptions.RayActorError:
             return False
-        finally:
+        except Exception as e:
+            print(f"worker is not health: ", e)
             return False
 
     async def _health_check(self):
@@ -174,14 +185,14 @@ class RemoteModel:
         """
         return ray.get(self.model.get_weights.remote())
 
-    def publish_weights(self, weights: NestedArray, step: int = -1):
+    def publish_weights(self, weights: NestedArray):
         """
         发布模型的权重，会通知所有的ModelWorker更新权重
         Args:
             weights: 模型的权重，为一个numpy数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
-        self.model.set_weights.remote(weights, step)
+        self.model.set_weights.remote(weights)
 
     def sync(self):
         self.workers = ray.get(self.model.get_workers.remote())

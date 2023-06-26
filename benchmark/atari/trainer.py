@@ -114,6 +114,7 @@ def train_atari(
     remote_buffer = bray.RemoteBuffer(name=buffer)
     buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size)
     buffer = bray.TorchTensorBuffer(buffer)
+    buffer = bray.PrefetchBuffer(buffer)
     for i in range(num_steps):
         replay = next(buffer)
         train_step(

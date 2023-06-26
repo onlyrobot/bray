@@ -10,7 +10,7 @@ bray.init(project="./atari-pengyao", trial="ppo-v0")
 remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
-    inputs=np.random.randn(1, 4, 84, 84),
+    inputs=np.random.randn(42, 42, 4).astype(np.float32),
 )
 
 remote_trainer = bray.RemoteTrainer(

@@ -5,6 +5,8 @@ import time
 import asyncio
 from bray.actor.base import Actor
 
+from bray.metric.metric import merge
+
 
 @ray.remote
 class ActorWorker:
@@ -13,10 +15,12 @@ class ActorWorker:
         self.actor = Actor(*args, **kwargs)
 
     def start(self, game_id, data: bytes) -> bytes:
+        merge("game", 1, desc={"time_window_cnt": "game start per minute"})
         self.active_time = time.time()
         return self.actor.start(game_id, data)
 
     def tick(self, data: bytes) -> bytes:
+        merge("tick", 1, desc={"time_window_cnt": "game tick per minute"})
         self.active_time = time.time()
         return self.actor.tick(data)
 

@@ -85,7 +85,7 @@ Model接入主要是为了保证以下几点：
 remote_model = bray.RemoteModel(
     name="atari_model", 
     model=AtariModel(),
-    inputs=np.random.randn(1, 4, 84, 84),
+    inputs=np.random.randn(42, 42, 4).astype(np.float32),
     )
 # 以下命令可以在集群中任何地方执行
 outputs = ray.get(remote_model.foward(inputs))
