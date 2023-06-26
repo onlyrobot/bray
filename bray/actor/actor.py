@@ -24,7 +24,7 @@ class ActorWorker:
         tick_return = self.actor.tick(data)
         merge(
             "tick",
-            time.time() - self.active_time,
+            (time.time() - self.active_time) * 1000,
             desc={
                 "time_window_avg": "tick latency ms",
                 "time_window_cnt": "tick per minute",
