@@ -6,3 +6,5 @@ RUN pip install ray[all]==2.5.0
 RUN pip install torch==2.0.1
 RUN pip install tensorboard==2.13.0
 RUN HOROVOD_WITH_GLOO=1 HOROVOD_WITH_TORCH=1 pip install horovod[ray]
+
+RUN apt install -y ssh vim git
