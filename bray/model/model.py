@@ -52,8 +52,12 @@ class TorchModelWorker:
 
 @ray.remote
 class Model:
-    async def __init__(self, name: str, torch_model: torch.nn.Module):
+    async def __init__(
+        self, name: str, torch_model: torch.nn.Module, inputs: NestedArray
+    ):
         self.name, self.torch_model = name, torch_model
+        assert inputs is not None, "model inputs must be provided"
+        self.inputs = inputs
         self.weights = get_torch_model_weights(torch_model)
         self.step = 0
         self.step_cond = asyncio.Condition()
@@ -90,12 +94,12 @@ class Model:
 
     async def _is_health(self, worker):
         try:
-            await worker.forward.remote("fake data here")
+            await worker.forward.remote(self.inputs)
             return True
         except ray.exceptions.RayActorError:
             return False
         finally:
-            return True
+            return False
 
     async def _health_check(self):
         worker_num = len(self.workers)
@@ -117,22 +121,18 @@ class RemoteModel:
     """
 
     def __init__(
-        self,
-        name: str,
-        model: torch.nn.Module = None,
-        inputs: NestedArray = None,
-        override: bool = None,
+        self, name: str, model: torch.nn.Module = None, inputs: NestedArray = None
     ):
         """
         Args:
             name: 模型的名字，用于在Ray集群中标识模型
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
-            override: 如果为True，会覆盖已经存在的同名模型
+            inputs: 模型的输入，用于初始化模型和验证模型正确性
         """
-        self.name = name
+        self.name, self.inputs = name, inputs
         self.model = Model.options(
             name=name, get_if_exists=True, lifetime="detached"
-        ).remote(name, model)
+        ).remote(name, model, inputs)
         self.workers, self.worker_index = [], 0
         self.sync()
 
@@ -144,6 +144,10 @@ class RemoteModel:
         Returns:
             模型的输出，是一个Ray ObjectRef，可以通过ray.get()获取
         """
+        if len(self.workers) == 0:
+            self.sync()
+        if len(self.workers) == 0:
+            raise RuntimeError("No available workers")
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         try:

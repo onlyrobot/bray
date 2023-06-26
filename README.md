@@ -82,7 +82,11 @@ Model接入主要是为了保证以下几点：
 模型接入流程非常简单：[Gym Atari的简单PyTorch模型](./benchmark/atari/model.py)
 
 ```python
-remote_model = bray.RemoteModel(name="atari_model", model=AtariModel())
+remote_model = bray.RemoteModel(
+    name="atari_model", 
+    model=AtariModel(),
+    inputs=np.random.randn(1, 4, 84, 84),
+    )
 # 以下命令可以在集群中任何地方执行
 outputs = ray.get(remote_model.foward(inputs))
 model = remote_model.get_model()

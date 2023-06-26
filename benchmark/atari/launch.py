@@ -1,3 +1,4 @@
+import numpy as np
 import bray
 
 from .model import AtariModel
@@ -9,7 +10,7 @@ bray.init(project="./atari-pengyao", trial="ppo-v0")
 remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
-    override=True,
+    inputs=np.random.randn(1, 4, 84, 84),
 )
 
 remote_trainer = bray.RemoteTrainer(

@@ -51,6 +51,8 @@ class Buffer:
             return True
         except ray.exceptions.RayActorError:
             return False
+        finally:
+            return False
 
     async def _health_check(self):
         worker_num = len(self.workers)
