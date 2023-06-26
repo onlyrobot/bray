@@ -20,9 +20,17 @@ class ActorWorker:
         return self.actor.start(game_id, data)
 
     def tick(self, data: bytes) -> bytes:
-        merge("tick", 1, desc={"time_window_cnt": "game tick per minute"})
         self.active_time = time.time()
-        return self.actor.tick(data)
+        tick_return = self.actor.tick(data)
+        merge(
+            "tick",
+            time.time() - self.active_time,
+            desc={
+                "time_window_avg": "tick latency ms",
+                "time_window_cnt": "tick per minute",
+            },
+        )
+        return tick_return
 
     def end(self, data: bytes) -> bytes:
         return self.actor.end(data)
