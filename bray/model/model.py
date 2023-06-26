@@ -57,7 +57,7 @@ class Model:
         self.weights = get_torch_model_weights(torch_model)
         self.step = 0
         self.step_cond = asyncio.Condition()
-        self.workers = [TorchModelWorker.remote(self.name) for _ in range(4)]
+        self.workers = [TorchModelWorker.remote(self.name) for _ in range(8)]
         asyncio.create_task(self._health_check())
 
     async def set_weights(self, weights: NestedArray, step):

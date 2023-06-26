@@ -16,6 +16,7 @@ class RemoteTrainer:
         self.executor = RayExecutor(
             settings,
             num_workers=num_workers,
+            cpus_per_worker=6,
             use_gpu=use_gpu,
         )
         self.executor.start()

@@ -81,6 +81,15 @@ Model接入主要是为了保证以下几点：
 
 模型接入流程非常简单：[Gym Atari的简单PyTorch模型](./benchmark/atari/model.py)
 
+```python
+remote_model = bray.RemoteModel(name="atari_model", model=AtariModel())
+# 以下命令可以在集群中任何地方执行
+outputs = ray.get(remote_model.foward(inputs))
+model = remote_model.get_model()
+weights = bray.get_torch_model_weights(model)
+remote_model.publish_weights(weights)
+```
+
 ### 3. Actor接入
 
 强化学习中的Actor一般指的是和环境交互，采样得到Replay的有状态执行单元。它的具体功能包括：
@@ -96,13 +105,41 @@ Model接入主要是为了保证以下几点：
 
 Actor接入依赖Gamecore和Model，可以使用FakeGamecore和FakeModel来解耦。
 
-[Gym Atari的Actor示例](./benchmark/atari/actor.py)。
+[Gym Atari的Actor示例](./benchmark/atari/actor.py)
+
+```python
+# 初始化模型
+bray.RemoteModel(name="atari_model", model=AtariModel())
+# 部署AtariActor服务，暴露8000端口
+remote_actor = bray.RemoteActor(port=8000)
+remote_actor.serve(Actor=AtariActor, model="atari_model", buffer="atari_buffer")
+bray.run_until_asked_to_stop()
+```
 
 ### 4. Trainer接入
 
 Trainer从Buffer中获取Replay进行训练Model，用户需要实现一个train函数，交给RemoteTrainer进行分布式调度。
 
+Trainer接入主要考虑以下几点：
+
+* 用户实现的train是否支持分布式并行训练，是否支持GPU训练
+* 强化训练过程中Model的权重版本号能否正常增长
+* 训练过程中的指标是否正常（loss、reward等）
+
 [Gym Atari的Trainer示例](./benchmark/atari/trainer.py)
+
+```python
+# 初始化模型
+bray.RemoteModel(name="atari_model", model=AtariModel())
+# 启动FakeBuffer自动地向Buffer推送数据
+bray.fake.FakeBuffer(name="atari_buffer")
+# 开始验证训练过程是否正常，中途会输出指标到tensorboard和日志到终端
+remote_trainer = bray.RemoteTrainer(num_workers=2, use_gpu=False)
+remote_trainer.train(train=train_atari, 
+    model="atari_model", buffer="atari_buffer", 
+    weights_publish_interval=1, num_steps=100000)
+bray.run_until_asked_to_stop()
+```
 
 ## 启动脚本
 

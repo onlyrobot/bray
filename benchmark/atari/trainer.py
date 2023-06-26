@@ -99,7 +99,7 @@ def train_atari(model, buffer, weights_publish_interval, num_steps):
     optimizer = hvd.DistributedOptimizer(optimizer)
     # initialize buffer
     remote_buffer = bray.RemoteBuffer(name=buffer)
-    buffer = bray.BatchBuffer(remote_buffer, batch_size=8)
+    buffer = bray.BatchBuffer(remote_buffer, batch_size=32)
     buffer = bray.TorchTensorBuffer(buffer)
     for i in range(num_steps):
         replay = next(buffer)

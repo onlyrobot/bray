@@ -60,6 +60,6 @@ def endless_rollout(gym_id: str, game_id: str):
 
 
 # parallel rollout (may be thread or process)
-for i in range(8):
+for i in range(4):
     game_id = "game_" + str(uuid.uuid4())
     Thread(target=endless_rollout, args=(gym_id, game_id)).start()
