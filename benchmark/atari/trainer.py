@@ -23,7 +23,14 @@ def cal_entroy(logits):
     return torch.sum(p * (torch.log(z) - a), axis=-1, keepdim=False)
 
 
-def train_step(remote_model, replay, model, optimizer, weights_publish_interval, step):
+def train_step(
+    remote_model,
+    replay,
+    model,
+    optimizer,
+    weights_publish_interval,
+    step,
+):
     obs, value, logit, action, advantage = (
         replay["obs"],
         replay["value"],
@@ -88,7 +95,13 @@ def train_step(remote_model, replay, model, optimizer, weights_publish_interval,
     print(f"Train step {step}, loss: {loss.item()}")
 
 
-def train_atari(model, buffer, weights_publish_interval, num_steps):
+def train_atari(
+    model,
+    buffer,
+    batch_size,
+    weights_publish_interval,
+    num_steps,
+):
     # initialize model
     remote_model = bray.RemoteModel(name=model)
     model = remote_model.get_model(step=-1)
@@ -99,7 +112,7 @@ def train_atari(model, buffer, weights_publish_interval, num_steps):
     optimizer = hvd.DistributedOptimizer(optimizer)
     # initialize buffer
     remote_buffer = bray.RemoteBuffer(name=buffer)
-    buffer = bray.BatchBuffer(remote_buffer, batch_size=32)
+    buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size)
     buffer = bray.TorchTensorBuffer(buffer)
     for i in range(num_steps):
         replay = next(buffer)

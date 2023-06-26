@@ -1,4 +1,4 @@
-# Bray强化学习推理训练框架
+# 分布式强化学习训推一体化框架Bray
 
 Bray for based on ray and better than ray
 
@@ -136,7 +136,7 @@ bray.fake.FakeBuffer(name="atari_buffer")
 # 开始验证训练过程是否正常，中途会输出指标到tensorboard和日志到终端
 remote_trainer = bray.RemoteTrainer(num_workers=2, use_gpu=False)
 remote_trainer.train(train=train_atari, 
-    model="atari_model", buffer="atari_buffer", 
+    model="atari_model", buffer="atari_buffer", batch_size=8,
     weights_publish_interval=1, num_steps=100000)
 bray.run_until_asked_to_stop()
 ```
