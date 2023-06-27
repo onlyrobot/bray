@@ -84,11 +84,15 @@ def train_step(
         optimizer.step()
     if hvd.rank() != 0:
         return
-    bray.merge("loss", loss, type="total = policy + value - 0.01 * entropy + 0.5 * kl")
     bray.merge("loss", policy_loss, type="policy")
     bray.merge("loss", value_loss, type="value")
     bray.merge("loss", entropy_loss, type="entropy")
     bray.merge("loss", kl_loss, type="kl")
+    bray.merge(
+        "loss",
+        loss,
+        desc={"time_window_avg": "total = policy + value - 0.01 * entropy + 0.5 * kl"},
+    )
     if step % weights_publish_interval == 0:
         weights = bray.get_torch_model_weights(model)
         remote_model.publish_weights(weights)

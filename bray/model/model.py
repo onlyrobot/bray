@@ -121,8 +121,11 @@ class Model:
         self.step += 1
         merge(
             "step",
-            1,
-            desc={"time_window_cnt": "step per minute", "cnt": "current step"},
+            self.step,
+            desc={
+                "time_window_cnt": "step per minute",
+                "time_window_avg": "smoothed current step",
+            },
             model=self.name,
         )
         async with self.step_cond:

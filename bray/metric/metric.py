@@ -54,48 +54,44 @@ class RemoteMetrics:
             if diff.cnt != 0:
                 self.writer.add_scalar(name, diff.avg, self.step)
             return
-        if metric.cnt != 0:
-            if "avg" in desc and metric.cnt != 0:
-                self.writer.add_scalar(
-                    f"{name} -- {desc['avg']}",
-                    metric.avg,
-                    self.step,
-                )
-            if "sum" in desc:
-                self.writer.add_scalar(
-                    f"{name} -- {desc['sum']}",
-                    metric.sum,
-                    self.step,
-                )
-            if "cnt" in desc:
-                self.writer.add_scalar(
-                    f"{name} -- {desc['cnt']}",
-                    metric.cnt,
-                    self.step,
-                )
-        if diff.cnt != 0:
-            if "time_window_avg" in desc and diff.cnt != 0:
-                self.writer.add_scalar(
-                    f"{name} -- {desc['time_window_avg']}",
-                    diff.avg,
-                    self.step,
-                )
-            if "time_window_sum" in desc:
-                self.writer.add_scalar(
-                    f"{name} -- {desc['time_window_sum']}",
-                    diff.sum,
-                    self.step,
-                )
-            if "time_window_cnt" in desc:
-                self.writer.add_scalar(
-                    f"{name} -- {desc['time_window_cnt']}",
-                    diff.cnt,
-                    self.step,
-                )
+        if "avg" in desc and metric.cnt != 0:
+            self.writer.add_scalar(
+                f"{name} -- {desc['avg']}",
+                metric.avg,
+                self.step,
+            )
+        if "sum" in desc:
+            self.writer.add_scalar(
+                f"{name} -- {desc['sum']}",
+                metric.sum,
+                self.step,
+            )
+        if "cnt" in desc:
+            self.writer.add_scalar(
+                f"{name} -- {desc['cnt']}",
+                metric.cnt,
+                self.step,
+            )
+        if "time_window_avg" in desc and diff.cnt != 0:
+            self.writer.add_scalar(
+                f"{name} -- {desc['time_window_avg']}",
+                diff.avg,
+                self.step,
+            )
+        if "time_window_sum" in desc:
+            self.writer.add_scalar(
+                f"{name} -- {desc['time_window_sum']}",
+                diff.sum,
+                self.step,
+            )
+        if "time_window_cnt" in desc:
+            self.writer.add_scalar(
+                f"{name} -- {desc['time_window_cnt']}",
+                diff.cnt,
+                self.step,
+            )
 
     async def dump_to_tensorboard(self):
-        await asyncio.sleep(self.time_window)
-        self.step += 1
         current_metrics = copy.deepcopy(self.metrics)
         for name, current in current_metrics.items():
             last = self.last_metrics.get(name, Metric())
@@ -104,6 +100,8 @@ class RemoteMetrics:
             self.diff_metrics[name] = diff
             self._dump_by_desc(name, current, diff)
         self.last_metrics = current_metrics
+        self.step += 1
+        await asyncio.sleep(self.time_window)
         asyncio.create_task(self.dump_to_tensorboard())
 
 
@@ -120,14 +118,19 @@ class MetricsWorker:
             name="RemoteMetrics", get_if_exists=True, lifetime="detached"
         ).remote()
         self.cached_metrics = {}
-        self.last_merge_remote_time = time.time()
+        self.last_merge_remote_time = 0
         self.merge_remote_interval = 1
         self.merge_count = 0
 
-    def merge_to_remote(self):
-        for name, m in self.cached_metrics.items():
-            self.remote_metrics.merge.remote(name, m, None)
+    def merge_to_remote(self, flush=True):
+        cached_metrics = self.cached_metrics
         self.cached_metrics = {}
+        tasks = [
+            self.remote_metrics.merge.remote(name, m, None)
+            for name, m in cached_metrics.items()
+        ]
+        if flush:
+            ray.wait(tasks)
 
     def merge(self, name: str, metric: Metric, desc: dict[str:str], **kwargs):
         self.merge_count += 1
@@ -140,13 +143,12 @@ class MetricsWorker:
             m.merge(metric)
         if self.merge_count < self.merge_remote_interval:
             return
-        self.merge_to_remote()
+        self.merge_to_remote(flush=False)
         merge_remote_time = time.time()
-        self.merge_remote_interval = int(
-            2
-            + (self.merge_count - 1)
-            * 60
-            / (merge_remote_time - self.last_merge_remote_time)
+        merge_time_interval = merge_remote_time - self.last_merge_remote_time
+        self.merge_remote_interval = 2 + min(
+            2 * self.merge_count,
+            int((self.merge_count - 1) * 60 / merge_time_interval),
         )
         self.last_merge_remote_time = merge_remote_time
         self.merge_count = 0
