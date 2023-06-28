@@ -96,7 +96,8 @@ def train_step(
     if step % weights_publish_interval == 0:
         weights = bray.get_torch_model_weights(model)
         remote_model.publish_weights(weights)
-    print(f"Train step {step}, loss: {loss.item()}")
+    if step % 100 == 0:
+        print(f"Train step {step}, loss: {loss.item()}")
 
 
 def train_atari(

@@ -10,7 +10,7 @@ from bray.utils.nested_array import (
     make_batch,
     handle_nested_array,
 )
-from bray.metric.metric import merge, query, flush_metrics_to_remote
+from bray.metric.metric import merge, query
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -31,26 +31,22 @@ def save_torch_model_weights(weights: NestedArray, path: str):
 class TorchModelWorker:
     async def __init__(self, name: str):
         self.name, self.model = name, ray.get_actor(name)
-        self.forward_time_sum = 0.0
         weights, self.current_step = await self.model.get_weights.remote()
         torch_model = ray.get(self.model.get_model.remote(step=-1))
         self.torch_model = torch_model
         torch_model.requires_grad_(False)
         torch_model.eval()
-        set_torch_model_weights(torch_model, weights)
+        set_torch_model_weights(torch_model, ray.get(weights))
         asyncio.create_task(self._subscribe_weights())
-        asyncio.create_task(self._load_balance())
 
     async def forward(self, inputs: NestedArray) -> NestedArray:
         inputs = make_batch([inputs])
         inputs = handle_nested_array(inputs, torch.from_numpy)
         beg = time.time()
         outputs = self.torch_model(inputs)
-        forward_time = (time.time() - beg) * 1000
-        self.forward_time_sum += forward_time
         merge(
             "forward",
-            forward_time,
+            (time.time() - beg) * 1000,
             desc={
                 "time_window_avg": "forward latency ms",
                 "time_window_cnt": "forward per minute",
@@ -65,30 +61,8 @@ class TorchModelWorker:
         weights, step = await self.model.subscribe_weights.remote(self.current_step)
         assert step > self.current_step
         self.current_step = step
-        set_torch_model_weights(self.torch_model, weights)
+        set_torch_model_weights(self.torch_model, ray.get(weights))
         asyncio.create_task(self._subscribe_weights())
-
-    async def _load_balance(self):
-        await asyncio.sleep(60)
-        worker_num = len(await self.model.get_workers.remote())
-        load_rate = await self.model.load_rate.remote()
-        local_load_rate = self.forward_time_sum / (60 * 1000)
-        # 假设以概率p下掉当前worker，那么下掉后的worker数量为(1-p)*worker_num
-        # 目标负载率为0.75，那么下掉后的负载量为(1-p)*worker_num*0.75
-        # 它应该等于当前测得的负载量，
-        # 即(1-p)*worker_num*0.75 == worker_num * load_rate
-        # 解得p = 1 - load_rate / 0.75
-        # 为了避免过度下掉，我们加入平滑因子 0.5
-        p = 1 - load_rate / 0.75
-        if (
-            worker_num > 1
-            and load_rate * local_load_rate < 0.5
-            and random.random() < p * 0.5
-        ):
-            flush_metrics_to_remote()
-            ray.actor.exit_actor()
-        self.forward_time_sum = 0.0
-        asyncio.create_task(self._load_balance())
 
 
 @ray.remote
@@ -99,7 +73,7 @@ class Model:
         self.name, self.torch_model = name, torch_model
         assert inputs is not None, "model inputs must be provided"
         self.inputs = inputs
-        self.weights = get_torch_model_weights(torch_model)
+        self.weights = ray.put(get_torch_model_weights(torch_model))
         self.step = 0
         self.step_cond = asyncio.Condition()
         self.workers = [TorchModelWorker.remote(self.name) for _ in range(4)]
@@ -116,8 +90,8 @@ class Model:
             os.makedirs(self.ckpt_dir, exist_ok=True)
         asyncio.create_task(self._save_checkpoint())
 
-    async def set_weights(self, weights: NestedArray):
-        self.weights = weights
+    async def set_weights(self, weights: list[ray.ObjectRef]):
+        self.weights = weights[0]
         self.step += 1
         merge(
             "step",
@@ -135,13 +109,13 @@ class Model:
         if step != -1:
             raise NotImplementedError
         with torch.no_grad():
-            set_torch_model_weights(self.torch_model, self.weights)
+            set_torch_model_weights(self.torch_model, ray.get(self.weights))
         return self.torch_model
 
     def get_workers(self) -> list[TorchModelWorker]:
         return self.workers
 
-    def get_weights(self) -> tuple[NestedArray, int]:
+    def get_weights(self) -> tuple[ray.ObjectRef, int]:
         return self.weights, self.step
 
     async def subscribe_weights(self, current_step):
@@ -149,28 +123,36 @@ class Model:
             await self.step_cond.wait_for(lambda: self.step > current_step)
         return self.weights, self.step
 
-    def load_rate(self) -> float:
-        forward_time_sum = query("forward", kind="sum", model=self.name)
-        total_time_sum = len(self.workers) * 60 * 1000
-        return forward_time_sum / total_time_sum
-
     def _load_balance(self):
-        # 三级调控，保证负载均衡响应速度，同时避免过度调控
-        load_rate = self.load_rate()
+        if len(self.workers) == 0:
+            self.workers.append(TorchModelWorker.remote(self.name))
+            return
+        forward_time_sum = query("forward", kind="sum", model=self.name)
+        load_rate = forward_time_sum / (len(self.workers) * 60 * 1000)
         merge(
             "load",
             load_rate,
             desc={"time_window_avg": "load rate of model forward"},
             model=self.name,
         )
+        # 假设以概率p下掉worker，那么下掉后的worker数量为(1-p)*worker_num
+        # 目标负载率为0.75，那么下掉后的负载量为(1-p)*worker_num*0.75
+        # 它应该等于当前测得的负载量，
+        # 即(1-p)*worker_num*0.75 == worker_num * load_rate
+        # 解得p = 1 - load_rate / 0.75
+        # 为了避免过度下掉，我们加入平滑因子 0.5
+        if load_rate < 0.7 and len(self.workers) > 1:
+            p = 1 - load_rate / 0.75
+            shrink_num = int(p * 0.5 * len(self.workers))
+            del self.workers[len(self.workers) - shrink_num :]
+            return
         if load_rate < 0.8:
             return
-        self.workers.append(TorchModelWorker.remote(self.name))
-        if load_rate > 0.9:
-            self.workers.append(TorchModelWorker.remote(self.name))
-        if load_rate < 0.95:
-            return
-        self.workers.append(TorchModelWorker.remote(self.name))
+        # 三级调控，保证负载均衡响应速度，同时避免过度调控
+        add_num = 1 if load_rate < 0.9 else (2 if load_rate < 0.95 else 3)
+        self.workers.extend(
+            [TorchModelWorker.remote(self.name) for _ in range(add_num)]
+        )
 
     async def _is_health(self, worker):
         try:
@@ -211,14 +193,14 @@ class Model:
         self.ckpt_step = ckpts[-1]
         self.step = self.ckpt_step
         ckpt_path = os.path.join(self.ckpt_dir, f"step-{self.ckpt_step}.pt")
-        self.weights = torch.load(ckpt_path)
+        self.weights = ray.put(torch.load(ckpt_path))
         print(f"load checkpoint {ckpt_path}")
 
     async def _save_checkpoint(self):
         await asyncio.sleep(10 * 60)
         if self.ckpt_step < self.step:
             save_torch_model_weights.remote(
-                self.weights,
+                ray.get(self.weights),
                 os.path.join(
                     self.ckpt_dir,
                     f"step-{self.step}.pt",
@@ -294,7 +276,7 @@ class RemoteModel:
             weights: 模型的权重，为一个numpy数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
-        self.model.set_weights.remote(weights)
+        self.model.set_weights.remote([ray.put(weights)])
 
     def sync(self):
         self.workers = ray.get(self.model.get_workers.remote())

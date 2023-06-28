@@ -10,9 +10,9 @@ from bray.metric.metric import merge
 
 @ray.remote
 class BufferWorker:
-    def __init__(self, name: str):
+    def __init__(self, name: str, size: int):
         self.name, self.buffer = name, ray.get_actor(name)
-        self.replays, self.size = [], 256
+        self.replays, self.size = [], size
         self_handle = ray.get_runtime_context().current_actor
         self.buffer.register.remote(self_handle)
         self.pop_cond = asyncio.Condition()
@@ -24,23 +24,25 @@ class BufferWorker:
             desc={"time_window_sum": "push per minute"},
             buffer=self.name,
         )
-        if len(self.replays) > self.size:
-            print(f"buffer {self.name} is full")
-            return
         self.replays.extend(replays)
+        if len(self.replays) > self.size:
+            del self.replays[: -self.size]
+            print(f"buffer {self.name} is full")
         async with self.pop_cond:
             self.pop_cond.notify_all()
 
-    async def pop(self) -> NestedArray:
+    async def pop(self) -> list[NestedArray]:
         async with self.pop_cond:
             await self.pop_cond.wait_for(lambda: len(self.replays) > 0)
+        replays = self.replays.copy()
         merge(
             "pop",
-            1,
+            len(replays),
             desc={"time_window_sum": "pop per minute"},
             buffer=self.name,
         )
-        return self.replays.pop()
+        self.replays.clear()  # 重复使用list，避免频繁的内存分配
+        return replays
 
 
 @ray.remote
@@ -80,8 +82,8 @@ class Buffer:
 
 
 class RemoteBuffer:
-    def __init__(self, name: str):
-        self.name = name
+    def __init__(self, name: str, size: int = 256):
+        self.name, self.size = name, size
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, lifetime="detached"
         ).remote()
@@ -116,13 +118,22 @@ class RemoteBuffer:
             soft=False,
         )
         return BufferWorker.options(scheduling_strategy=scheduling_local).remote(
-            self.name
+            self.name, self.size
         )
 
     def __next__(self) -> NestedArray:
         if not self.buffer_worker:
             self.buffer_worker = self._new_local_worker()
-        return ray.get(self.buffer_worker.pop.remote())
+            self.replays, self.last_size = [], 0
+            self.next_replays = None
+        size = len(self.replays)
+        if not self.next_replays and size <= self.last_size // 2:
+            self.next_replays = self.buffer_worker.pop.remote()
+        if size == 0:
+            self.replays = ray.get(self.next_replays)
+            self.next_replays = None
+            self.last_size = len(self.replays)
+        return self.replays.pop()
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self

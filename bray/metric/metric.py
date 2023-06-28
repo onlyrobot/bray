@@ -43,6 +43,10 @@ class RemoteMetrics:
         else:
             self.metrics[name] = metric
 
+    def batch_merge(self, metrics: dict[str:Metric]):
+        for name, metric in metrics.items():
+            self.merge(name, metric, None)
+
     def query(self, name, time_window: bool) -> Metric:
         if not time_window:
             return self.metrics.get(name, Metric())
@@ -125,12 +129,9 @@ class MetricsWorker:
     def merge_to_remote(self, flush=True):
         cached_metrics = self.cached_metrics
         self.cached_metrics = {}
-        tasks = [
-            self.remote_metrics.merge.remote(name, m, None)
-            for name, m in cached_metrics.items()
-        ]
+        task = self.remote_metrics.batch_merge.remote(cached_metrics)
         if flush:
-            ray.wait(tasks)
+            ray.wait([task])
 
     def merge(self, name: str, metric: Metric, desc: dict[str:str], **kwargs):
         self.merge_count += 1

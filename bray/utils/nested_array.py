@@ -1,8 +1,8 @@
 from typing import NewType
 import numpy as np
 
-# 可以是单个 numpy/tensor，也可以是 numpy/tensor 的列表，
-# 或者是 numpy/tensor 的字典（key为str），或者是嵌套的列表/字典
+# 可以是单个 numpy.ndarray，也可以是 numpy.ndarray 的列表，
+# 或者是 numpy.ndarray 的字典（key为str），或者是嵌套的列表/字典
 NestedArray = NewType("NestedArray", any)
 
 
