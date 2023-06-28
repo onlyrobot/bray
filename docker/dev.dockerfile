@@ -8,3 +8,7 @@ RUN pip install tensorboard==2.13.0
 RUN HOROVOD_WITH_GLOO=1 HOROVOD_WITH_TORCH=1 pip install horovod[ray]
 
 RUN apt install -y ssh vim git
+
+RUN ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa && \
+    cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys && \
+    chmod 600 ~/.ssh/authorized_keys
