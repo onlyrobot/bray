@@ -107,9 +107,12 @@ def train_atari(
     weights_publish_interval,
     num_steps,
 ):
+    to_gpu = torch.cuda.is_available()
     # initialize model
     remote_model = bray.RemoteModel(name=model)
     model = remote_model.get_model(step=-1)
+    if to_gpu:
+        model.cuda()
     # initialize optimizer
     parameters = model.parameters()
     optimizer = torch.optim.Adam(parameters, lr=5e-4)
@@ -118,7 +121,7 @@ def train_atari(
     # initialize buffer
     remote_buffer = bray.RemoteBuffer(name=buffer)
     buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size)
-    buffer = bray.TorchTensorBuffer(buffer)
+    buffer = bray.TorchTensorBuffer(buffer, to_gpu=to_gpu)
     buffer = bray.PrefetchBuffer(buffer)
     for i in range(num_steps):
         replay = next(buffer)

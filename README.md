@@ -138,7 +138,7 @@ bray.RemoteModel(name="atari_model", model=AtariModel())
 # 启动FakeBuffer自动地向Buffer推送数据
 bray.fake.FakeBuffer(name="atari_buffer")
 # 开始验证训练过程是否正常，中途会输出指标到tensorboard和日志到终端
-remote_trainer = bray.RemoteTrainer(num_workers=2, use_gpu=False)
+remote_trainer = bray.RemoteTrainer(use_gpu=False, num_workers=2)
 remote_trainer.train(train=train_atari, 
     model="atari_model", buffer="atari_buffer", batch_size=8,
     weights_publish_interval=1, num_steps=100000)

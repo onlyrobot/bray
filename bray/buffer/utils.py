@@ -29,13 +29,19 @@ class ReuseBuffer:
 
 
 class TorchTensorBuffer:
-    def __init__(self, buffer: Iterator[NestedArray]):
-        self.buffer = buffer
+    def __init__(self, buffer: Iterator[NestedArray], to_gpu: bool):
+        self.buffer, self.to_gpu = buffer, to_gpu
+
+    def handle(self, array):
+        tensor = torch.from_numpy(array)
+        if self.to_gpu:
+            tensor = tensor.cuda()
+        return tensor
 
     def __next__(self) -> NestedArray:
         return handle_nested_array(
             next(self.buffer),
-            torch.from_numpy,
+            self.handle,
         )
 
     def __iter__(self) -> Iterator[NestedArray]:

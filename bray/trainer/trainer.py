@@ -4,19 +4,39 @@ class RemoteTrainer:
     然后调用 train 函数
     """
 
-    def __init__(self, num_workers: int, use_gpu: bool):
+    def __init__(self, use_gpu: bool = None, num_workers: int = None):
         """
         Args:
-            num_workers: 训练的节点数
             use_gpu: 是否使用GPU
+            num_workers: 训练的节点数
         """
         from horovod.ray import RayExecutor
+        import math
+        import ray
+
+        total_cpus = ray.available_resources()["CPU"]
+        total_gpus = ray.available_resources().get("GPU", 0)
+
+        use_gpu = use_gpu if use_gpu else total_gpus > 0
+
+        if not use_gpu:
+            trainer_cpus = max(1, total_cpus * 3 // 4)
+            num_workers = num_workers if num_workers else int(math.sqrt(trainer_cpus))
+            cpus_per_worker = trainer_cpus // num_workers
+        else:
+            cpus_per_worker = 2
+            num_workers = num_workers if num_workers else total_gpus
+
+        print(
+            f"Trainer start with {num_workers} {'GPU' if use_gpu else 'CPU'} workers, "
+            + f"{cpus_per_worker} cpus per worker"
+        )
 
         settings = RayExecutor.create_settings()
         self.executor = RayExecutor(
             settings,
             num_workers=num_workers,
-            cpus_per_worker=6,
+            cpus_per_worker=cpus_per_worker,
             use_gpu=use_gpu,
         )
         self.executor.start()

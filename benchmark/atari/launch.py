@@ -14,8 +14,8 @@ remote_model = bray.RemoteModel(
 )
 
 remote_trainer = bray.RemoteTrainer(
-    num_workers=1,
-    use_gpu=False,
+    use_gpu=None,
+    num_workers=None,
 )
 
 remote_trainer.train(
