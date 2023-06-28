@@ -76,7 +76,7 @@ class Model:
         self.weights = ray.put(get_torch_model_weights(torch_model))
         self.step = 0
         self.step_cond = asyncio.Condition()
-        self.workers = [TorchModelWorker.remote(self.name) for _ in range(4)]
+        self.workers = [TorchModelWorker.remote(self.name) for _ in range(2)]
         asyncio.create_task(self._health_check())
         self.ckpt_step = 0
         trial_path = ray.get_runtime_context().namespace
@@ -136,20 +136,20 @@ class Model:
             model=self.name,
         )
         # 假设以概率p下掉worker，那么下掉后的worker数量为(1-p)*worker_num
-        # 目标负载率为0.75，那么下掉后的负载量为(1-p)*worker_num*0.75
+        # 目标负载率为0.6，那么下掉后的负载量为(1-p)*worker_num*0.6
         # 它应该等于当前测得的负载量，
-        # 即(1-p)*worker_num*0.75 == worker_num * load_rate
-        # 解得p = 1 - load_rate / 0.75
-        # 为了避免过度下掉，我们加入平滑因子 0.5
-        if load_rate < 0.7 and len(self.workers) > 1:
-            p = 1 - load_rate / 0.75
-            shrink_num = int(p * 0.5 * len(self.workers))
+        # 即(1-p)*worker_num*0.6 == worker_num * load_rate
+        # 解得p = 1 - load_rate / 0.6
+        # 为了避免过度下掉，我们加入平滑因子 0.25 * random.random()
+        if load_rate < 0.4 and len(self.workers) > 1:
+            p = 1 - load_rate / 0.6
+            shrink_num = int(p * 0.25 * random.random() * len(self.workers))
             del self.workers[len(self.workers) - shrink_num :]
             return
-        if load_rate < 0.8:
+        if load_rate < 0.55:
             return
         # 三级调控，保证负载均衡响应速度，同时避免过度调控
-        add_num = 1 if load_rate < 0.9 else (2 if load_rate < 0.95 else 3)
+        add_num = 1 if load_rate < 0.7 else (2 if load_rate < 0.8 else 3)
         self.workers.extend(
             [TorchModelWorker.remote(self.name) for _ in range(add_num)]
         )

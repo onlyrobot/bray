@@ -148,7 +148,7 @@ class MetricsWorker:
         merge_remote_time = time.time()
         merge_time_interval = merge_remote_time - self.last_merge_remote_time
         self.merge_remote_interval = 2 + min(
-            2 * self.merge_count,
+            self.merge_count + self.merge_count // 2,
             int((self.merge_count - 1) * 60 / merge_time_interval),
         )
         self.last_merge_remote_time = merge_remote_time
