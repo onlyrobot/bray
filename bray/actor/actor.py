@@ -20,17 +20,19 @@ class ActorWorker:
         return self.actor.start(game_id, data)
 
     async def tick(self, data: bytes) -> bytes:
-        self.active_time = time.time()
-        tick_return = await self.actor.tick(data)
+        beg = time.time()
+        ret = await self.actor.tick(data)
+        tick_time = (time.time() - beg) * 1000
         merge(
             "tick",
-            (time.time() - self.active_time) * 1000,
+            tick_time,
             desc={
                 "time_window_avg": "tick latency ms",
                 "time_window_cnt": "tick per minute",
             },
         )
-        return tick_return
+        self.active_time = beg
+        return ret
 
     def end(self, data: bytes) -> bytes:
         return self.actor.end(data)
@@ -85,7 +87,7 @@ class ActorGateway:
         if worker:
             raise Exception(f"Game {game_id} already started.")
         worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
-        worker.start.remote(game_id, data)
+        task = worker.start.remote(game_id, data)
         self.workers[game_id] = worker
         merge(
             "worker",
@@ -94,7 +96,7 @@ class ActorGateway:
             actor="actor",
         )
         asyncio.create_task(self._check_workers(game_id))
-        return b"Game started."
+        return await task
 
     async def tick(self, game_id, data) -> bytes:
         worker = self.workers.get(game_id, None)

@@ -13,7 +13,7 @@ class Actor:
         """
         raise NotImplementedError
 
-    async def start(self, game_id, data: bytes) -> bytes:
+    def start(self, game_id, data: bytes) -> bytes:
         """
         开始一局新的游戏，由Gamecore调用，请在这里初始化游戏状态
         Args:
@@ -22,8 +22,9 @@ class Actor:
         Returns:
             一个任意的字节串，通常是游戏状态
         """
+        raise NotImplementedError
 
-    def tick(self, data: bytes) -> bytes:
+    async def tick(self, data: bytes) -> bytes:
         """
         执行一步游戏，由Gamecore调用，在这里需要执行以下操作：
         1. 从data中解析出游戏状态

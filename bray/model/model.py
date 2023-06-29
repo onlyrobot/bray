@@ -18,8 +18,9 @@ def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
 
 
 def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
-    for p, w in zip(model.parameters(), weights):
-        p.copy_(torch.from_numpy(w))
+    with torch.no_grad():
+        for p, w in zip(model.parameters(), weights):
+            p.copy_(torch.from_numpy(w))
 
 
 @ray.remote
@@ -28,14 +29,14 @@ def save_torch_model_weights(weights: NestedArray, path: str):
 
 
 class TorchModelWorker:
-    async def __init__(self, name: str):
+    def __init__(self, name: str):
         self.name, self.model = name, ray.get_actor(name)
-        weights, self.current_step = await self.model.get_weights.remote()
-        torch_model = await self.model.get_model.remote(step=-1)
+        weights, self.current_step = ray.get(self.model.get_weights.remote())
+        torch_model = ray.get(self.model.get_model.remote(step=-1))
         self.torch_model = torch_model
         torch_model.requires_grad_(False)
         torch_model.eval()
-        set_torch_model_weights(torch_model, await weights)
+        set_torch_model_weights(torch_model, ray.get(weights))
         asyncio.create_task(self._subscribe_weights())
 
     def forward(self, inputs: NestedArray) -> NestedArray:
@@ -238,7 +239,7 @@ class RemoteModel:
 
     async def _local_forward(self, inputs: NestedArray) -> NestedArray:
         if self.local_worker is None:
-            self.local_worker = await TorchModelWorker(self.name)
+            self.local_worker = TorchModelWorker(self.name)
         return self.local_worker.forward(inputs)
 
     async def forward(self, inputs: NestedArray, local=False) -> NestedArray:
