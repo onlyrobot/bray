@@ -88,7 +88,7 @@ remote_model = bray.RemoteModel(
     inputs=np.random.randn(42, 42, 4).astype(np.float32),
     )
 # 以下命令可以在集群中任何地方执行
-outputs = ray.get(remote_model.foward(inputs))
+outputs = asyncio.run(remote_model.foward(inputs))
 model = remote_model.get_model()
 weights = bray.get_torch_model_weights(model)
 remote_model.publish_weights(weights)

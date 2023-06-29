@@ -13,7 +13,7 @@ class Actor:
         """
         raise NotImplementedError
 
-    def start(self, game_id, data: bytes) -> bytes:
+    async def start(self, game_id, data: bytes) -> bytes:
         """
         开始一局新的游戏，由Gamecore调用，请在这里初始化游戏状态
         Args:

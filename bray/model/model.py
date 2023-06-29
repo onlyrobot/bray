@@ -27,19 +27,18 @@ def save_torch_model_weights(weights: NestedArray, path: str):
     torch.save(weights, path)
 
 
-@ray.remote
 class TorchModelWorker:
     async def __init__(self, name: str):
         self.name, self.model = name, ray.get_actor(name)
         weights, self.current_step = await self.model.get_weights.remote()
-        torch_model = ray.get(self.model.get_model.remote(step=-1))
+        torch_model = await self.model.get_model.remote(step=-1)
         self.torch_model = torch_model
         torch_model.requires_grad_(False)
         torch_model.eval()
-        set_torch_model_weights(torch_model, ray.get(weights))
+        set_torch_model_weights(torch_model, await weights)
         asyncio.create_task(self._subscribe_weights())
 
-    async def forward(self, inputs: NestedArray) -> NestedArray:
+    def forward(self, inputs: NestedArray) -> NestedArray:
         inputs = make_batch([inputs])
         inputs = handle_nested_array(inputs, torch.from_numpy)
         beg = time.time()
@@ -61,7 +60,7 @@ class TorchModelWorker:
         weights, step = await self.model.subscribe_weights.remote(self.current_step)
         assert step > self.current_step
         self.current_step = step
-        set_torch_model_weights(self.torch_model, ray.get(weights))
+        set_torch_model_weights(self.torch_model, await weights)
         asyncio.create_task(self._subscribe_weights())
 
 
@@ -76,7 +75,9 @@ class Model:
         self.weights = ray.put(get_torch_model_weights(torch_model))
         self.step = 0
         self.step_cond = asyncio.Condition()
-        self.workers = [TorchModelWorker.remote(self.name) for _ in range(2)]
+        self.workers = [
+            ray.remote(TorchModelWorker).remote(self.name) for _ in range(2)
+        ]
         asyncio.create_task(self._health_check())
         self.ckpt_step = 0
         trial_path = ray.get_runtime_context().namespace
@@ -105,11 +106,11 @@ class Model:
         async with self.step_cond:
             self.step_cond.notify_all()
 
-    def get_model(self, step) -> torch.nn.Module:
+    async def get_model(self, step) -> torch.nn.Module:
         if step != -1:
             raise NotImplementedError
         with torch.no_grad():
-            set_torch_model_weights(self.torch_model, ray.get(self.weights))
+            set_torch_model_weights(self.torch_model, await self.weights)
         return self.torch_model
 
     def get_workers(self) -> list[TorchModelWorker]:
@@ -125,7 +126,7 @@ class Model:
 
     def _load_balance(self):
         if len(self.workers) == 0:
-            self.workers.append(TorchModelWorker.remote(self.name))
+            self.workers.append(ray.remote(TorchModelWorker).remote(self.name))
             return
         forward_time_sum = query("forward", kind="sum", model=self.name)
         load_rate = forward_time_sum / (len(self.workers) * 60 * 1000)
@@ -140,18 +141,21 @@ class Model:
         # 它应该等于当前测得的负载量，
         # 即(1-p)*worker_num*0.6 == worker_num * load_rate
         # 解得p = 1 - load_rate / 0.6
-        # 为了避免过度下掉，我们加入平滑因子 0.25 * random.random()
+        # 为了避免过度下掉，我们加入平滑因子 random.random() * random.random()
         if load_rate < 0.4 and len(self.workers) > 1:
             p = 1 - load_rate / 0.6
-            shrink_num = int(p * 0.25 * random.random() * len(self.workers))
+            shrink_num = int(p * random.random() * random.random() * len(self.workers))
             del self.workers[len(self.workers) - shrink_num :]
             return
         if load_rate < 0.55:
             return
         # 三级调控，保证负载均衡响应速度，同时避免过度调控
-        add_num = 1 if load_rate < 0.7 else (2 if load_rate < 0.8 else 3)
+        add_rate = 0.5 if load_rate < 0.7 else (1 if load_rate < 0.8 else 1.5)
         self.workers.extend(
-            [TorchModelWorker.remote(self.name) for _ in range(add_num)]
+            [
+                ray.remote(TorchModelWorker).remote(self.name)
+                for _ in range(1 + int(add_rate * len(self.workers)))
+            ]
         )
 
     async def _is_health(self, worker):
@@ -200,7 +204,7 @@ class Model:
         await asyncio.sleep(10 * 60)
         if self.ckpt_step < self.step:
             save_torch_model_weights.remote(
-                ray.get(self.weights),
+                self.weights,
                 os.path.join(
                     self.ckpt_dir,
                     f"step-{self.step}.pt",
@@ -228,28 +232,36 @@ class RemoteModel:
         self.model = Model.options(
             name=name, get_if_exists=True, lifetime="detached"
         ).remote(name, model, inputs)
-        self.workers, self.worker_index = [], 0
-        self.sync()
+        self.worker_index = 0
+        self.workers = ray.get(self.model.get_workers.remote())
+        self.local_worker = None
 
-    def forward(self, inputs: NestedArray) -> ray.ObjectRef:
+    async def _local_forward(self, inputs: NestedArray) -> NestedArray:
+        if self.local_worker is None:
+            self.local_worker = await TorchModelWorker(self.name)
+        return self.local_worker.forward(inputs)
+
+    async def forward(self, inputs: NestedArray, local=False) -> NestedArray:
         """
         执行模型的前向计算，返回模型的输出
         Args:
-            inputs: 模型的输入
+            inputs: 模型的输入，是一个 NestedArray
         Returns:
-            模型的输出，是一个Ray ObjectRef，可以通过ray.get()获取
+            模型的输出，是一个 NestedArray
         """
+        if local:
+            return await self._local_forward(inputs)
         if len(self.workers) == 0:
-            self.sync()
+            await self.sync()
         if len(self.workers) == 0:
             raise RuntimeError("No available workers")
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         try:
-            return self.workers[index].forward.remote(inputs)
+            return await self.workers[index].forward.remote(inputs)
         except ray.exceptions.RayActorError:
-            self.sync()
-            return self.forward(inputs)
+            await self.sync()
+            return await self.forward(inputs)
 
     def get_model(self, step: int = -1) -> torch.nn.Module:
         """
@@ -278,5 +290,5 @@ class RemoteModel:
         """
         self.model.set_weights.remote([ray.put(weights)])
 
-    def sync(self):
-        self.workers = ray.get(self.model.get_workers.remote())
+    async def sync(self):
+        self.workers = await self.model.get_workers.remote()

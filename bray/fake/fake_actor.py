@@ -10,7 +10,7 @@ class FakeActor(bray.Actor):
         print("FakeActor.start: ", game_id, data)
         return self.config["fake_actor_start_return"]
 
-    def tick(self, data):
+    async def tick(self, data):
         print("FakeActor.tick: ", data)
         return self.config["fake_actor_tick_return"]
 

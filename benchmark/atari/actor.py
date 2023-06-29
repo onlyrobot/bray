@@ -2,8 +2,6 @@ import numpy as np
 import bray
 import json
 from bray import NestedArray
-import ray
-import time
 
 
 def gae(trajectory: list[NestedArray]) -> None:
@@ -62,12 +60,12 @@ class AtariActor(bray.Actor):
         }
         self.trajectory.append(transition)
 
-    def tick(self, data: bytes) -> bytes:
+    async def tick(self, data: bytes) -> bytes:
         data = json.loads(data)
         obs = np.array(data["obs"], dtype=np.float32)
         reward = data["reward"]
         self.episode_reward += reward
-        value, logit, action = ray.get(self.remote_model.forward(obs))
+        value, logit, action = await self.remote_model.forward(obs)
         self._append_to_trajectory(obs, action, reward, value, logit)
         return json.dumps({"action": action.tolist()})
 

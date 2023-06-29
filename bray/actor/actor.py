@@ -19,9 +19,9 @@ class ActorWorker:
         self.active_time = time.time()
         return self.actor.start(game_id, data)
 
-    def tick(self, data: bytes) -> bytes:
+    async def tick(self, data: bytes) -> bytes:
         self.active_time = time.time()
-        tick_return = self.actor.tick(data)
+        tick_return = await self.actor.tick(data)
         merge(
             "tick",
             (time.time() - self.active_time) * 1000,
