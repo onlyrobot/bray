@@ -139,7 +139,11 @@ class RemoteActor:
             *args: Actor 的位置参数
             **kwargs: Actor 的关键字参数
         """
-        self.gateway = ActorGateway.bind(Actor, *args, **kwargs)
+        total_cpus = ray.available_resources()["CPU"]
+        num_replicas = total_cpus // 16 + 1
+        self.gateway = ActorGateway.options(num_replicas=num_replicas).bind(
+            Actor, *args, **kwargs
+        )
         print("Starting ActorGateway.")
         serve.run(self.gateway, host="0.0.0.0", port=self.port)
         print("ActorGateway started.")
