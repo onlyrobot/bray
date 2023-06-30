@@ -9,10 +9,13 @@ NestedArray = NewType("NestedArray", any)
 def handle_nested_array(inputs, handler: callable, type_check=True):
     if isinstance(inputs, np.ndarray):
         return handler(inputs)
-    elif isinstance(inputs, (list, tuple)):
+    elif isinstance(inputs, list):
         return [handle_nested_array(i, handler, type_check) for i in inputs]
+    elif isinstance(inputs, tuple):
+        return tuple(handle_nested_array(i, handler, type_check) for i in inputs)
     elif isinstance(inputs, dict):
-        sorted_items = sorted(list(inputs.items()))
+        # sorted_items = sorted(list(inputs.items()))
+        sorted_items = inputs.items()
         return {
             k: handle_nested_array(
                 v,

@@ -11,6 +11,7 @@ from bray.utils.nested_array import (
     handle_nested_array,
 )
 from bray.metric.metric import merge, query
+from bray.model.utils import export_onnx
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -39,11 +40,12 @@ class TorchModelWorker:
         set_torch_model_weights(torch_model, ray.get(weights))
         asyncio.create_task(self._subscribe_weights())
 
-    def forward(self, inputs: NestedArray) -> NestedArray:
-        inputs = make_batch([inputs])
-        inputs = handle_nested_array(inputs, torch.from_numpy)
+    def forward(self, *args, **kwargs) -> NestedArray:
+        args, kwargs = make_batch([args]), make_batch([kwargs])
+        args = handle_nested_array(args, torch.from_numpy)
+        kwargs = handle_nested_array(kwargs, torch.from_numpy)
         beg = time.time()
-        outputs = self.torch_model(inputs)
+        outputs = self.torch_model(*args, **kwargs)
         merge(
             "forward",
             (time.time() - beg) * 1000,
@@ -67,12 +69,10 @@ class TorchModelWorker:
 
 @ray.remote
 class Model:
-    async def __init__(
-        self, name: str, torch_model: torch.nn.Module, inputs: NestedArray
-    ):
+    async def __init__(self, name: str, torch_model: torch.nn.Module, forward_args):
         self.name, self.torch_model = name, torch_model
-        assert inputs is not None, "model inputs must be provided"
-        self.inputs = inputs
+        assert forward_args, "model inputs must be provided"
+        self.forward_args = forward_args
         self.weights = ray.put(get_torch_model_weights(torch_model))
         self.step = 0
         self.step_cond = asyncio.Condition()
@@ -80,8 +80,12 @@ class Model:
             ray.remote(TorchModelWorker).remote(self.name) for _ in range(2)
         ]
         asyncio.create_task(self._health_check())
-        self.ckpt_step = 0
         trial_path = ray.get_runtime_context().namespace
+        torch_path = os.path.join(trial_path, f"torch/{self.name}.pt")
+        if not os.path.exists(torch_path):
+            os.makedirs(os.path.dirname(torch_path), exist_ok=True)
+            torch.save(self.torch_model, torch_path)
+        self.ckpt_step = 0
         self.ckpt_dir = os.path.join(trial_path, f"checkpoint/{self.name}")
         if os.path.exists(self.ckpt_dir):
             try:
@@ -91,6 +95,10 @@ class Model:
         else:
             os.makedirs(self.ckpt_dir, exist_ok=True)
         asyncio.create_task(self._save_checkpoint())
+        onnx_path = os.path.join(trial_path, f"onnx/{self.name}.onnx")
+        if not os.path.exists(onnx_path):
+            os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+            # export_onnx(self.torch_model, self.forward_args, onnx_path)
 
     async def set_weights(self, weights: list[ray.ObjectRef]):
         self.weights = weights[0]
@@ -161,7 +169,7 @@ class Model:
 
     async def _is_health(self, worker):
         try:
-            await worker.forward.remote(self.inputs)
+            await worker.forward.remote(*self.forward_args)
             return True
         except ray.exceptions.RayActorError:
             return False
@@ -221,37 +229,42 @@ class RemoteModel:
     """
 
     def __init__(
-        self, name: str, model: torch.nn.Module = None, inputs: NestedArray = None
+        self,
+        name: str,
+        model: torch.nn.Module = None,
+        forward_args: tuple[NestedArray] = None,
     ):
         """
         Args:
             name: 模型的名字，用于在Ray集群中标识模型
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
-            inputs: 模型的输入，用于初始化模型和验证模型正确性
+            forward_args: 模型forward的参数输入，类型为 tuple[NestedArray]，用于初始化模型
         """
-        self.name, self.inputs = name, inputs
+        self.name, self.forward_args = name, forward_args
         self.model = Model.options(
             name=name, get_if_exists=True, lifetime="detached"
-        ).remote(name, model, inputs)
+        ).remote(name, model, forward_args)
         self.worker_index = 0
         self.workers = ray.get(self.model.get_workers.remote())
+        self.local = True
         self.local_worker = None
 
-    async def _local_forward(self, inputs: NestedArray) -> NestedArray:
+    async def _local_forward(self, *args, **kwargs) -> NestedArray:
         if self.local_worker is None:
             self.local_worker = TorchModelWorker(self.name)
-        return self.local_worker.forward(inputs)
+        return self.local_worker.forward(*args, **kwargs)
 
-    async def forward(self, inputs: NestedArray, local=False) -> NestedArray:
+    async def forward(self, *args, **kwargs) -> NestedArray:
         """
         执行模型的前向计算，返回模型的输出
         Args:
-            inputs: 模型的输入，是一个 NestedArray
+            *args: 模型的位置参数输入，是一个 NestedArray
+            **kwargs: 模型的关键字参数输入，是一个 NestedArray
         Returns:
             模型的输出，是一个 NestedArray
         """
-        if local:
-            return await self._local_forward(inputs)
+        if self.local:
+            return await self._local_forward(*args, **kwargs)
         if len(self.workers) == 0:
             await self.sync()
         if len(self.workers) == 0:
@@ -259,10 +272,10 @@ class RemoteModel:
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         try:
-            return await self.workers[index].forward.remote(inputs)
+            return await self.workers[index].forward.remote(*args, **kwargs)
         except ray.exceptions.RayActorError:
             await self.sync()
-            return await self.forward(inputs)
+            return await self.forward(*args, **kwargs)
 
     def get_model(self, step: int = -1) -> torch.nn.Module:
         """
