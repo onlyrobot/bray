@@ -94,6 +94,8 @@ weights = bray.get_torch_model_weights(model)
 remote_model.publish_weights(weights)
 ```
 
+> 需要注意的是，这里的 `forward_args` 为 `tuple[NestedArray]`，它并不直接传给 `AtariModel().forward` 函数，而是还会经过组Batch和Numpy Array转Torch Tensor过程，所以在 `AtariModel().forward` 中看到的是转换后的增加一个Batch维度的 `NestedTensor`，同样的调用 `RemoteModel().forward` 函数也会经过这两步。
+
 ### 3. Actor接入
 
 强化学习中的Actor一般指的是和环境交互，采样得到Replay的有状态执行单元。它的具体功能包括：
