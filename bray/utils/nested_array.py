@@ -56,7 +56,17 @@ def make_batch(nested_arrays: list[NestedArray]) -> NestedArray:
         return []
     flatten_arrays = [flatten_nested_array(arrays) for arrays in nested_arrays]
     arrays = zip(*flatten_arrays)
-    batch_arrays = [np.stack(a) for a in arrays]
+    try:
+        batch_arrays = [np.stack(a) for a in arrays]
+    except ValueError:
+        # if the arrays have different shapes, stack will raise ValueError
+        print("Error: the arrays have different shapes or dtypes.")
+        print("Batch signatures: ")
+        for signature in handle_nested_array(
+            nested_arrays, lambda x: (x.shape, x.dtype)
+        ):
+            print(signature)
+        raise
     return unflatten_nested_array(nested_arrays[0], batch_arrays)
 
 
