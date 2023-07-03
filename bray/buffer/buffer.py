@@ -1,4 +1,5 @@
 from typing import Iterator
+import random
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -87,23 +88,29 @@ class RemoteBuffer:
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, lifetime="detached"
         ).remote()
-        self.workers, self.worker_index = [], 0
+        self.workers, self.worker_index = [], random.randint(0, 100)
         self.sync()
         self.buffer_worker = None
 
-    def push(self, *reploys: NestedArray):
+    def push(self, *replays: NestedArray):
+        if len(replays) == 0:
+            return
         if len(self.workers) == 0:
             self.sync()
         if len(self.workers) == 0:
             print("No buffer worker found, push failed.")
             return
+        max_push_size = 100
+        if len(replays) > max_push_size:
+            self.push(*replays[max_push_size:])
+            replays = replays[:max_push_size]
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         try:
-            self.workers[index].push.remote(*reploys)
+            self.workers[index].push.remote(*replays)
         except ray.exceptions.RayActorError:
             self.sync()
-            self.push(*reploys)
+            self.push(*replays)
 
     def sync(self):
         self.workers = ray.get(self.buffer.get_workers.remote())

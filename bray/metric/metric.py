@@ -35,7 +35,7 @@ class RemoteMetrics:
         return Metric(current.cnt - last.cnt, current.sum - last.sum)
 
     def merge(self, name, metric, desc: dict[str:str]):
-        if desc:
+        if desc is not None:
             self.descs[name] = desc
         m = self.metrics.get(name, None)
         if m:

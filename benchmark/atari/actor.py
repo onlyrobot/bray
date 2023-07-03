@@ -66,8 +66,7 @@ class AtariActor(bray.Actor):
             self.trajectory[-1]["reward"] = reward
         if end or len(self.trajectory) > 128:
             gae(self.trajectory)
-            for transition in self.trajectory:
-                self.remote_buffer.push(transition)
+            self.remote_buffer.push(*self.trajectory)
             self.trajectory = []
         transition = {
             "obs": obs,

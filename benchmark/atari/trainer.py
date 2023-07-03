@@ -110,7 +110,7 @@ def train_atari(
     to_gpu = torch.cuda.is_available()
     # initialize model
     remote_model = bray.RemoteModel(name=model)
-    model = remote_model.get_model(step=-1)
+    model = remote_model.get_model()
     if to_gpu:
         model.cuda()
     # initialize optimizer

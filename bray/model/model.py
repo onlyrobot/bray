@@ -4,7 +4,9 @@ import random
 import os
 
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import torch
+import numpy as np
 from bray.utils.nested_array import (
     NestedArray,
     make_batch,
@@ -32,8 +34,9 @@ def save_torch_model_weights(weights: NestedArray, path: str):
 class TorchModelWorker:
     def __init__(self, name: str):
         self.name, self.model = name, ray.get_actor(name)
-        weights, self.current_step = ray.get(self.model.get_weights.remote())
-        torch_model = ray.get(self.model.get_model.remote(step=-1))
+        torch_model = ray.get(ray.get(self.model.get_model.remote()))
+        self.current_step = ray.get(self.model.get_step.remote())
+        weights = ray.get(self.model.get_weights.remote())
         self.torch_model = torch_model
         torch_model.requires_grad_(False)
         torch_model.eval()
@@ -70,7 +73,7 @@ class TorchModelWorker:
 @ray.remote
 class Model:
     async def __init__(self, name: str, torch_model: torch.nn.Module, forward_args):
-        self.name, self.torch_model = name, torch_model
+        self.name, self.model = name, ray.put(torch_model)
         assert forward_args, "model inputs must be provided"
         self.forward_args = forward_args
         self.weights = ray.put(get_torch_model_weights(torch_model))
@@ -84,12 +87,15 @@ class Model:
         torch_path = os.path.join(trial_path, f"torch/{self.name}.pt")
         if not os.path.exists(torch_path):
             os.makedirs(os.path.dirname(torch_path), exist_ok=True)
-            torch.save(self.torch_model, torch_path)
+            torch.save(torch_model, torch_path)
         self.ckpt_step = 0
         self.ckpt_dir = os.path.join(trial_path, f"checkpoint/{self.name}")
         if os.path.exists(self.ckpt_dir):
             try:
-                self._load_checkpoint()
+                weights, step = self._load_checkpoint(step=-1)
+                self.weights = ray.put(weights)
+                self.step, self.ckpt_step = step, step
+                print(f"load checkpoint at step {step}")
             except Exception as e:
                 print(f"load checkpoint failed: {e}")
         else:
@@ -115,18 +121,16 @@ class Model:
         async with self.step_cond:
             self.step_cond.notify_all()
 
-    async def get_model(self, step) -> torch.nn.Module:
-        if step != -1:
-            raise NotImplementedError
-        with torch.no_grad():
-            set_torch_model_weights(self.torch_model, await self.weights)
-        return self.torch_model
-
-    def get_workers(self) -> list[TorchModelWorker]:
-        return self.workers
-
-    def get_weights(self) -> tuple[ray.ObjectRef, int]:
-        return self.weights, self.step
+    async def clone(self, step, name) -> None:
+        weights, ckpt_step = self._load_checkpoint(step)
+        print(f"clone model {self.name} to {name} at step {ckpt_step}")
+        torch_model = ray.get(self.model)
+        set_torch_model_weights(torch_model, weights)
+        Model.options(
+            name=name,
+            get_if_exists=True,
+            lifetime="detached",
+        ).remote(name, torch_model, self.forward_args)
 
     async def subscribe_weights(self, current_step):
         async with self.step_cond:
@@ -138,7 +142,11 @@ class Model:
             self.workers.append(ray.remote(TorchModelWorker).remote(self.name))
             return
         forward_time_sum = query("forward", kind="sum", model=self.name)
-        load_rate = forward_time_sum / (len(self.workers) * 60 * 1000)
+        local_forward_time_sum = query(
+            "forward", kind="sum", model=self.name, mode="local"
+        )
+        forward_time_sum -= local_forward_time_sum
+        load_rate = max(0.0, forward_time_sum) / (len(self.workers) * 60 * 1000)
         merge(
             "load",
             load_rate,
@@ -197,30 +205,49 @@ class Model:
         await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
 
-    def _load_checkpoint(self):
+    def _load_checkpoint(self, step=-1) -> tuple[NestedArray, int]:
         ckpts = os.listdir(self.ckpt_dir)
         ckpts = [int(ckpt.split(".")[0].split("-")[1]) for ckpt in ckpts]
         if not ckpts:
-            return
+            return ray.get(self.weights), 0
         ckpts.sort()
-        self.ckpt_step = ckpts[-1]
-        self.step = self.ckpt_step
-        ckpt_path = os.path.join(self.ckpt_dir, f"step-{self.ckpt_step}.pt")
-        self.weights = ray.put(torch.load(ckpt_path))
-        print(f"load checkpoint {ckpt_path}")
+        if step == -1:
+            ckpt_step = ckpts[-1]
+        else:
+            index = np.searchsorted(ckpts, step)
+            ckpt_step = ckpts[max(0, index - 1)]
+        ckpt_path = os.path.join(self.ckpt_dir, f"step-{ckpt_step}.pt")
+        return torch.load(ckpt_path), ckpt_step
 
     async def _save_checkpoint(self):
         await asyncio.sleep(10 * 60)
-        if self.ckpt_step < self.step:
-            save_torch_model_weights.remote(
-                self.weights,
-                os.path.join(
-                    self.ckpt_dir,
-                    f"step-{self.step}.pt",
-                ),
-            )
-            self.ckpt_step = self.step
         asyncio.create_task(self._save_checkpoint())
+        if self.ckpt_step >= self.step:
+            return
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        )
+        ckpt_path = os.path.join(
+            self.ckpt_dir,
+            f"step-{self.step}.pt",
+        )
+        save_torch_model_weights.options(scheduling_strategy=scheduling_local).remote(
+            self.weights, ckpt_path
+        )
+        self.ckpt_step = self.step
+
+    def get_weights(self) -> ray.ObjectRef:
+        return self.weights
+
+    def get_step(self) -> int:
+        return self.step
+
+    async def get_model(self) -> ray.ObjectRef:
+        return self.model
+
+    def get_workers(self) -> list[TorchModelWorker]:
+        return self.workers
 
 
 class RemoteModel:
@@ -252,7 +279,11 @@ class RemoteModel:
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
         if self.local_worker is None:
             self.local_worker = TorchModelWorker(self.name)
-        return self.local_worker.forward(*args, **kwargs)
+        beg = time.time()
+        outputs = self.local_worker.forward(*args, **kwargs)
+        forward_time_ms = (time.time() - beg) * 1000
+        merge("forward", forward_time_ms, model=self.name, desc={}, mode="local")
+        return outputs
 
     async def forward(self, *args, **kwargs) -> NestedArray:
         """
@@ -277,23 +308,42 @@ class RemoteModel:
             await self.sync()
             return await self.forward(*args, **kwargs)
 
-    def get_model(self, step: int = -1) -> torch.nn.Module:
+    @property
+    def step(self) -> int:
         """
-        获取被封装的原始模型，在Trainer里面会用到
-        Args:
-            step: 模型的版本号，如果为-1，会返回最新的模型
+        获取模型的最新版本号，每次调用 `remote_model.publish_weights` 会增加版本号
         Returns:
-            被封装的Pytorch模型
+            模型的版本号
         """
-        return ray.get(self.model.get_model.remote(step))
+        return ray.get(self.model.get_step.remote())
 
-    def get_weights(self) -> tuple[NestedArray, int]:
+    def get_model(self) -> torch.nn.Module:
         """
-        获取模型的最新权重和版本号
+        获取被封装的原始模型，权重为最新权重，在Trainer里面会用到
         Returns:
-            模型的权重和版本号
+            被封装的Pytorch模型，权重为最新的权重
         """
-        return ray.get(self.model.get_weights.remote())
+        torch_model = ray.get(ray.get(self.model.get_model.remote()))
+        weights = ray.get(ray.get(self.model.get_weights.remote()))
+        set_torch_model_weights(torch_model, weights)
+        return torch_model
+
+    def clone(self, step: int = -1, name=None) -> "RemoteModel":
+        """
+        克隆一个新的RemoteModel，用于SelfPlay和League的多智能体对抗
+        Args:
+            step: 克隆的模型的版本号，-1表示克隆最新版本
+        Returns:
+            克隆的RemoteModel
+        """
+        step = self.step if step == -1 else step
+        if name is None:
+            name = self.name + f"-{step}"
+        try:
+            ray.get_actor(name)
+        except ValueError:
+            ray.get(self.model.clone.remote(step, name))
+        return RemoteModel(name)
 
     def publish_weights(self, weights: NestedArray):
         """
