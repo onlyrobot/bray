@@ -15,7 +15,7 @@ class BufferWorker:
         self.name, self.buffer = name, ray.get_actor(name)
         self.replays, self.size = [], size
         self_handle = ray.get_runtime_context().current_actor
-        self.buffer.register.remote(self_handle)
+        ray.get(self.buffer.register.remote(self_handle))
         self.pop_cond = asyncio.Condition()
 
     async def push(self, *replays: NestedArray):
@@ -98,7 +98,7 @@ class RemoteBuffer:
         if len(self.workers) == 0:
             self.sync()
         if len(self.workers) == 0:
-            print("No buffer worker found, push failed.")
+            print(f"No buffer worker of {self.name} found, push failed.")
             return
         max_push_size = 100
         if len(replays) > max_push_size:

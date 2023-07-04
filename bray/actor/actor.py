@@ -144,6 +144,10 @@ class RemoteActor:
         self.gateway = ActorGateway.options(num_replicas=num_replicas).bind(
             Actor, *args, **kwargs
         )
+        # self.gateway = ActorGateway.options(is_driver_deployment=True).bind(
+        #     Actor, *args, **kwargs
+        # )
         print("Starting ActorGateway.")
-        serve.run(self.gateway, host="0.0.0.0", port=self.port)
+        serve.shutdown()
+        serve.run(self.gateway, host="0.0.0.0", port=self.port, name="ActorGateway")
         print("ActorGateway started.")

@@ -385,7 +385,8 @@ class RemoteModel:
             weights: 模型的权重，为一个numpy数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
-        self.model.set_weights.remote([ray.put(weights)])
+        # self.model.set_weights.remote([ray.put(weights)])
+        self.model.set_weights.remote([ray.put(weights, _owner=self.model)])
 
     async def sync(self):
         self.workers = await self.model.get_workers.remote()
