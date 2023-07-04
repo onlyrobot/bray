@@ -94,7 +94,9 @@ weights = bray.get_torch_model_weights(model)
 remote_model.publish_weights(weights)
 ```
 
-> 需要注意的是，这里的 `forward_args` 为 `tuple[NestedArray]`，它并不直接传给 `AtariModel().forward` 函数，而是还会经过组Batch和Numpy Array转Torch Tensor过程，所以在 `AtariModel().forward` 中看到的是转换后的增加一个Batch维度的 `NestedTensor`，同样的调用 `RemoteModel().forward` 函数也会经过这两步。
+> 注意：
+> * 这里的 `forward_args` 和 `forward_kwargs` 的类型分别是 `tuple[np.ndarray]` 和 `dict[str: np.ndarray]` ，传给 `AtariModel().forward` 函数时，会经过组Batch和转Torch Tensor，所以在 `AtariModel().forward` 中看到的是转换后的增加一个Batch维度的 `NestedTensor`。
+> * `AtariModel().forward` 输出应该为一个或者多个 Torch Tensor，且包含Batch维度，Bray会自动缩减掉该维度并且转为 `np.ndarray` 返回。
 
 ### 3. Actor接入
 

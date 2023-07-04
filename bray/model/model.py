@@ -72,39 +72,59 @@ class TorchModelWorker:
 
 @ray.remote
 class Model:
-    async def __init__(self, name: str, torch_model: torch.nn.Module, forward_args):
-        self.name, self.model = name, ray.put(torch_model)
-        assert forward_args, "model inputs must be provided"
-        self.forward_args = forward_args
-        self.weights = ray.put(get_torch_model_weights(torch_model))
-        self.step = 0
-        self.step_cond = asyncio.Condition()
-        self.workers = [
-            ray.remote(TorchModelWorker).remote(self.name) for _ in range(2)
-        ]
-        asyncio.create_task(self._health_check())
-        trial_path = ray.get_runtime_context().namespace
-        torch_path = os.path.join(trial_path, f"torch/{self.name}.pt")
+    async def __init__(
+        self, name: str, torch_model: torch.nn.Module, forward_args, forward_kwargs
+    ):
+        self.trial_path = ray.get_runtime_context().namespace
+        names = name.split("/")
+        root_path = os.path.join(self.trial_path, f"{names[0]}")
+        torch_path = os.path.join(root_path, f"{names[0]}.pt")
         if not os.path.exists(torch_path):
+            assert torch_model is not None, "torch model must be provided"
             os.makedirs(os.path.dirname(torch_path), exist_ok=True)
             torch.save(torch_model, torch_path)
-        self.ckpt_step = 0
-        self.ckpt_dir = os.path.join(trial_path, f"checkpoint/{self.name}")
+        else:
+            print("loading model from", torch_path)
+            torch_model = torch.load(torch_path)
+        self.name, self.model = name, ray.put(torch_model)
+
+        args_path = os.path.join(root_path, f"args.pt")
+        if not os.path.exists(args_path):
+            assert forward_args or forward_kwargs, "model inputs must be provided"
+            os.makedirs(os.path.dirname(args_path), exist_ok=True)
+            torch.save((forward_args, forward_kwargs), args_path)
+        else:
+            forward_args, forward_kwargs = torch.load(args_path)
+        self.forward_args, self.forward_kwargs = forward_args, forward_kwargs
+
+        weights, step = get_torch_model_weights(torch_model), 0
+        weights_path = os.path.join(self.trial_path, f"{self.name}/weights.pt")
+        if os.path.exists(weights_path):
+            weights, step = torch.load(weights_path), 0
+        self.ckpt_dir = os.path.join(self.trial_path, f"{self.name}/checkpoint")
         if os.path.exists(self.ckpt_dir):
             try:
                 weights, step = self._load_checkpoint(step=-1)
-                self.weights = ray.put(weights)
-                self.step, self.ckpt_step = step, step
-                print(f"load checkpoint at step {step}")
             except Exception as e:
                 print(f"load checkpoint failed: {e}")
         else:
             os.makedirs(self.ckpt_dir, exist_ok=True)
-        asyncio.create_task(self._save_checkpoint())
-        onnx_path = os.path.join(trial_path, f"onnx/{self.name}.onnx")
+        self.weights, self.step, self.ckpt_step = ray.put(weights), step, step
+        if self.step > 0:
+            print(f"model {self.name} load checkpoint at step {step}")
+
+        onnx_path = os.path.join(root_path, f"{names[0]}.onnx")
         if not os.path.exists(onnx_path):
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-            # export_onnx(self.torch_model, self.forward_args, onnx_path)
+            # export_onnx(torch_model, onnx_path, forward_args, forward_kwargs)
+        self.onnx_path = onnx_path
+
+        self.workers = [
+            ray.remote(TorchModelWorker).remote(self.name) for _ in range(2)
+        ]
+        self.step_cond = asyncio.Condition()
+        asyncio.create_task(self._health_check())
+        asyncio.create_task(self._save_checkpoint())
 
     async def set_weights(self, weights: list[ray.ObjectRef]):
         self.weights = weights[0]
@@ -121,16 +141,32 @@ class Model:
         async with self.step_cond:
             self.step_cond.notify_all()
 
-    async def clone(self, step, name) -> None:
+    async def clone(self, step) -> str:
+        step = self.step if step == -1 else step
+        name = self.name + f"/clone-step-{step}"
+        try:
+            ray.get_actor(name)
+            return name
+        except ValueError:
+            pass
+
+        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
+        if os.path.exists(weights_path):
+            return name
+        os.makedirs(os.path.dirname(weights_path), exist_ok=True)
         weights, ckpt_step = self._load_checkpoint(step)
-        print(f"clone model {self.name} to {name} at step {ckpt_step}")
-        torch_model = ray.get(self.model)
-        set_torch_model_weights(torch_model, weights)
+        torch.save(weights, weights_path)
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        )
         Model.options(
             name=name,
             get_if_exists=True,
-            lifetime="detached",
-        ).remote(name, torch_model, self.forward_args)
+            scheduling_strategy=scheduling_local,
+        ).remote(name)
+        print(f"clone model {self.name} to {name} at step {ckpt_step}")
+        return name
 
     async def subscribe_weights(self, current_step):
         async with self.step_cond:
@@ -177,7 +213,7 @@ class Model:
 
     async def _is_health(self, worker):
         try:
-            await worker.forward.remote(*self.forward_args)
+            await worker.forward.remote(*self.forward_args, **self.forward_kwargs)
             return True
         except ray.exceptions.RayActorError:
             return False
@@ -209,7 +245,7 @@ class Model:
         ckpts = os.listdir(self.ckpt_dir)
         ckpts = [int(ckpt.split(".")[0].split("-")[1]) for ckpt in ckpts]
         if not ckpts:
-            return ray.get(self.weights), 0
+            return get_torch_model_weights(ray.get(self.model)), 0
         ckpts.sort()
         if step == -1:
             ckpt_step = ckpts[-1]
@@ -259,18 +295,20 @@ class RemoteModel:
         self,
         name: str,
         model: torch.nn.Module = None,
-        forward_args: tuple[NestedArray] = None,
+        forward_args: tuple[np.ndarray] = (),
+        forward_kwargs: dict[str : np.ndarray] = {},
     ):
         """
         Args:
             name: 模型的名字，用于在Ray集群中标识模型
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
-            forward_args: 模型forward的参数输入，类型为 tuple[NestedArray]，用于初始化模型
+            forward_args: 模型forward的位置参数输入，用于初始化模型
+            forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
         """
-        self.name, self.forward_args = name, forward_args
+        self.name = name
         self.model = Model.options(
             name=name, get_if_exists=True, lifetime="detached"
-        ).remote(name, model, forward_args)
+        ).remote(name, model, forward_args, forward_kwargs)
         self.worker_index = 0
         self.workers = ray.get(self.model.get_workers.remote())
         self.local = True
@@ -285,14 +323,16 @@ class RemoteModel:
         merge("forward", forward_time_ms, model=self.name, desc={}, mode="local")
         return outputs
 
-    async def forward(self, *args, **kwargs) -> NestedArray:
+    async def forward(
+        self, *args: tuple[np.ndarray], **kwargs: dict[str : np.ndarray]
+    ) -> tuple[np.ndarray] | np.ndarray:
         """
         执行模型的前向计算，返回模型的输出
         Args:
-            *args: 模型的位置参数输入，是一个 NestedArray
-            **kwargs: 模型的关键字参数输入，是一个 NestedArray
+            *args: 模型的位置参数输入
+            **kwargs: 模型的关键字参数输入
         Returns:
-            模型的输出，是一个 NestedArray
+            模型的输出，是一个或多个 np.ndarray
         """
         if self.local:
             return await self._local_forward(*args, **kwargs)
@@ -328,7 +368,7 @@ class RemoteModel:
         set_torch_model_weights(torch_model, weights)
         return torch_model
 
-    def clone(self, step: int = -1, name=None) -> "RemoteModel":
+    def clone(self, step: int = -1) -> "RemoteModel":
         """
         克隆一个新的RemoteModel，用于SelfPlay和League的多智能体对抗
         Args:
@@ -336,14 +376,7 @@ class RemoteModel:
         Returns:
             克隆的RemoteModel
         """
-        step = self.step if step == -1 else step
-        if name is None:
-            name = self.name + f"-{step}"
-        try:
-            ray.get_actor(name)
-        except ValueError:
-            ray.get(self.model.clone.remote(step, name))
-        return RemoteModel(name)
+        return RemoteModel(ray.get(self.model.clone.remote(step)))
 
     def publish_weights(self, weights: NestedArray):
         """
