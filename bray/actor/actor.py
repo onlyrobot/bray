@@ -5,7 +5,11 @@ import time
 import asyncio
 from bray.actor.base import Actor
 
-from bray.metric.metric import merge, flush_metrics_to_remote
+from bray.metric.metric import (
+    merge,
+    flush_metrics_to_remote,
+    merge_time_ms,
+)
 
 
 @ray.remote
@@ -15,27 +19,13 @@ class ActorWorker:
         self.actor = Actor(*args, **kwargs)
 
     def start(self, game_id, data: bytes) -> bytes:
-        merge(
-            "game",
-            1,
-            desc={"time_window_cnt": "game start per minute"},
-        )
         self.active_time = time.time()
         return self.actor.start(game_id, data)
 
     async def tick(self, data: bytes) -> bytes:
-        beg = time.time()
+        self.active_time = time.time()
         ret = await self.actor.tick(data)
-        tick_time = (time.time() - beg) * 1000
-        merge(
-            "tick",
-            tick_time,
-            desc={
-                "time_window_avg": "tick latency ms",
-                "time_window_cnt": "tick per minute",
-            },
-        )
-        self.active_time = beg
+        merge_time_ms("tick", self.active_time)
         return ret
 
     def end(self, data: bytes) -> bytes:
@@ -50,10 +40,14 @@ class ActorWorker:
 
 @serve.deployment(route_prefix="/step")
 class ActorGateway:
-    def __init__(self, Actor: type[Actor], *args, **kwargs):
+    def __init__(self, Actor: type[Actor], args, kwargs, num_workers):
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
+        self.num_workers = num_workers
         self.workers = {}
-        self.inactive_workers = []
+        self.inactive_workers = [
+            ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+            for _ in range(num_workers)
+        ]
         import logging
 
         logger = logging.getLogger("ray.serve")
@@ -64,34 +58,20 @@ class ActorGateway:
             return
         self.inactive_workers.append(worker)
 
-    async def _check_workers(self, game_id):
+    async def _health_check(self, game_id):
         await asyncio.sleep(60)
         worker = self.workers.get(game_id, None)
         if not worker:
             return
-        is_active = await worker.is_active.remote()
-        if is_active:
-            asyncio.create_task(self._check_workers(game_id))
-            return
+        try:
+            if await worker.is_active.remote():
+                asyncio.create_task(self._health_check(game_id))
+                return
+        except Exception as e:
+            print(f"Health check failed: {e}")
         self.workers.pop(game_id)
         self._inactive_worker(worker)
         print(f"Actor with game_id={game_id} inactive.")
-
-    async def __call__(self, req: Request) -> bytes:
-        step_kind = req.headers.get("step_kind")
-        game_id = req.headers.get("game_id")
-        if game_id is None:
-            raise Exception("game_id must be provided.")
-        data = await req.body()
-        if step_kind == "start":
-            return await self.start(game_id, data)
-        elif step_kind == "tick":
-            return await self.tick(game_id, data)
-        elif step_kind == "end":
-            return await self.end(game_id, data)
-        elif step_kind == "auto":
-            return await self.auto(game_id, data)
-        raise Exception(f"Unknown step_kind: {step_kind}")
 
     async def start(self, game_id, data) -> bytes:
         worker = self.workers.get(game_id, None)
@@ -100,53 +80,72 @@ class ActorGateway:
         try:
             worker = self.inactive_workers.pop()
         except IndexError:
-            worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
-        task = worker.start.remote(game_id, data)
+            # raise Exception("Games num exceeds max num.")
+            worker = ActorWorker.remote(
+                self.Actor,
+                *self.args,
+                **self.kwargs,
+            )
         self.workers[game_id] = worker
         merge(
             "worker",
             len(self.workers),
-            desc={"time_window_avg": "smoothed actor worker num"},
+            desc={
+                "time_window_avg": "smoothed actor worker num",
+                "time_window_cnt": "game start per minute",
+            },
             actor="actor",
         )
-        asyncio.create_task(self._check_workers(game_id))
-        return await task
+        try:
+            start_ret = await worker.start.remote(game_id, data)
+        except:
+            self.workers.pop(game_id, None)
+            raise
+        asyncio.create_task(self._health_check(game_id))
+        return start_ret
 
     async def tick(self, game_id, data) -> bytes:
         worker = self.workers.get(game_id, None)
         if not worker:
             raise Exception(f"Game {game_id} not started.")
-        return await worker.tick.remote(data)
+        try:
+            tick_ret = await worker.tick.remote(data)
+        except:
+            self.workers.pop(game_id, None)
+            raise
+        return tick_ret
 
     async def end(self, game_id, data) -> bytes:
         worker = self.workers.pop(game_id, None)
         if not worker:
             raise Exception(f"Game {game_id} not started.")
-        ret = await worker.end.remote(data)
+        end_ret = await worker.end.remote(data)
         self._inactive_worker(worker)
-        return ret
+        return end_ret
 
-    # for stateless actors, we can just use the actor class directly.
-    async def auto(self, data: bytes) -> bytes:
-        try:
-            worker = self.workers.popitem()
-        except KeyError:
-            worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
-            worker.start(None, None)
-        data = await worker.tick.remote(data)
-        import uuid
-
-        self.workers[uuid.uuid4().hex] = worker
-        return data
+    async def __call__(self, req: Request) -> bytes:
+        step_kind = req.headers.get("step_kind")
+        game_id = req.headers.get("game_id")
+        if game_id is None:
+            raise Exception("game_id must be provided.")
+        data = await req.body()
+        if step_kind == "tick":
+            return await self.tick(game_id, data)
+        elif step_kind == "start":
+            return await self.start(game_id, data)
+        elif step_kind == "end":
+            return await self.end(game_id, data)
+        raise Exception("Unknown step_kind:", step_kind)
 
 
 class RemoteActor:
-    def __init__(self, port: int = 8000):
+    def __init__(self, port: int = 8000, num_workers: int = 0):
         """
         Args:
             port: ActorGateway 暴露给 Gamecore 的端口
+            num_workers: Actor 的 worker 数量，默认随 Gamecore 的数量自动增长
         """
-        self.port = port
+        self.port, self.num_workers = port, num_workers
 
     def serve(self, Actor: type[Actor], *args, **kwargs):
         """
@@ -158,7 +157,7 @@ class RemoteActor:
         total_cpus = ray.available_resources()["CPU"]
         num_replicas = total_cpus // 16 + 1
         self.gateway = ActorGateway.options(num_replicas=num_replicas).bind(
-            Actor, *args, **kwargs
+            Actor, args, kwargs, self.num_workers
         )
         # self.gateway = ActorGateway.options(is_driver_deployment=True).bind(
         #     Actor, *args, **kwargs

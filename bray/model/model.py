@@ -12,8 +12,7 @@ from bray.utils.nested_array import (
     make_batch,
     handle_nested_array,
 )
-from bray.metric.metric import merge, query
-from bray.model.utils import export_onnx
+from bray.metric.metric import merge, query, merge_time_ms
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -31,36 +30,58 @@ def save_torch_model_weights(weights: NestedArray, path: str):
     torch.save(weights, path)
 
 
-class TorchModelWorker:
+class ModelWorker:
     def __init__(self, name: str):
         self.name, self.model = name, ray.get_actor(name)
-        torch_model = ray.get(ray.get(self.model.get_model.remote()))
         self.current_step = ray.get(self.model.get_step.remote())
         weights = ray.get(self.model.get_weights.remote())
-        self.torch_model = torch_model
-        torch_model.requires_grad_(False)
-        torch_model.eval()
-        set_torch_model_weights(torch_model, ray.get(weights))
+        model = ray.get(ray.get(self.model.get_model.remote()))
+        self.torch_model, self.ort_session = None, None
+        if isinstance(model, torch.nn.Module):
+            model.requires_grad_(False)
+            model.eval()
+            set_torch_model_weights(model, ray.get(weights))
+            self.torch_model = model
+        else:
+            import onnxruntime as ort
+
+            ort_session = ort.InferenceSession(model)
+            self.ort_session = ort_session
         asyncio.create_task(self._subscribe_weights())
 
-    def forward(self, *args, **kwargs) -> NestedArray:
+    def _forward_torch(self, *args, **kwargs) -> NestedArray:
         args, kwargs = make_batch([args]), make_batch([kwargs])
         args = handle_nested_array(args, torch.from_numpy)
         kwargs = handle_nested_array(kwargs, torch.from_numpy)
-        beg = time.time()
         outputs = self.torch_model(*args, **kwargs)
-        merge(
-            "forward",
-            (time.time() - beg) * 1000,
-            desc={
-                "time_window_avg": "forward latency ms",
-                "time_window_cnt": "forward per minute",
-            },
-            model=self.name,
-        )
         return handle_nested_array(
             outputs, lambda x: x.squeeze(0).numpy(), type_check=False
         )
+
+    def _forward_onnx(self, *args, **kwargs) -> NestedArray:
+        args, kwargs = make_batch([args]), make_batch([kwargs])
+        from bray.model.utils import (
+            build_onnx_inputs,
+            build_onnx_outputs,
+        )
+
+        inputs = build_onnx_inputs(args, kwargs)
+
+        sess = self.ort_session
+        # input_names = [input.name for input in sess.get_inputs()]
+        output_names = [output.name for output in sess.get_outputs()]
+        outputs = sess.run(output_names, inputs)
+        outputs = build_onnx_outputs(output_names, outputs)
+        return handle_nested_array(outputs, lambda x: x.squeeze(0))
+
+    def forward(self, *args, **kwargs) -> NestedArray:
+        beg = time.time()
+        if self.torch_model:
+            outputs = self._forward_torch(*args, **kwargs)
+        else:
+            outputs = self._forward_onnx(*args, **kwargs)
+        merge_time_ms("forward", beg, model=self.name)
+        return outputs
 
     async def _subscribe_weights(self):
         weights, step = await self.model.subscribe_weights.remote(self.current_step)
@@ -72,9 +93,7 @@ class TorchModelWorker:
 
 @ray.remote
 class Model:
-    async def __init__(
-        self, name: str, torch_model: torch.nn.Module, forward_args, forward_kwargs
-    ):
+    async def __init__(self, name, torch_model, forward_args, forward_kwargs, use_onnx):
         self.trial_path = ray.get_runtime_context().namespace
         names = name.split("/")
         root_path = os.path.join(self.trial_path, f"{names[0]}")
@@ -114,14 +133,18 @@ class Model:
             print(f"model {self.name} load checkpoint at step {step}")
 
         onnx_path = os.path.join(root_path, f"{names[0]}.onnx")
-        if not os.path.exists(onnx_path):
-            os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-            # export_onnx(torch_model, onnx_path, forward_args, forward_kwargs)
-        self.onnx_path = onnx_path
+        if use_onnx and not os.path.exists(onnx_path):
+            from bray.model.utils import export_onnx
 
-        self.workers = [
-            ray.remote(TorchModelWorker).remote(self.name) for _ in range(2)
-        ]
+            os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+            export_onnx(torch_model, onnx_path, forward_args, forward_kwargs)
+        if use_onnx:
+            with open(onnx_path, "rb") as f:
+                self.onnx_model = ray.put(f.read())
+        else:
+            self.onnx_model = None
+
+        self.workers = [ray.remote(ModelWorker).remote(self.name) for _ in range(2)]
         self.step_cond = asyncio.Condition()
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
@@ -175,7 +198,7 @@ class Model:
 
     def _load_balance(self):
         if len(self.workers) == 0:
-            self.workers.append(ray.remote(TorchModelWorker).remote(self.name))
+            self.workers.append(ray.remote(ModelWorker).remote(self.name))
             return
         forward_time_sum = query("forward", kind="sum", model=self.name)
         local_forward_time_sum = query(
@@ -206,7 +229,7 @@ class Model:
         add_rate = 0.5 if load_rate < 0.7 else (1 if load_rate < 0.8 else 1.5)
         self.workers.extend(
             [
-                ray.remote(TorchModelWorker).remote(self.name)
+                ray.remote(ModelWorker).remote(self.name)
                 for _ in range(1 + int(add_rate * len(self.workers)))
             ]
         )
@@ -280,15 +303,15 @@ class Model:
         return self.step
 
     async def get_model(self) -> ray.ObjectRef:
-        return self.model
+        return self.onnx_model if self.onnx_model else self.model
 
-    def get_workers(self) -> list[TorchModelWorker]:
+    def get_workers(self) -> list[ModelWorker]:
         return self.workers
 
 
 class RemoteModel:
     """
-    RemoteModel封装了一个PyTorch模型，它会在Ray集群中创建多个TorchModelWorker实现并行计算
+    RemoteModel封装了一个PyTorch模型，它会在Ray集群中创建多个ModelWorker实现并行计算
     """
 
     def __init__(
@@ -297,6 +320,7 @@ class RemoteModel:
         model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
+        use_onnx: bool = False,
     ):
         """
         Args:
@@ -304,11 +328,12 @@ class RemoteModel:
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
+            use_onnx: 如果为True，则model会被导出onnx格式，使用onnxruntime推理
         """
         self.name = name
         self.model = Model.options(
             name=name, get_if_exists=True, lifetime="detached"
-        ).remote(name, model, forward_args, forward_kwargs)
+        ).remote(name, model, forward_args, forward_kwargs, use_onnx)
         self.worker_index = 0
         self.workers = ray.get(self.model.get_workers.remote())
         self.local = True
@@ -316,7 +341,7 @@ class RemoteModel:
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
         if self.local_worker is None:
-            self.local_worker = TorchModelWorker(self.name)
+            self.local_worker = ModelWorker(self.name)
         beg = time.time()
         outputs = self.local_worker.forward(*args, **kwargs)
         forward_time_ms = (time.time() - beg) * 1000

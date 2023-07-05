@@ -10,6 +10,7 @@ remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
     forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
+    use_onnx=True,
 )
 
 remote_actor = bray.RemoteActor(port=8000)

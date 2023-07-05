@@ -220,3 +220,15 @@ def query(
         return metric.cnt
     else:
         raise ValueError(f"Unsupported kind: {kind}")
+
+
+def merge_time_ms(name, beg, **kwargs):
+    merge(
+        name,
+        (time.time() - beg) * 1000,
+        desc={
+            "time_window_avg": f"{name} latency ms",
+            "time_window_cnt": f"{name} per minute",
+        },
+        **kwargs,
+    )

@@ -39,9 +39,9 @@ Gamecore指的是强化学习中的仿真环境。在真实的游戏业务场景
 
 #### Http协议的完整定义如下：
 
-![Http Header](./docs/img/http_header.png)
+![Http Header](./docs/img/http_header_body.png)
 
-Header中的 `step_kind` 用于区分有状态和无状态服务场景，有状态情况下请求的顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` ，无状态下固定为 `auto` 就行。
+Header中的 `step_kind` 用于标识当前 step 的类型，一局游戏的请求顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` 。
 
 > 强化训练过程中需要知道完整的trajectory序列所以一般都要求有状态，而为了让推理和训练复用同一套代码（降低接入成本、保证迁移正确性），线上推理也都使用有状态服务。
 
@@ -88,7 +88,8 @@ remote_model = bray.RemoteModel(
     forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
     )
 # 以下命令可以在集群中任何地方执行
-outputs = asyncio.run(remote_model.foward(inputs))
+# 在 Actor 中用 await remote_model.forward(inputs)
+outputs = asyncio.run(remote_model.forward(inputs))
 model = remote_model.get_model()
 weights = bray.get_torch_model_weights(model)
 remote_model.publish_weights(weights)
@@ -96,7 +97,7 @@ remote_model.publish_weights(weights)
 
 > 注意：
 > * 这里的 `forward_args` 和 `forward_kwargs` 的类型分别是 `tuple[np.ndarray]` 和 `dict[str: np.ndarray]` ，传给 `AtariModel().forward` 函数时，会经过组Batch和转Torch Tensor，所以在 `AtariModel().forward` 中看到的是转换后的增加一个Batch维度的 `NestedTensor`。
-> * `AtariModel().forward` 输出应该为一个或者多个 Torch Tensor，且包含Batch维度，Bray会自动缩减掉该维度并且转为 `np.ndarray` 返回。
+> * `AtariModel().forward` 输出应该为一个或者多个 Torch Tensor 或者 Torch Tensor 的字典，且包含Batch维度，Bray会自动缩减掉该维度并且转为 `np.ndarray` 返回。
 
 ### 3. Actor接入
 
