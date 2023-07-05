@@ -23,11 +23,11 @@ class AtariActor(bray.Actor):
         self.remote_buffer = None
         if buffer:
             self.remote_buffer = bray.RemoteBuffer(name=buffer)
-        self.trajectory = []
-        self.episode_reward = 0.0
 
     def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
+        self.trajectory = []
+        self.episode_reward = 0.0
         print("Actor.start: ", game_id)
         return b"Game started."
 

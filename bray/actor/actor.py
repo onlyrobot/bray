@@ -15,7 +15,11 @@ class ActorWorker:
         self.actor = Actor(*args, **kwargs)
 
     def start(self, game_id, data: bytes) -> bytes:
-        merge("game", 1, desc={"time_window_cnt": "game start per minute"})
+        merge(
+            "game",
+            1,
+            desc={"time_window_cnt": "game start per minute"},
+        )
         self.active_time = time.time()
         return self.actor.start(game_id, data)
 
@@ -49,22 +53,29 @@ class ActorGateway:
     def __init__(self, Actor: type[Actor], *args, **kwargs):
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.workers = {}
+        self.inactive_workers = []
         import logging
 
         logger = logging.getLogger("ray.serve")
         logger.setLevel(logging.WARNING)
 
+    def _inactive_worker(self, worker):
+        if len(self.inactive_workers) > len(self.workers):
+            return
+        self.inactive_workers.append(worker)
+
     async def _check_workers(self, game_id):
+        await asyncio.sleep(60)
         worker = self.workers.get(game_id, None)
         if not worker:
             return
         is_active = await worker.is_active.remote()
-        if not is_active:
-            print(f"Actor with game_id={game_id} inactive.")
-            self.workers.pop(game_id)
+        if is_active:
+            asyncio.create_task(self._check_workers(game_id))
             return
-        await asyncio.sleep(60)
-        asyncio.create_task(self._check_workers(game_id))
+        self.workers.pop(game_id)
+        self._inactive_worker(worker)
+        print(f"Actor with game_id={game_id} inactive.")
 
     async def __call__(self, req: Request) -> bytes:
         step_kind = req.headers.get("step_kind")
@@ -86,7 +97,10 @@ class ActorGateway:
         worker = self.workers.get(game_id, None)
         if worker:
             raise Exception(f"Game {game_id} already started.")
-        worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+        try:
+            worker = self.inactive_workers.pop()
+        except IndexError:
+            worker = ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
         task = worker.start.remote(game_id, data)
         self.workers[game_id] = worker
         merge(
@@ -108,7 +122,9 @@ class ActorGateway:
         worker = self.workers.pop(game_id, None)
         if not worker:
             raise Exception(f"Game {game_id} not started.")
-        return await worker.end.remote(data)
+        ret = await worker.end.remote(data)
+        self._inactive_worker(worker)
+        return ret
 
     # for stateless actors, we can just use the actor class directly.
     async def auto(self, data: bytes) -> bytes:
