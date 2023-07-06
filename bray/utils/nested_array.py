@@ -6,23 +6,40 @@ import numpy as np
 NestedArray = NewType("NestedArray", any)
 
 
-def handle_nested_array(inputs, handler: callable, type_check=True):
+def handle_nested_array(inputs, handler: callable, type_check=True, sort_keys=False):
     if isinstance(inputs, np.ndarray):
         return handler(inputs)
     elif isinstance(inputs, list):
-        return [handle_nested_array(i, handler, type_check) for i in inputs]
+        return [
+            handle_nested_array(
+                i,
+                handler,
+                type_check,
+                sort_keys,
+            )
+            for i in inputs
+        ]
     elif isinstance(inputs, tuple):
-        return tuple(handle_nested_array(i, handler, type_check) for i in inputs)
+        return tuple(
+            handle_nested_array(
+                i,
+                handler,
+                type_check,
+                sort_keys,
+            )
+            for i in inputs
+        )
     elif isinstance(inputs, dict):
-        # sorted_items = sorted(list(inputs.items()))
-        sorted_items = inputs.items()
+        items = inputs.items()
+        items = items if not sort_keys else sorted(items)
         return {
             k: handle_nested_array(
                 v,
                 handler,
                 type_check,
+                sort_keys,
             )
-            for k, v in sorted_items
+            for k, v in items
         }
     elif type_check:
         raise TypeError(f"Unsupported type in NestedArray: {type(inputs)}")
@@ -30,13 +47,13 @@ def handle_nested_array(inputs, handler: callable, type_check=True):
         return handler(inputs)
 
 
-def flatten_nested_array(inputs: NestedArray) -> list[NestedArray]:
+def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> list[NestedArray]:
     flatten_arrays = []
 
     def flatten(array):
         flatten_arrays.append(array)
 
-    handle_nested_array(inputs, flatten)
+    handle_nested_array(inputs, flatten, sort_keys=sort_keys)
     return flatten_arrays
 
 

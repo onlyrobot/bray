@@ -88,7 +88,8 @@ class RemoteBuffer:
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, lifetime="detached"
         ).remote()
-        self.workers, self.worker_index = [], random.randint(0, 100)
+        self.workers = ray.get(self.buffer.get_workers.remote())
+        self.worker_index = random.randint(0, len(self.workers))
         self.sync()
         self.buffer_worker = None
 

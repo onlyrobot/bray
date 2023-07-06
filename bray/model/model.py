@@ -11,6 +11,8 @@ from bray.utils.nested_array import (
     NestedArray,
     make_batch,
     handle_nested_array,
+    flatten_nested_array,
+    unflatten_nested_array,
 )
 from bray.metric.metric import merge, query, merge_time_ms
 
@@ -31,26 +33,32 @@ def save_torch_model_weights(weights: NestedArray, path: str):
 
 
 class ModelWorker:
-    def __init__(self, name: str):
+    def __init__(self, name: str, loop: asyncio.AbstractEventLoop = None):
         self.name, self.model = name, ray.get_actor(name)
-        self.current_step = ray.get(self.model.get_step.remote())
         weights = ray.get(self.model.get_weights.remote())
-        model = ray.get(ray.get(self.model.get_model.remote()))
+        self.current_step = ray.get(self.model.get_step.remote())
+
         self.torch_model, self.ort_session = None, None
-        if isinstance(model, torch.nn.Module):
+        if onnx_model := ray.get(ray.get(self.model.get_onnx_model.remote())):
+            import onnxruntime as ort
+
+            ort_session = ort.InferenceSession(onnx_model)
+            self.ort_session = ort_session
+            self.forward_outputs = ray.get(
+                ray.get(self.model.get_forward_outputs.remote())
+            )
+        else:
+            model = ray.get(ray.get(self.model.get_model.remote()))
             model.requires_grad_(False)
             model.eval()
             set_torch_model_weights(model, ray.get(weights))
             self.torch_model = model
-        else:
-            import onnxruntime as ort
 
-            ort_session = ort.InferenceSession(model)
-            self.ort_session = ort_session
-        asyncio.create_task(self._subscribe_weights())
+        loop = loop if loop else asyncio.get_running_loop()
+        loop.create_task(self._subscribe_weights())
 
     def _forward_torch(self, *args, **kwargs) -> NestedArray:
-        args, kwargs = make_batch([args]), make_batch([kwargs])
+        args, kwargs = make_batch([(args, kwargs)])
         args = handle_nested_array(args, torch.from_numpy)
         kwargs = handle_nested_array(kwargs, torch.from_numpy)
         outputs = self.torch_model(*args, **kwargs)
@@ -59,19 +67,15 @@ class ModelWorker:
         )
 
     def _forward_onnx(self, *args, **kwargs) -> NestedArray:
-        args, kwargs = make_batch([args]), make_batch([kwargs])
-        from bray.model.utils import (
-            build_onnx_inputs,
-            build_onnx_outputs,
-        )
-
-        inputs = build_onnx_inputs(args, kwargs)
-
+        args, kwargs = make_batch([(args, kwargs)])
         sess = self.ort_session
-        # input_names = [input.name for input in sess.get_inputs()]
-        output_names = [output.name for output in sess.get_outputs()]
-        outputs = sess.run(output_names, inputs)
-        outputs = build_onnx_outputs(output_names, outputs)
+        input_names = [input.name for input in sess.get_inputs()]
+        flatten_input = flatten_nested_array(args + (kwargs,), sort_keys=True)
+        inputs = dict(zip(input_names, flatten_input))
+        # output_names = [output.name for output in sess.get_outputs()]
+        # print(handle_nested_array(inputs, lambda x: (x.shape, x.dtype)))
+        outputs = sess.run(None, inputs)
+        outputs = unflatten_nested_array(self.forward_outputs, outputs)
         return handle_nested_array(outputs, lambda x: x.squeeze(0))
 
     def forward(self, *args, **kwargs) -> NestedArray:
@@ -87,7 +91,10 @@ class ModelWorker:
         weights, step = await self.model.subscribe_weights.remote(self.current_step)
         assert step > self.current_step
         self.current_step = step
-        set_torch_model_weights(self.torch_model, await weights)
+        if self.torch_model:
+            set_torch_model_weights(self.torch_model, await weights)
+        else:
+            pass
         asyncio.create_task(self._subscribe_weights())
 
 
@@ -103,11 +110,11 @@ class Model:
             os.makedirs(os.path.dirname(torch_path), exist_ok=True)
             torch.save(torch_model, torch_path)
         else:
-            print("loading model from", torch_path)
+            print("Loading model from", torch_path)
             torch_model = torch.load(torch_path)
         self.name, self.model = name, ray.put(torch_model)
 
-        args_path = os.path.join(root_path, f"args.pt")
+        args_path = os.path.join(root_path, f"forward_inputs.pt")
         if not os.path.exists(args_path):
             assert forward_args or forward_kwargs, "model inputs must be provided"
             os.makedirs(os.path.dirname(args_path), exist_ok=True)
@@ -133,18 +140,27 @@ class Model:
             print(f"model {self.name} load checkpoint at step {step}")
 
         onnx_path = os.path.join(root_path, f"{names[0]}.onnx")
-        if use_onnx and not os.path.exists(onnx_path):
+        outputs_path = os.path.join(root_path, f"forward_outputs.pt")
+        if use_onnx and not (
+            os.path.exists(onnx_path) and os.path.exists(outputs_path)
+        ):
             from bray.model.utils import export_onnx
 
+            print("Exporting onnx model to", onnx_path)
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-            export_onnx(torch_model, onnx_path, forward_args, forward_kwargs)
+            forward_outputs = export_onnx(
+                torch_model, onnx_path, forward_args, forward_kwargs
+            )
+            torch.save(forward_outputs, outputs_path)
         if use_onnx:
+            print("Loading onnx model from", onnx_path)
             with open(onnx_path, "rb") as f:
                 self.onnx_model = ray.put(f.read())
+            self.forward_outputs = ray.put(torch.load(outputs_path))
         else:
-            self.onnx_model = None
+            self.onnx_model = ray.put(None)
 
-        self.workers = [ray.remote(ModelWorker).remote(self.name) for _ in range(2)]
+        self.workers = [ray.remote(ModelWorker).remote(self.name) for _ in range(1)]
         self.step_cond = asyncio.Condition()
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
@@ -296,16 +312,22 @@ class Model:
         )
         self.ckpt_step = self.step
 
-    def get_weights(self) -> ray.ObjectRef:
+    async def get_weights(self) -> ray.ObjectRef:
         return self.weights
 
-    def get_step(self) -> int:
+    async def get_step(self) -> int:
         return self.step
 
     async def get_model(self) -> ray.ObjectRef:
-        return self.onnx_model if self.onnx_model else self.model
+        return self.model
 
-    def get_workers(self) -> list[ModelWorker]:
+    async def get_onnx_model(self) -> ray.ObjectRef:
+        return self.onnx_model
+
+    async def get_forward_outputs(self) -> ray.ObjectRef:
+        return self.forward_outputs
+
+    async def get_workers(self) -> list[ModelWorker]:
         return self.workers
 
 
@@ -334,33 +356,36 @@ class RemoteModel:
         self.model = Model.options(
             name=name, get_if_exists=True, lifetime="detached"
         ).remote(name, model, forward_args, forward_kwargs, use_onnx)
-        self.worker_index = 0
         self.workers = ray.get(self.model.get_workers.remote())
+        self.worker_index = random.randint(0, len(self.workers))
         self.local = True
         self.local_worker = None
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
+        loop = asyncio.get_running_loop()
+
+        async def build_local_worker():
+            self.local_worker = await loop.run_in_executor(
+                None, ModelWorker, self.name, loop
+            )
+            self.local = True
+
         if self.local_worker is None:
-            self.local_worker = ModelWorker(self.name)
+            self.local = False
+            outputs = await self._remote_forward(*args, **kwargs)
+            loop.create_task(build_local_worker())
+            return outputs
+
+        def forward():
+            return self.local_worker.forward(*args, **kwargs)
+
         beg = time.time()
-        outputs = self.local_worker.forward(*args, **kwargs)
+        outputs = await loop.run_in_executor(None, forward)
         forward_time_ms = (time.time() - beg) * 1000
         merge("forward", forward_time_ms, model=self.name, desc={}, mode="local")
         return outputs
 
-    async def forward(
-        self, *args: tuple[np.ndarray], **kwargs: dict[str : np.ndarray]
-    ) -> tuple[np.ndarray] | np.ndarray:
-        """
-        执行模型的前向计算，返回模型的输出
-        Args:
-            *args: 模型的位置参数输入
-            **kwargs: 模型的关键字参数输入
-        Returns:
-            模型的输出，是一个或多个 np.ndarray
-        """
-        if self.local:
-            return await self._local_forward(*args, **kwargs)
+    async def _remote_forward(self, *args, **kwargs) -> NestedArray:
         if len(self.workers) == 0:
             await self.sync()
         if len(self.workers) == 0:
@@ -368,10 +393,36 @@ class RemoteModel:
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         try:
-            return await self.workers[index].forward.remote(*args, **kwargs)
+            worker = self.workers[index]
+            beg = time.time()
+            outputs = await worker.forward.remote(*args, **kwargs)
+            merge(
+                "forward",
+                (time.time() - beg) * 1000,
+                desc={},
+                model=self.name,
+                mode="remote",
+            )
         except ray.exceptions.RayActorError:
+            print("ray actor exception from model")
             await self.sync()
-            return await self.forward(*args, **kwargs)
+            outputs = await self._remote_forward(*args, **kwargs)
+        return outputs
+
+    async def forward(
+        self, *args: tuple[np.ndarray], **kwargs: dict[str : np.ndarray]
+    ) -> tuple[np.ndarray] | np.ndarray | dict[str : np.ndarray]:
+        """
+        执行模型的前向计算，返回模型的输出
+        Args:
+            *args: 模型的位置参数输入，为一个或者多个 np.ndarray
+            **kwargs: 模型的关键字参数输入，为 np.ndarray 字典
+        Returns:
+            模型的输出，是一个或多个 np.ndarray
+        """
+        if self.local:
+            return await self._local_forward(*args, **kwargs)
+        return await self._remote_forward(*args, **kwargs)
 
     @property
     def step(self) -> int:

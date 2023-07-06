@@ -53,10 +53,13 @@ class ActorGateway:
         logger = logging.getLogger("ray.serve")
         logger.setLevel(logging.WARNING)
 
-    def _inactive_worker(self, worker):
-        if len(self.inactive_workers) > len(self.workers):
-            return
-        self.inactive_workers.append(worker)
+    def _create_worker(self):
+        if (
+            self.num_workers != 0
+            and len(self.workers) + len(self.inactive_workers) >= self.num_workers
+        ):
+            raise Exception("Game exceeds max num.")
+        return ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
 
     async def _health_check(self, game_id):
         await asyncio.sleep(60)
@@ -70,7 +73,7 @@ class ActorGateway:
         except Exception as e:
             print(f"Health check failed: {e}")
         self.workers.pop(game_id)
-        self._inactive_worker(worker)
+        self.inactive_workers.append(worker)
         print(f"Actor with game_id={game_id} inactive.")
 
     async def start(self, game_id, data) -> bytes:
@@ -80,12 +83,7 @@ class ActorGateway:
         try:
             worker = self.inactive_workers.pop()
         except IndexError:
-            # raise Exception("Games num exceeds max num.")
-            worker = ActorWorker.remote(
-                self.Actor,
-                *self.args,
-                **self.kwargs,
-            )
+            worker = self._create_worker()
         self.workers[game_id] = worker
         merge(
             "worker",
@@ -120,7 +118,7 @@ class ActorGateway:
         if not worker:
             raise Exception(f"Game {game_id} not started.")
         end_ret = await worker.end.remote(data)
-        self._inactive_worker(worker)
+        self.inactive_workers.append(worker)
         return end_ret
 
     async def __call__(self, req: Request) -> bytes:
