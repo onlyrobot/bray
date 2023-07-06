@@ -100,7 +100,14 @@ class ModelWorker:
 
 @ray.remote
 class Model:
-    async def __init__(self, name, torch_model, forward_args, forward_kwargs, use_onnx):
+    def __init__(
+        self,
+        name,
+        torch_model=None,
+        forward_args=None,
+        forward_kwargs=None,
+        use_onnx=False,
+    ):
         self.trial_path = ray.get_runtime_context().namespace
         names = name.split("/")
         root_path = os.path.join(self.trial_path, f"{names[0]}")
@@ -160,7 +167,12 @@ class Model:
         else:
             self.onnx_model = ray.put(None)
 
-        self.workers = [ray.remote(ModelWorker).remote(self.name) for _ in range(1)]
+        self.workers = [
+            ray.remote(ModelWorker).remote(
+                self.name,
+            )
+            for _ in range(1)
+        ]
         self.step_cond = asyncio.Condition()
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
