@@ -93,6 +93,16 @@ class RemoteBuffer:
         self.sync()
         self.buffer_worker = None
 
+    def _push(self, worker, *replays):
+        if not asyncio.get_event_loop().is_running():
+            ray.get(worker.push.remote(*replays))
+            return
+
+        async def push():
+            await worker.push.remote(*replays)
+
+        asyncio.create_task(push())
+
     def push(self, *replays: NestedArray):
         if len(replays) == 0:
             return
@@ -108,7 +118,7 @@ class RemoteBuffer:
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         try:
-            self.workers[index].push.remote(*replays)
+            self._push(self.workers[index], *replays)
         except ray.exceptions.RayActorError:
             self.sync()
             self.push(*replays)

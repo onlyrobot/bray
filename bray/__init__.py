@@ -2,7 +2,6 @@ from bray.buffer.buffer import RemoteBuffer
 from bray.buffer.utils import (
     BatchBuffer,
     TorchTensorBuffer,
-    ReuseBuffer,
     TorchPrefetchBuffer,
     PrefetchBuffer,
 )
@@ -11,11 +10,12 @@ from bray.model.model import (
     get_torch_model_weights,
     set_torch_model_weights,
 )
+from bray.model.onnx import export_onnx
 from bray.trainer.trainer import RemoteTrainer
 from bray.actor.actor import RemoteActor
 from bray.actor.base import Actor
 from bray.utils.nested_array import NestedArray
-from bray.metric.metric import merge, query
+from bray.metric.metric import merge, query, get_metrics_worker
 
 
 def run_until_asked_to_stop():
@@ -40,5 +40,7 @@ def init(project: str, trial: str, **kwargs):
     if not os.path.exists(trial_path):
         os.makedirs(trial_path)
     ray.init(namespace=trial_path, **kwargs)
+
+    get_metrics_worker()  # 启动 RemoteMetrics 保证指标输出到Driver节点
 
     print("bray init success with path: ", trial_path)

@@ -54,7 +54,7 @@ class RemoteMetrics:
 
     def _dump_by_desc(self, name, metric, diff):
         desc = self.descs.get(name, None)
-        if not desc:
+        if desc is None:
             if diff.cnt != 0:
                 self.writer.add_scalar(name, diff.avg, self.step)
             return

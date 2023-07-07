@@ -72,6 +72,8 @@ class ActorGateway:
                 return
         except Exception as e:
             print(f"Health check failed: {e}")
+            self.workers.pop(game_id)
+            return
         self.workers.pop(game_id)
         self.inactive_workers.append(worker)
         print(f"Actor with game_id={game_id} inactive.")
@@ -162,5 +164,5 @@ class RemoteActor:
         # )
         print("Starting ActorGateway.")
         serve.shutdown()
-        serve.run(self.gateway, host="0.0.0.0", port=self.port, name="ActorGateway")
+        serve.run(self.gateway, host="0.0.0.0", port=self.port)
         print("ActorGateway started.")

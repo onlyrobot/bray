@@ -27,11 +27,6 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
             p.copy_(torch.from_numpy(w))
 
 
-@ray.remote
-def save_torch_model_weights(weights: NestedArray, path: str):
-    torch.save(weights, path)
-
-
 class ModelWorker:
     def __init__(self, name: str, loop: asyncio.AbstractEventLoop = None):
         self.name, self.model = name, ray.get_actor(name)
@@ -100,14 +95,7 @@ class ModelWorker:
 
 @ray.remote
 class Model:
-    def __init__(
-        self,
-        name,
-        torch_model=None,
-        forward_args=None,
-        forward_kwargs=None,
-        use_onnx=False,
-    ):
+    def __init__(self, name, torch_model, forward_args, forward_kwargs, use_onnx):
         self.trial_path = ray.get_runtime_context().namespace
         names = name.split("/")
         root_path = os.path.join(self.trial_path, f"{names[0]}")
@@ -148,10 +136,9 @@ class Model:
 
         onnx_path = os.path.join(root_path, f"{names[0]}.onnx")
         outputs_path = os.path.join(root_path, f"forward_outputs.pt")
-        if use_onnx and not (
-            os.path.exists(onnx_path) and os.path.exists(outputs_path)
-        ):
-            from bray.model.utils import export_onnx
+        onnx_path_exists = os.path.exists(onnx_path) and os.path.exists(outputs_path)
+        if use_onnx and not onnx_path_exists:
+            from bray.model.onnx import export_onnx
 
             print("Exporting onnx model to", onnx_path)
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
@@ -159,7 +146,7 @@ class Model:
                 torch_model, onnx_path, forward_args, forward_kwargs
             )
             torch.save(forward_outputs, outputs_path)
-        if use_onnx:
+        if use_onnx is not False and onnx_path_exists:
             print("Loading onnx model from", onnx_path)
             with open(onnx_path, "rb") as f:
                 self.onnx_model = ray.put(f.read())
@@ -215,7 +202,7 @@ class Model:
             name=name,
             get_if_exists=True,
             scheduling_strategy=scheduling_local,
-        ).remote(name)
+        ).remote(name, None, None, None, None)
         print(f"clone model {self.name} to {name} at step {ckpt_step}")
         return name
 
@@ -311,16 +298,12 @@ class Model:
         asyncio.create_task(self._save_checkpoint())
         if self.ckpt_step >= self.step:
             return
-        scheduling_local = NodeAffinitySchedulingStrategy(
-            node_id=ray.get_runtime_context().get_node_id(),
-            soft=False,
-        )
         ckpt_path = os.path.join(
             self.ckpt_dir,
             f"step-{self.step}.pt",
         )
-        save_torch_model_weights.options(scheduling_strategy=scheduling_local).remote(
-            self.weights, ckpt_path
+        asyncio.get_running_loop().run_in_executor(
+            None, torch.save, ray.get(self.weights), ckpt_path
         )
         self.ckpt_step = self.step
 
@@ -354,7 +337,7 @@ class RemoteModel:
         model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
-        use_onnx: bool = False,
+        use_onnx: bool = None,
     ):
         """
         Args:
@@ -464,7 +447,9 @@ class RemoteModel:
         Returns:
             克隆的RemoteModel
         """
-        return RemoteModel(ray.get(self.model.clone.remote(step)))
+        remote_model = RemoteModel(ray.get(self.model.clone.remote(step)))
+        remote_model.local = False
+        return remote_model
 
     def publish_weights(self, weights: NestedArray):
         """

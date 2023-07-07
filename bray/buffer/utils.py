@@ -8,6 +8,8 @@ from bray.utils.nested_array import (
     handle_nested_array,
 )
 
+from bray.metric.metric import merge
+
 
 class BatchBuffer:
     def __init__(self, buffer: Iterator[NestedArray], batch_size):
@@ -24,10 +26,6 @@ class BatchBuffer:
         return self
 
 
-class ReuseBuffer:
-    pass
-
-
 class TorchTensorBuffer:
     def __init__(self, buffer: Iterator[NestedArray], to_gpu: bool):
         self.buffer, self.to_gpu = buffer, to_gpu
@@ -39,10 +37,7 @@ class TorchTensorBuffer:
         return tensor
 
     def __next__(self) -> NestedArray:
-        return handle_nested_array(
-            next(self.buffer),
-            self.handle,
-        )
+        return handle_nested_array(next(self.buffer), self.handle)
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
@@ -53,29 +48,49 @@ class TorchPrefetchBuffer:
 
 
 class PrefetchBuffer:
-    def __init__(self, buffer: Iterator[NestedArray]):
-        self.buffer = buffer
-        self.replays = []
+    def __init__(
+        self, buffer: Iterator[NestedArray], max_reuse: int = 10, name: str = "default"
+    ):
+        """
+        Args:
+            buffer: 迭代器
+            max_reuse: 样本的最大重用次数，设为0关闭重用
+            name: buffer名称，用于reuse指标的统计
+        """
+        self.buffer, self.name = buffer, name
+        self.max_reuse, self.remain_reuse = max_reuse, max_reuse
+        self.last_reuse = 0
+        self.replays, self.last_replay = [], None
         self.cond = Condition()
         self.prefetch_thread = Thread(target=self._thread)
         self.prefetch_thread.start()
 
     def _prefetch(self):
         with self.cond:
-            self.cond.wait_for(lambda: len(self.replays) < 2)
+            self.cond.wait_for(lambda: len(self.replays) < 1)
             self.replays.append(next(self.buffer))
             self.cond.notify()
+        merge("reuse", self.last_reuse, buffer=self.name)
 
     def _thread(self):
         while True:
             self._prefetch()
 
     def __next__(self) -> NestedArray:
+        if (
+            len(self.replays) == 0
+            and self.last_replay is not None
+            and self.remain_reuse > 0
+        ):
+            self.remain_reuse -= 1
+            return self.last_replay
         with self.cond:
             self.cond.wait_for(lambda: len(self.replays) > 0)
-            replay = self.replays.pop()
+            self.last_replay = self.replays.pop()
+            self.last_reuse = self.max_reuse - self.remain_reuse
+            self.remain_reuse = self.max_reuse
             self.cond.notify()
-        return replay
+        return self.last_replay
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
