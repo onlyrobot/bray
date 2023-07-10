@@ -14,7 +14,7 @@ from bray.utils.nested_array import (
     flatten_nested_array,
     unflatten_nested_array,
 )
-from bray.metric.metric import merge, query, merge_time_ms
+from bray.metric.metric import merge, query, merge_time_ms, flush_metrics_to_remote
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -83,7 +83,15 @@ class ModelWorker:
         return outputs
 
     async def _subscribe_weights(self):
-        weights, step = await self.model.subscribe_weights.remote(self.current_step)
+        try:
+            weights, step = await self.model.subscribe_weights.remote(
+                self.current_step,
+            )
+        except Exception as e:
+            flush_metrics_to_remote()
+            print(f"Fail to subscribe weights from {self.name}, worker exit.", e)
+            ray.kill(ray.get_runtime_context().current_actor)
+            raise e
         assert step > self.current_step
         self.current_step = step
         if self.torch_model:
@@ -179,6 +187,14 @@ class Model:
         async with self.step_cond:
             self.step_cond.notify_all()
 
+    async def _keep_clone_model_alive(self, name, model):
+        await asyncio.sleep(60)
+        forward_cnt = query("forward", kind="cnt", model=name)
+        if forward_cnt < 2:
+            print(f"model {name} is not used, drop it")
+            return
+        asyncio.create_task(self._keep_clone_model_alive(name, model))
+
     async def clone(self, step) -> str:
         step = self.step if step == -1 else step
         name = self.name + f"/clone-step-{step}"
@@ -189,21 +205,21 @@ class Model:
             pass
 
         weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-        if os.path.exists(weights_path):
-            return name
-        os.makedirs(os.path.dirname(weights_path), exist_ok=True)
-        weights, ckpt_step = self._load_checkpoint(step)
-        torch.save(weights, weights_path)
+        if not os.path.exists(weights_path):
+            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+            weights, ckpt_step = self._load_checkpoint(step)
+            torch.save(weights, weights_path)
+            print(f"clone model {self.name} to {name} at step {ckpt_step}")
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
-        Model.options(
+        model = Model.options(
             name=name,
             get_if_exists=True,
             scheduling_strategy=scheduling_local,
         ).remote(name, None, None, None, None)
-        print(f"clone model {self.name} to {name} at step {ckpt_step}")
+        asyncio.create_task(self._keep_clone_model_alive(name, model))
         return name
 
     async def subscribe_weights(self, current_step):
@@ -307,6 +323,10 @@ class Model:
         )
         self.ckpt_step = self.step
 
+    def __del__(self):
+        self.workers.clear()
+        flush_metrics_to_remote()
+
     async def get_weights(self) -> ray.ObjectRef:
         return self.weights
 
@@ -348,9 +368,9 @@ class RemoteModel:
             use_onnx: 如果为True，则model会被导出onnx格式，使用onnxruntime推理
         """
         self.name = name
-        self.model = Model.options(
-            name=name, get_if_exists=True, lifetime="detached"
-        ).remote(name, model, forward_args, forward_kwargs, use_onnx)
+        self.model = Model.options(name=name, get_if_exists=True).remote(
+            name, model, forward_args, forward_kwargs, use_onnx
+        )
         self.workers = ray.get(self.model.get_workers.remote())
         self.worker_index = random.randint(0, len(self.workers))
         self.local = True

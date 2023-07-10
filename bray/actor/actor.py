@@ -12,11 +12,12 @@ from bray.metric.metric import (
 )
 
 
-@ray.remote
+@ray.remote(max_restarts=1)
 class ActorWorker:
     def __init__(self, Actor, *args, **kwargs):
-        self.active_time = time.time()
+        self.active_time, self.check_time = time.time(), 0
         self.actor = Actor(*args, **kwargs)
+        asyncio.create_task(self._health_check())
 
     def start(self, game_id, data: bytes) -> bytes:
         self.active_time = time.time()
@@ -31,11 +32,21 @@ class ActorWorker:
     def end(self, data: bytes) -> bytes:
         return self.actor.end(data)
 
+    async def _health_check(self):
+        await asyncio.sleep(60 * 2)
+        if time.time() - self.check_time < 60 * 2 or self.is_active():
+            asyncio.create_task(self._health_check())
+            return
+        flush_metrics_to_remote()
+        print("ActorGateway inactive, worker exit.")
+        ray.kill(ray.get_runtime_context().current_actor)
+
     def __del__(self):
         flush_metrics_to_remote()
 
     def is_active(self) -> bool:
-        return time.time() - self.active_time < 60
+        self.check_time = time.time()
+        return self.check_time - self.active_time < 60
 
 
 @serve.deployment(route_prefix="/step")
@@ -52,6 +63,7 @@ class ActorGateway:
 
         logger = logging.getLogger("ray.serve")
         logger.setLevel(logging.WARNING)
+        asyncio.create_task(self._health_check())
 
     def _create_worker(self):
         if (
@@ -61,14 +73,33 @@ class ActorGateway:
             raise Exception("Game exceeds max num.")
         return ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
 
-    async def _health_check(self, game_id):
+    async def _health_check(self):
+        await asyncio.sleep(60)
+        if (
+            self.num_workers == 0
+            and len(self.inactive_workers) > len(self.workers) // 2
+            and len(self.inactive_workers) > 2
+        ):
+            try:
+                self.inactive_workers.pop()
+            except IndexError:
+                pass
+        try:
+            await asyncio.gather(
+                *[worker.is_active.remote() for worker in self.inactive_workers]
+            )
+        except Exception as e:
+            print(f"Health check failed: {e}")
+        asyncio.create_task(self._health_check())
+
+    async def _active_check(self, game_id):
         await asyncio.sleep(60)
         worker = self.workers.get(game_id, None)
         if not worker:
             return
         try:
             if await worker.is_active.remote():
-                asyncio.create_task(self._health_check(game_id))
+                asyncio.create_task(self._active_check(game_id))
                 return
         except Exception as e:
             print(f"Health check failed: {e}")
@@ -101,7 +132,7 @@ class ActorGateway:
         except:
             self.workers.pop(game_id, None)
             raise
-        asyncio.create_task(self._health_check(game_id))
+        asyncio.create_task(self._active_check(game_id))
         return start_ret
 
     async def tick(self, game_id, data) -> bytes:
@@ -109,11 +140,10 @@ class ActorGateway:
         if not worker:
             raise Exception(f"Game {game_id} not started.")
         try:
-            tick_ret = await worker.tick.remote(data)
+            return await worker.tick.remote(data)
         except:
             self.workers.pop(game_id, None)
             raise
-        return tick_ret
 
     async def end(self, game_id, data) -> bytes:
         worker = self.workers.pop(game_id, None)
