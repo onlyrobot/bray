@@ -13,6 +13,8 @@ remote_model = bray.RemoteModel(
     forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
 )
 
+remote_buffer = bray.RemoteBuffer("atari_buffer")
+
 remote_trainer = bray.RemoteTrainer(
     use_gpu=None,
     num_workers=None,

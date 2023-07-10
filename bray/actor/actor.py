@@ -194,5 +194,5 @@ class RemoteActor:
         # )
         print("Starting ActorGateway.")
         serve.shutdown()
-        serve.run(self.gateway, host="0.0.0.0", port=self.port)
+        serve.run(self.gateway, host="0.0.0.0", port=self.port, name="ActorGateway")
         print("ActorGateway started.")

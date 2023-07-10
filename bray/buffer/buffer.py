@@ -85,9 +85,7 @@ class Buffer:
 class RemoteBuffer:
     def __init__(self, name: str, size: int = 256):
         self.name, self.size = name, size
-        self.buffer = Buffer.options(
-            name=name, get_if_exists=True, lifetime="detached"
-        ).remote()
+        self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
         self.workers = ray.get(self.buffer.get_workers.remote())
         self.worker_index = random.randint(0, len(self.workers))
         self.sync()
