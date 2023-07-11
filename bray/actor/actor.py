@@ -79,6 +79,7 @@ class ActorGateway:
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.num_workers = num_workers
         self.workers = {}
+        self.num_games = 0
         self.inactive_workers = [
             ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
             for _ in range(num_workers)
@@ -99,7 +100,7 @@ class ActorGateway:
             raise Exception("Game exceeds max num.")
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
-            soft=False,
+            soft=True,
         )
         return ActorWorker.options(scheduling_strategy=scheduling_local).remote(
             self.Actor, *self.args, **self.kwargs
@@ -122,6 +123,19 @@ class ActorGateway:
             )
         except Exception as e:
             print(f"Health check failed: {e}")
+        merge(
+            "worker",
+            len(self.workers),
+            desc={"time_window_sum": "smoothed actor worker num"},
+            actor="actor",
+        )
+        merge(
+            "game",
+            self.num_games,
+            desc={"time_window_sum": "game start per minute"},
+            actor="actor",
+        )
+        self.num_games = 0
         asyncio.create_task(self._health_check())
 
     async def _active_check(self, game_id):
@@ -150,20 +164,12 @@ class ActorGateway:
         except IndexError:
             worker = self._create_worker()
         self.workers[game_id] = worker
-        merge(
-            "worker",
-            len(self.workers),
-            desc={
-                "time_window_avg": "smoothed actor worker num",
-                "time_window_cnt": "game start per minute",
-            },
-            actor="actor",
-        )
         try:
             start_ret = await worker.start.remote(game_id, data)
         except:
             self.workers.pop(game_id, None)
             raise
+        self.num_games += 1
         asyncio.create_task(self._active_check(game_id))
         return start_ret
 

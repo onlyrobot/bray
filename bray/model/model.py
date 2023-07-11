@@ -166,7 +166,7 @@ class Model:
             ray.remote(ModelWorker).remote(
                 self.name,
             )
-            for _ in range(1)
+            for _ in range(len(ray.nodes()))
         ]
         self.step_cond = asyncio.Condition()
         asyncio.create_task(self._health_check())
