@@ -319,7 +319,7 @@ class Model:
             f"step-{self.step}.pt",
         )
         asyncio.get_running_loop().run_in_executor(
-            None, torch.save, ray.get(self.weights), ckpt_path
+            None, torch.save, await self.weights, ckpt_path
         )
         self.ckpt_step = self.step
 
