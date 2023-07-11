@@ -20,11 +20,8 @@ from bray.metric.metric import merge, query, get_metrics_worker
 
 def run_until_asked_to_stop():
     import signal
-    import ray
 
     signal.sigwait([signal.SIGTERM, signal.SIGINT])
-
-    ray.serve.shutdown()
 
 
 def init(project: str, trial: str, **kwargs):

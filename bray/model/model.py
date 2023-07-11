@@ -30,7 +30,6 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
 class ModelWorker:
     def __init__(self, name: str, loop: asyncio.AbstractEventLoop = None):
         self.name, self.model = name, ray.get_actor(name)
-        weights = ray.get(self.model.get_weights.remote())
         self.current_step = ray.get(self.model.get_step.remote())
 
         self.torch_model, self.ort_session = None, None
@@ -46,6 +45,7 @@ class ModelWorker:
             model = ray.get(ray.get(self.model.get_model.remote()))
             model.requires_grad_(False)
             model.eval()
+            weights = ray.get(self.model.get_weights.remote())
             set_torch_model_weights(model, ray.get(weights))
             self.torch_model = model
 

@@ -1,7 +1,11 @@
 import ray
-from ray import serve
+from fastapi import FastAPI
+import uvicorn
 from starlette.requests import Request
+from starlette.responses import Response
+from threading import Thread
 import time
+import logging
 import asyncio
 from bray.actor.base import Actor
 
@@ -49,7 +53,25 @@ class ActorWorker:
         return self.check_time - self.active_time < 60
 
 
-@serve.deployment(route_prefix="/step")
+app = FastAPI()
+actor_gateway: "ActorGateway" = None
+
+
+def serve_actor_gateway(gateway: "ActorGateway"):
+    global app, actor_gateway
+    actor_gateway = gateway
+    Thread(
+        target=uvicorn.run, kwargs={"app": app, "log_level": logging.WARNING}
+    ).start()
+
+
+@app.post("/step")
+async def step(request: Request):
+    global actor_gateway
+    return Response(content=await actor_gateway(request))
+
+
+@ray.remote
 class ActorGateway:
     def __init__(self, Actor: type[Actor], args, kwargs, num_workers):
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
@@ -59,10 +81,12 @@ class ActorGateway:
             ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
             for _ in range(num_workers)
         ]
-        import logging
+        serve_actor_gateway(self)
+        # uvicorn.run(app, host="0.0.0.0", port=8000, loop="asyncio")
+        # import logging
 
-        logger = logging.getLogger("ray.serve")
-        logger.setLevel(logging.WARNING)
+        # logger = logging.getLogger("ray.serve")
+        # logger.setLevel(logging.WARNING)
         asyncio.create_task(self._health_check())
 
     def _create_worker(self):
@@ -184,15 +208,20 @@ class RemoteActor:
             *args: Actor 的位置参数
             **kwargs: Actor 的关键字参数
         """
-        total_cpus = ray.available_resources()["CPU"]
-        num_replicas = total_cpus // 16 + 1
-        self.gateway = ActorGateway.options(num_replicas=num_replicas).bind(
-            Actor, args, kwargs, self.num_workers
-        )
+        # total_cpus = ray.available_resources()["CPU"]
+        # num_replicas = total_cpus // 16 + 1
+        # self.gateway = ActorGateway.options(num_replicas=num_replicas).bind(
+        #     Actor, args, kwargs, self.num_workers
+        # )
         # self.gateway = ActorGateway.options(is_driver_deployment=True).bind(
-        #     Actor, *args, **kwargs
+        #     Actor, args, kwargs, self.num_workers
         # )
         print("Starting ActorGateway.")
-        serve.shutdown()
-        serve.run(self.gateway, host="0.0.0.0", port=self.port, name="ActorGateway")
+        self.gateways = [
+            ActorGateway.options().remote(Actor, args, kwargs, self.num_workers)
+            for _ in range(len(ray.nodes()))
+        ]
+        # self.gateway.serve.remote()
+        # serve.shutdown()
+        # serve.run(self.gateway, host="0.0.0.0", port=self.port)
         print("ActorGateway started.")
