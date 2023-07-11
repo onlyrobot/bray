@@ -102,7 +102,7 @@ class ModelWorker:
         asyncio.create_task(self._subscribe_weights())
 
 
-@ray.remote(num_cpus=0, resources={"master": 1})
+@ray.remote(num_cpus=0)
 class Model:
     def __init__(self, name, torch_model, forward_args, forward_kwargs, use_onnx):
         self.trial_path = ray.get_runtime_context().namespace
@@ -369,9 +369,13 @@ class RemoteModel:
             use_onnx: 如果为True，则model会被导出onnx格式，使用onnxruntime推理
         """
         self.name = name
-        self.model = Model.options(name=name, get_if_exists=True).remote(
-            name, model, forward_args, forward_kwargs, use_onnx
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
         )
+        self.model = Model.options(
+            name=name, get_if_exists=True, scheduling_strategy=scheduling_local
+        ).remote(name, model, forward_args, forward_kwargs, use_onnx)
         self.workers = ray.get(self.model.get_workers.remote())
         self.worker_index = random.randint(0, len(self.workers))
         self.local = True

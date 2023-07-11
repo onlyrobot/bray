@@ -19,7 +19,7 @@ class Metric:
         return self.sum / self.cnt
 
 
-@ray.remote(resources={"master": 1})
+@ray.remote(num_cpus=0)
 class RemoteMetrics:
     async def __init__(self, time_window=60):
         self.time_window = time_window
@@ -118,8 +118,17 @@ def build_name(name, **kwargs) -> str:
 
 class MetricsWorker:
     def __init__(self):
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        )
         self.remote_metrics = RemoteMetrics.options(
-            name="RemoteMetrics", get_if_exists=True, lifetime="detached"
+            name="RemoteMetrics",
+            get_if_exists=True,
+            scheduling_strategy=scheduling_local,
+            lifetime="detached",
         ).remote()
         self.cached_metrics = {}
         self.last_merge_remote_time = 0

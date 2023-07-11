@@ -40,9 +40,6 @@ def init(project: str, trial: str, **kwargs):
     if not os.path.exists(trial_path):
         os.makedirs(trial_path)
 
-    resources = kwargs.get("resources", {})
-    resources["master"] = 10000
-    kwargs["resources"] = resources
     ray.init(namespace=trial_path, **kwargs)
 
     get_metrics_worker()  # 启动 RemoteMetrics 保证指标输出到Driver节点
