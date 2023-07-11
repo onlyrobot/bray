@@ -15,6 +15,7 @@ from bray.utils.nested_array import (
     unflatten_nested_array,
 )
 from bray.metric.metric import merge, query, merge_time_ms, flush_metrics_to_remote
+from bray.actor.actor import get_tick_id
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -407,6 +408,8 @@ class RemoteModel:
             raise RuntimeError("No available workers")
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
+        if tick_id := get_tick_id():
+            index = tick_id % len(self.workers)
         try:
             worker = self.workers[index]
             beg = time.time()

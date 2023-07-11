@@ -18,6 +18,18 @@ from bray.metric.metric import (
 )
 
 
+TICK_ID: int = 0
+
+
+def set_tick_id(tick_id: int):
+    global TICK_ID
+    TICK_ID = tick_id
+
+
+def get_tick_id() -> int:
+    return TICK_ID
+
+
 @ray.remote(max_restarts=1, num_cpus=0.5)
 class ActorWorker:
     def __init__(self, Actor, *args, **kwargs):
@@ -29,7 +41,8 @@ class ActorWorker:
         self.active_time = time.time()
         return self.actor.start(game_id, data)
 
-    async def tick(self, data: bytes) -> bytes:
+    async def tick(self, tick_id: int, data: bytes) -> bytes:
+        set_tick_id(tick_id)
         self.active_time = time.time()
         ret = await self.actor.tick(data)
         merge_time_ms("tick", self.active_time)
@@ -79,7 +92,7 @@ class ActorGateway:
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.num_workers = num_workers
         self.workers = {}
-        self.num_games = 0
+        self.tick_id, self.num_games = 0, 0
         self.inactive_workers = [
             ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
             for _ in range(num_workers)
@@ -178,7 +191,8 @@ class ActorGateway:
         if not worker:
             raise Exception(f"Game {game_id} not started.")
         try:
-            return await worker.tick.remote(data)
+            self.tick_id += 1
+            return await worker.tick.remote(self.tick_id, data)
         except:
             self.workers.pop(game_id, None)
             raise
