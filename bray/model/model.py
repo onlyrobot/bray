@@ -163,8 +163,10 @@ class Model:
         else:
             self.onnx_model = ray.put(None)
 
+        self.RemoteModelWorker = ray.remote(ModelWorker).options(num_cpus=0.5)
+
         self.workers = [
-            ray.remote(ModelWorker).remote(
+            self.RemoteModelWorker.remote(
                 self.name,
             )
             for _ in range(len(ray.nodes()))
@@ -230,7 +232,7 @@ class Model:
 
     def _load_balance(self):
         if len(self.workers) == 0:
-            self.workers.append(ray.remote(ModelWorker).remote(self.name))
+            self.workers.append(self.RemoteModelWorker.remote(self.name))
             return
         forward_time_sum = query("forward", kind="sum", model=self.name)
         local_forward_time_sum = query(
@@ -261,7 +263,7 @@ class Model:
         add_rate = 0.5 if load_rate < 0.7 else (1 if load_rate < 0.8 else 1.5)
         self.workers.extend(
             [
-                ray.remote(ModelWorker).remote(self.name)
+                self.RemoteModelWorker.remote(self.name)
                 for _ in range(1 + int(add_rate * len(self.workers)))
             ]
         )
