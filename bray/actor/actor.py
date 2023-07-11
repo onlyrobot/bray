@@ -35,6 +35,7 @@ class ActorWorker:
     def __init__(self, Actor, *args, **kwargs):
         self.active_time, self.check_time = time.time(), 0
         self.actor = Actor(*args, **kwargs)
+        self.need_set_tick_id = len(ray.nodes()) == 1
         asyncio.create_task(self._health_check())
 
     def start(self, game_id, data: bytes) -> bytes:
@@ -42,7 +43,8 @@ class ActorWorker:
         return self.actor.start(game_id, data)
 
     async def tick(self, tick_id: int, data: bytes) -> bytes:
-        set_tick_id(tick_id)
+        if self.need_set_tick_id:
+            set_tick_id(tick_id)
         self.active_time = time.time()
         ret = await self.actor.tick(data)
         merge_time_ms("tick", self.active_time)
