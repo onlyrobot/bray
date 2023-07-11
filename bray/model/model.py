@@ -102,7 +102,7 @@ class ModelWorker:
         asyncio.create_task(self._subscribe_weights())
 
 
-@ray.remote
+@ray.remote(resources={"master": 1})
 class Model:
     def __init__(self, name, torch_model, forward_args, forward_kwargs, use_onnx):
         self.trial_path = ray.get_runtime_context().namespace

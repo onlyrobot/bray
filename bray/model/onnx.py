@@ -32,6 +32,8 @@ def export_onnx(
         tensor_args + (tensor_kwargs,),
         path,
         verbose=False,
+        opset_version=10,
+        do_constant_folding=True,
     )
 
     ort_session = ort.InferenceSession(path)
