@@ -9,6 +9,8 @@ import logging
 import asyncio
 from bray.actor.base import Actor
 
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
 from bray.metric.metric import (
     merge,
     flush_metrics_to_remote,
@@ -16,7 +18,7 @@ from bray.metric.metric import (
 )
 
 
-@ray.remote(max_restarts=1)
+@ray.remote(max_restarts=1, num_cpus=0.5)
 class ActorWorker:
     def __init__(self, Actor, *args, **kwargs):
         self.active_time, self.check_time = time.time(), 0
@@ -95,7 +97,13 @@ class ActorGateway:
             and len(self.workers) + len(self.inactive_workers) >= self.num_workers
         ):
             raise Exception("Game exceeds max num.")
-        return ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        )
+        return ActorWorker.options(scheduling_strategy=scheduling_local).remote(
+            self.Actor, *self.args, **self.kwargs
+        )
 
     async def _health_check(self):
         await asyncio.sleep(60)
@@ -217,9 +225,15 @@ class RemoteActor:
         #     Actor, args, kwargs, self.num_workers
         # )
         print("Starting ActorGateway.")
+
         self.gateways = [
-            ActorGateway.options().remote(Actor, args, kwargs, self.num_workers)
-            for _ in range(len(ray.nodes()))
+            ActorGateway.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=node["NodeID"],
+                    soft=False,
+                )
+            ).remote(Actor, args, kwargs, self.num_workers)
+            for node in ray.nodes()
         ]
         # self.gateway.serve.remote()
         # serve.shutdown()
