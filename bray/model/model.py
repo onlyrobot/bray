@@ -177,6 +177,9 @@ class Model:
         else:
             self.onnx_model = ray.put(None)
 
+        self.cpus_per_worker = cpus_per_worker
+        self.memory_per_worker = memory_per_worker
+
         self.RemoteModelWorker = ray.remote(ModelWorker).options(
             num_cpus=cpus_per_worker,
             memory=memory_per_worker * 1024 * 1024,
@@ -185,21 +188,26 @@ class Model:
 
         self.num_workers, self.workers = num_workers, []
 
+        if len(names) > 1:  # cloned model
+            self.workers.append(ray.remote(ModelWorker).remote(self.name))
+
         for _ in range(num_workers if num_workers else len(ray.nodes())):
-            self._create_worker()
+            asyncio.create_task(self._create_worker())
 
         self.step_cond = asyncio.Condition()
+        self.worker_cond = asyncio.Condition()
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
 
-    def _create_worker(self):
-        def create_worker():
-            worker = self.RemoteModelWorker.remote(self.name)
-            if self.num_workers and len(self.workers) >= self.num_workers:
-                return
-            self.workers.append(worker)
-
-        asyncio.get_running_loop().run_in_executor(None, create_worker)
+    async def _create_worker(self):
+        worker = self.RemoteModelWorker.remote(self.name)
+        if not await self._is_health(worker):
+            return
+        if self.num_workers and len(self.workers) >= self.num_workers:
+            return
+        self.workers.append(worker)
+        async with self.worker_cond:
+            self.worker_cond.notify_all()
 
     async def set_weights(self, weights: list[ray.ObjectRef]):
         self.weights = weights[0]
@@ -219,7 +227,7 @@ class Model:
     async def _keep_clone_model_alive(self, name, model):
         await asyncio.sleep(60)
         forward_cnt = query("forward", kind="cnt", model=name)
-        if forward_cnt < 2:
+        if forward_cnt < 2 and len(await model.get_workers.remote()) < 2:
             print(f"model {name} is not used, drop it")
             return
         asyncio.create_task(self._keep_clone_model_alive(name, model))
@@ -260,9 +268,14 @@ class Model:
             await self.step_cond.wait_for(lambda: self.step > current_step)
         return self.weights, self.step
 
+    async def subscribe_workers(self):
+        async with self.worker_cond:
+            await self.worker_cond.wait()
+        return self.workers
+
     def _load_balance(self):
         if len(self.workers) == 0:
-            self._create_worker()
+            asyncio.create_task(self._create_worker())
             return
         forward_time_sum = query("forward", kind="sum", model=self.name)
         local_forward_time_sum = query(
@@ -292,7 +305,7 @@ class Model:
         # 三级调控，保证负载均衡响应速度，同时避免过度调控
         add_rate = 0.5 if load_rate < 0.7 else (1 if load_rate < 0.8 else 1.5)
         for _ in range(1 + int(add_rate * len(self.workers))):
-            self._create_worker()
+            asyncio.create_task(self._create_worker())
 
     async def _is_health(self, worker):
         try:
@@ -323,7 +336,7 @@ class Model:
         if not self.num_workers:
             self._load_balance()
         elif len(self.workers) < self.num_workers:
-            self._create_worker()
+            asyncio.create_task(self._create_worker())
         await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
 
@@ -428,6 +441,7 @@ class RemoteModel:
         self.worker_index = random.randint(0, len(self.workers))
         self.local = local_mode
         self.local_worker = None
+        self.already_subscribe = False
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
         loop = asyncio.get_running_loop()
@@ -454,6 +468,9 @@ class RemoteModel:
         return outputs
 
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
+        if not self.already_subscribe:
+            self.already_subscribe = True
+            asyncio.create_task(self._subscribe_workers())
         if len(self.workers) == 0:
             await self.sync()
         if len(self.workers) == 0:
@@ -474,7 +491,7 @@ class RemoteModel:
                 mode="remote",
             )
         except ray.exceptions.RayActorError:
-            print("ray actor exception from model")
+            print("ray actor exception from model forward")
             await self.sync()
             outputs = await self._remote_forward(*args, **kwargs)
         return outputs
@@ -537,11 +554,8 @@ class RemoteModel:
         self.model.set_weights.remote([ray.put(weights, _owner=self.model)])
 
     async def sync(self):
-        try:
-            self.workers = await self.model.get_workers.remote()
-            return
-        except ray.exceptions.RayActorError:
-            self.model = Model.options(name=self.name, get_if_exists=True).remote(
-                self.name
-            )
         self.workers = await self.model.get_workers.remote()
+
+    async def _subscribe_workers(self):
+        self.workers = await self.model.subscribe_workers.remote()
+        asyncio.create_task(self._subscribe_workers())

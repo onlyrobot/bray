@@ -129,18 +129,7 @@ class ActorGateway:
             and len(self.workers) + len(self.inactive_workers) >= self.num_workers
         ):
             raise Exception("Game exceeds max num.")
-
-        def create_worker():
-            return self.RemoteActorWorker.remote(
-                self.Actor,
-                *self.args,
-                **self.kwargs,
-            )
-
-        return await asyncio.get_running_loop().run_in_executor(
-            None,
-            create_worker,
-        )
+        return self.RemoteActorWorker.remote(self.Actor, *self.args, **self.kwargs)
 
     async def _health_check(self):
         await asyncio.sleep(60)
@@ -199,11 +188,10 @@ class ActorGateway:
             worker = self.inactive_workers.pop()
         except IndexError:
             worker = await self._create_worker()
-        self.workers[game_id] = worker
         try:
             start_ret = await worker.start.remote(game_id, data)
+            self.workers[game_id] = worker
         except:
-            self.workers.pop(game_id, None)
             raise
         self.num_games += 1
         asyncio.create_task(self._active_check(game_id))
