@@ -30,7 +30,7 @@ def get_tick_id() -> int:
     return TICK_ID
 
 
-@ray.remote(max_restarts=1, num_cpus=0.5)
+@ray.remote(max_restarts=1)
 class ActorWorker:
     def __init__(self, Actor, *args, **kwargs):
         self.active_time, self.check_time = time.time(), 0
@@ -43,8 +43,7 @@ class ActorWorker:
         return self.actor.start(game_id, data)
 
     async def tick(self, tick_id: int, data: bytes) -> bytes:
-        if self.need_set_tick_id:
-            set_tick_id(tick_id)
+        set_tick_id(tick_id if self.need_set_tick_id else 0)
         self.active_time = time.time()
         ret = await self.actor.tick(data)
         merge_time_ms("tick", self.active_time)
@@ -90,14 +89,31 @@ async def step(request: Request):
 
 @ray.remote
 class ActorGateway:
-    def __init__(self, Actor: type[Actor], args, kwargs, num_workers):
+    def __init__(
+        self,
+        Actor: type[Actor],
+        args: tuple[any],
+        kwargs: dict[str, any],
+        num_workers: int,
+        cpus_per_worker: float,
+        memory_per_worker: int,
+    ):
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
-        self.num_workers = num_workers
+        self.num_workers = num_workers if num_workers else 0
         self.workers = {}
         self.tick_id, self.num_games = 0, 0
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=True,
+        )
+        self.RemoteActorWorker = ActorWorker.options(
+            num_cpus=cpus_per_worker,
+            memory=memory_per_worker * 1024 * 1024,
+            scheduling_strategy=scheduling_local,
+        )
         self.inactive_workers = [
-            ActorWorker.remote(self.Actor, *self.args, **self.kwargs)
-            for _ in range(num_workers)
+            self.RemoteActorWorker.remote(self.Actor, *self.args, **self.kwargs)
+            for _ in range(self.num_workers)
         ]
         serve_actor_gateway(self)
         # uvicorn.run(app, host="0.0.0.0", port=8000, loop="asyncio")
@@ -107,18 +123,23 @@ class ActorGateway:
         # logger.setLevel(logging.WARNING)
         asyncio.create_task(self._health_check())
 
-    def _create_worker(self):
+    async def _create_worker(self):
         if (
             self.num_workers != 0
             and len(self.workers) + len(self.inactive_workers) >= self.num_workers
         ):
             raise Exception("Game exceeds max num.")
-        scheduling_local = NodeAffinitySchedulingStrategy(
-            node_id=ray.get_runtime_context().get_node_id(),
-            soft=True,
-        )
-        return ActorWorker.options(scheduling_strategy=scheduling_local).remote(
-            self.Actor, *self.args, **self.kwargs
+
+        def create_worker():
+            return self.RemoteActorWorker.remote(
+                self.Actor,
+                *self.args,
+                **self.kwargs,
+            )
+
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            create_worker,
         )
 
     async def _health_check(self):
@@ -177,7 +198,7 @@ class ActorGateway:
         try:
             worker = self.inactive_workers.pop()
         except IndexError:
-            worker = self._create_worker()
+            worker = await self._create_worker()
         self.workers[game_id] = worker
         try:
             start_ret = await worker.start.remote(game_id, data)
@@ -223,13 +244,23 @@ class ActorGateway:
 
 
 class RemoteActor:
-    def __init__(self, port: int = 8000, num_workers: int = 0):
+    def __init__(
+        self,
+        port: int = 8000,
+        num_workers: int = None,
+        cpus_per_worker: float = 0.2,
+        memory_per_worker: int = 512,
+    ):
         """
         Args:
             port: ActorGateway 暴露给 Gamecore 的端口
             num_workers: Actor 的 worker 数量，默认随 Gamecore 的数量自动增长
+            cpus_per_worker: 每个 worker 的 CPU 占用量
+            memory_per_worker: 每个 worker 的内存占用量，单位 MB
         """
         self.port, self.num_workers = port, num_workers
+        self.cpus_per_worker = cpus_per_worker
+        self.memory_per_worker = memory_per_worker
 
     def serve(self, Actor: type[Actor], *args, **kwargs):
         """
@@ -253,8 +284,15 @@ class RemoteActor:
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=node["NodeID"],
                     soft=False,
-                )
-            ).remote(Actor, args, kwargs, self.num_workers)
+                ),
+            ).remote(
+                Actor,
+                args,
+                kwargs,
+                self.num_workers,
+                self.cpus_per_worker,
+                self.memory_per_worker,
+            )
             for node in ray.nodes()
         ]
         # self.gateway.serve.remote()

@@ -35,23 +35,27 @@ class ModelWorker:
 
         self.torch_model, self.ort_session = None, None
         if onnx_model := ray.get(ray.get(self.model.get_onnx_model.remote())):
-            import onnxruntime as ort
-
-            ort_session = ort.InferenceSession(onnx_model)
-            self.ort_session = ort_session
-            self.forward_outputs = ray.get(
-                ray.get(self.model.get_forward_outputs.remote())
-            )
+            self._init_onnx(onnx_model)
         else:
-            model = ray.get(ray.get(self.model.get_model.remote()))
-            model.requires_grad_(False)
-            model.eval()
-            weights = ray.get(self.model.get_weights.remote())
-            set_torch_model_weights(model, ray.get(weights))
-            self.torch_model = model
+            self._init_torch()
 
         loop = loop if loop else asyncio.get_running_loop()
         loop.create_task(self._subscribe_weights())
+
+    def _init_onnx(self, onnx_model: bytes):
+        import onnxruntime as ort
+
+        ort_session = ort.InferenceSession(onnx_model)
+        self.ort_session = ort_session
+        self.forward_outputs = ray.get(ray.get(self.model.get_forward_outputs.remote()))
+
+    def _init_torch(self):
+        model = ray.get(ray.get(self.model.get_model.remote()))
+        model.requires_grad_(False)
+        model.eval()
+        weights = ray.get(self.model.get_weights.remote())
+        set_torch_model_weights(model, ray.get(weights))
+        self.torch_model = model
 
     def _forward_torch(self, *args, **kwargs) -> NestedArray:
         args, kwargs = make_batch([(args, kwargs)])
@@ -104,7 +108,17 @@ class ModelWorker:
 
 @ray.remote(num_cpus=0)
 class Model:
-    def __init__(self, name, torch_model, forward_args, forward_kwargs, use_onnx):
+    def __init__(
+        self,
+        name: str,
+        torch_model: torch.nn.Module = None,
+        forward_args: tuple[np.ndarray] = None,
+        forward_kwargs: dict[str : np.ndarray] = None,
+        num_workers: int = None,
+        cpus_per_worker: float = 0.5,
+        memory_per_worker: int = 1024,
+        use_onnx: bool = None,
+    ):
         self.trial_path = ray.get_runtime_context().namespace
         names = name.split("/")
         root_path = os.path.join(self.trial_path, f"{names[0]}")
@@ -163,17 +177,29 @@ class Model:
         else:
             self.onnx_model = ray.put(None)
 
-        self.RemoteModelWorker = ray.remote(ModelWorker).options(num_cpus=0.5)
+        self.RemoteModelWorker = ray.remote(ModelWorker).options(
+            num_cpus=cpus_per_worker,
+            memory=memory_per_worker * 1024 * 1024,
+            scheduling_strategy="SPREAD",
+        )
 
-        self.workers = [
-            self.RemoteModelWorker.remote(
-                self.name,
-            )
-            for _ in range(len(ray.nodes()))
-        ]
+        self.num_workers, self.workers = num_workers, []
+
+        for _ in range(num_workers if num_workers else len(ray.nodes())):
+            self._create_worker()
+
         self.step_cond = asyncio.Condition()
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
+
+    def _create_worker(self):
+        def create_worker():
+            worker = self.RemoteModelWorker.remote(self.name)
+            if self.num_workers and len(self.workers) >= self.num_workers:
+                return
+            self.workers.append(worker)
+
+        asyncio.get_running_loop().run_in_executor(None, create_worker)
 
     async def set_weights(self, weights: list[ray.ObjectRef]):
         self.weights = weights[0]
@@ -221,7 +247,11 @@ class Model:
             name=name,
             get_if_exists=True,
             scheduling_strategy=scheduling_local,
-        ).remote(name, None, None, None, None)
+        ).remote(
+            name,
+            cpus_per_worker=self.cpus_per_worker,
+            memory_per_worker=self.memory_per_worker,
+        )
         asyncio.create_task(self._keep_clone_model_alive(name, model))
         return name
 
@@ -232,7 +262,7 @@ class Model:
 
     def _load_balance(self):
         if len(self.workers) == 0:
-            self.workers.append(self.RemoteModelWorker.remote(self.name))
+            self._create_worker()
             return
         forward_time_sum = query("forward", kind="sum", model=self.name)
         local_forward_time_sum = query(
@@ -261,12 +291,8 @@ class Model:
             return
         # 三级调控，保证负载均衡响应速度，同时避免过度调控
         add_rate = 0.5 if load_rate < 0.7 else (1 if load_rate < 0.8 else 1.5)
-        self.workers.extend(
-            [
-                self.RemoteModelWorker.remote(self.name)
-                for _ in range(1 + int(add_rate * len(self.workers)))
-            ]
-        )
+        for _ in range(1 + int(add_rate * len(self.workers))):
+            self._create_worker()
 
     async def _is_health(self, worker):
         try:
@@ -288,13 +314,16 @@ class Model:
         old_workers = self.workers
         self.workers = active_workers
         self.workers.extend(old_workers[worker_num:])
-        self._load_balance()
         merge(
             "worker",
             len(self.workers),
             desc={"time_window_avg": "smoothed model worker num"},
             model=self.name,
         )
+        if not self.num_workers:
+            self._load_balance()
+        elif len(self.workers) < self.num_workers:
+            self._create_worker()
         await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
 
@@ -321,7 +350,7 @@ class Model:
             self.ckpt_dir,
             f"step-{self.step}.pt",
         )
-        asyncio.get_running_loop().run_in_executor(
+        await asyncio.get_running_loop().run_in_executor(
             None, torch.save, await self.weights, ckpt_path
         )
         self.ckpt_step = self.step
@@ -360,6 +389,10 @@ class RemoteModel:
         model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
+        local_mode: bool = False,
+        num_workers: int = None,
+        cpus_per_worker: float = 0.5,
+        memory_per_worker: int = 1024,
         use_onnx: bool = None,
     ):
         """
@@ -368,6 +401,10 @@ class RemoteModel:
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
+            local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
+            num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
+            cpus_per_worker: 每个worker的CPU核心数
+            memory_per_worker: 每个worker的内存大小，单位MB
             use_onnx: 如果为True，则model会被导出onnx格式，使用onnxruntime推理
         """
         self.name = name
@@ -377,10 +414,19 @@ class RemoteModel:
         )
         self.model = Model.options(
             name=name, get_if_exists=True, scheduling_strategy=scheduling_local
-        ).remote(name, model, forward_args, forward_kwargs, use_onnx)
+        ).remote(
+            name,
+            model,
+            forward_args,
+            forward_kwargs,
+            num_workers,
+            cpus_per_worker,
+            memory_per_worker,
+            use_onnx,
+        )
         self.workers = ray.get(self.model.get_workers.remote())
         self.worker_index = random.randint(0, len(self.workers))
-        self.local = True
+        self.local = local_mode
         self.local_worker = None
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
@@ -491,4 +537,11 @@ class RemoteModel:
         self.model.set_weights.remote([ray.put(weights, _owner=self.model)])
 
     async def sync(self):
+        try:
+            self.workers = await self.model.get_workers.remote()
+            return
+        except ray.exceptions.RayActorError:
+            self.model = Model.options(name=self.name, get_if_exists=True).remote(
+                self.name
+            )
         self.workers = await self.model.get_workers.remote()
