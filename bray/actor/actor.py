@@ -77,7 +77,8 @@ def serve_actor_gateway(gateway: "ActorGateway"):
     global app, actor_gateway
     actor_gateway = gateway
     Thread(
-        target=uvicorn.run, kwargs={"app": app, "log_level": logging.WARNING}
+        target=uvicorn.run,
+        kwargs={"app": app, "host": "0.0.0.0", "log_level": logging.WARNING},
     ).start()
 
 
