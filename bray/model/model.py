@@ -350,7 +350,7 @@ class Model:
         if step == -1:
             ckpt_step = ckpts[-1]
         else:
-            index = np.searchsorted(ckpts, step)
+            index = np.searchsorted(ckpts, step, side="right")
             ckpt_step = ckpts[max(0, index - 1)]
         ckpt_path = os.path.join(self.ckpt_dir, f"step-{ckpt_step}.pt")
         return torch.load(ckpt_path), ckpt_step
