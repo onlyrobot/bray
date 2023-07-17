@@ -67,7 +67,7 @@ actor_port = 8000
 #### Gamecore的最佳实践
 
 * [Python下的Gym Atari使用requests库和多线程](./benchmark/atari/gamecore.py)
-* [C++待完善]()
+* [C++下使用TCP协议向Actor发送请求](./bray/fake/fake_gamecore.cpp)
 
 ### 2. Model 接入
 

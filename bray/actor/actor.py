@@ -7,6 +7,7 @@ from threading import Thread
 import time
 import logging
 import asyncio
+import struct
 from bray.actor.base import Actor
 
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -73,7 +74,7 @@ app = FastAPI()
 actor_gateway: "ActorGateway" = None
 
 
-def serve_actor_gateway(gateway: "ActorGateway"):
+def serve_http_gateway(gateway: "ActorGateway"):
     global app, actor_gateway
     actor_gateway = gateway
     Thread(
@@ -85,7 +86,74 @@ def serve_actor_gateway(gateway: "ActorGateway"):
 @app.post("/step")
 async def step(request: Request):
     global actor_gateway
-    return Response(content=await actor_gateway(request))
+    headers, body = request.headers, await request.body()
+    return Response(content=await actor_gateway(headers, body))
+
+
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    global actor_gateway
+
+    async def handle(headers, body):
+        data = await actor_gateway(headers, body)
+        # 计算Header中的字段值
+        game_id_size = len(headers["game_id"])
+        body_size = len(data)
+        time = headers["time"]
+        # 构造Header
+        header = struct.pack("!3q", game_id_size, body_size, time)
+        # 构造整个包
+        try:
+            writer.write(header + headers["game_id"] + data)
+            await writer.drain()
+        except Exception as e:
+            print(e)
+            writer.close()
+
+    while True:
+        # 接收客户端请求数据
+        try:
+            data = await reader.readexactly(8 * 6)
+            (
+                game_id_size,
+                step_kind_size,
+                key_size,
+                token_size,
+                body_size,
+                time,
+            ) = struct.unpack("!6q", data)
+            data = await reader.readexactly(
+                game_id_size + step_kind_size + key_size + token_size + body_size
+            )
+        except Exception as e:
+            print(e)
+            writer.close()
+            return
+        game_id = data[0:game_id_size]
+        step_kind = data[game_id_size : game_id_size + step_kind_size]
+        offset = game_id_size + step_kind_size
+        key = data[offset : offset + key_size]
+        offset += key_size
+        token = data[offset : offset + token_size]
+        body = data[offset + token_size :]
+        headers = {
+            "game_id": game_id,
+            "step_kind": step_kind.decode(),
+            "key": key.decode(),
+            "token": token.decode(),
+            "time": time,
+        }
+        asyncio.create_task(handle(headers, body))
+
+
+async def serve_tcp_gateway(gateway: "ActorGateway"):
+    global actor_gateway
+    actor_gateway = gateway
+    # 创建TCP服务器
+    server = await asyncio.start_server(handle_client, "0.0.0.0", 8000)
+
+    # 开始监听端口
+    async with server:
+        await server.serve_forever()
 
 
 @ray.remote
@@ -98,6 +166,8 @@ class ActorGateway:
         num_workers: int,
         cpus_per_worker: float,
         memory_per_worker: int,
+        actors_per_worker: int,
+        use_tcp: bool,
     ):
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.num_workers = num_workers if num_workers else 0
@@ -116,7 +186,10 @@ class ActorGateway:
             self.RemoteActorWorker.remote(self.Actor, *self.args, **self.kwargs)
             for _ in range(self.num_workers)
         ]
-        serve_actor_gateway(self)
+        if not use_tcp:
+            serve_http_gateway(self)
+        else:
+            asyncio.create_task(serve_tcp_gateway(self))
         # uvicorn.run(app, host="0.0.0.0", port=8000, loop="asyncio")
         # import logging
 
@@ -217,18 +290,17 @@ class ActorGateway:
         self.inactive_workers.append(worker)
         return end_ret
 
-    async def __call__(self, req: Request) -> bytes:
-        step_kind = req.headers.get("step_kind")
-        game_id = req.headers.get("game_id")
+    async def __call__(self, headers: dict[str:str], body: bytes) -> bytes:
+        step_kind = headers.get("step_kind")
+        game_id = headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
-        data = await req.body()
         if step_kind == "tick":
-            return await self.tick(game_id, data)
+            return await self.tick(game_id, body)
         elif step_kind == "start":
-            return await self.start(game_id, data)
+            return await self.start(game_id, body)
         elif step_kind == "end":
-            return await self.end(game_id, data)
+            return await self.end(game_id, body)
         raise Exception("Unknown step_kind:", step_kind)
 
 
@@ -239,6 +311,8 @@ class RemoteActor:
         num_workers: int = None,
         cpus_per_worker: float = 0.2,
         memory_per_worker: int = 512,
+        actors_per_worker: int = 1,
+        use_tcp: bool = False,
     ):
         """
         Args:
@@ -246,10 +320,14 @@ class RemoteActor:
             num_workers: Actor 的 worker 数量，默认随 Gamecore 的数量自动增长
             cpus_per_worker: 每个 worker 的 CPU 占用量
             memory_per_worker: 每个 worker 的内存占用量，单位 MB
+            actors_per_worker: 每个 worker 的 Actor 数量
+            use_tcp: 是否使用 TCP 协议
         """
         self.port, self.num_workers = port, num_workers
         self.cpus_per_worker = cpus_per_worker
         self.memory_per_worker = memory_per_worker
+        self.actors_per_worker = actors_per_worker
+        self.use_tcp = use_tcp
 
     def serve(self, Actor: type[Actor], *args, **kwargs):
         """
@@ -281,6 +359,8 @@ class RemoteActor:
                 self.num_workers,
                 self.cpus_per_worker,
                 self.memory_per_worker,
+                self.actors_per_worker,
+                self.use_tcp,
             )
             for node in ray.nodes()
         ]

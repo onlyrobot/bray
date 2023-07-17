@@ -1,5 +1,7 @@
 import bray
 
+bray.init(project="./fake-actor", trial="deploy")
+
 
 class FakeActor(bray.Actor):
     def __init__(self, config):
@@ -26,7 +28,7 @@ config = {
 }
 actor_port = 8000
 
-remote_actor = bray.RemoteActor(port=actor_port)
+remote_actor = bray.RemoteActor(port=actor_port, use_tcp=True)
 remote_actor.serve(Actor=FakeActor, config=config)
 
 bray.run_until_asked_to_stop()

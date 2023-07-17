@@ -38,7 +38,7 @@ class AtariActor(bray.Actor):
         self.episode_reward += reward
         value, logit, action = await self.remote_model.forward(obs)
         self._append_to_trajectory(obs, action, reward, value, logit)
-        return json.dumps({"action": action.tolist()})
+        return json.dumps({"action": action.tolist()}).encode()
 
     def end(self, data: bytes) -> bytes:
         data = json.loads(data)
