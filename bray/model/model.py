@@ -282,7 +282,7 @@ class Model:
     async def subscribe_workers(self, node_id: str = None):
         async with self.worker_cond:
             await self.worker_cond.wait()
-        return self.get_workers(node_id)
+        return await self.get_workers(node_id)
 
     def _load_balance(self):
         if len(self.workers) == 0:
