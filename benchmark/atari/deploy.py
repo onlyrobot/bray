@@ -4,7 +4,7 @@ import bray
 from .model import AtariModel
 from .actor import AtariActor
 
-bray.init(project="./atari-pengyao", trial="ppo-v0")
+bray.init(project="./atari-pengyao", trial="deploy")
 
 remote_model = bray.RemoteModel(
     name="atari_model",

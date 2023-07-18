@@ -193,7 +193,9 @@ class Model:
         self.num_workers, self.workers = num_workers, []
 
         if len(names) > 1:  # cloned model
-            self.workers.append(ray.remote(ModelWorker).remote(self.name))
+            worker = ray.remote(ModelWorker).remote(self.name)
+            worker.__node_id = ray.get(worker.get_node_id.remote())
+            self.workers.append(worker)
 
         for _ in range(
             num_workers
@@ -213,6 +215,7 @@ class Model:
             return
         if self.num_workers and len(self.workers) >= self.num_workers:
             return
+        worker.__node_id = await worker.get_node_id.remote()
         self.workers.append(worker)
         async with self.worker_cond:
             self.worker_cond.notify_all()
@@ -398,7 +401,7 @@ class Model:
     async def get_workers(self, node_id: str = None) -> list[ModelWorker]:
         if not node_id:
             return self.workers
-        workers = [w for w in self.workers if await w.get_node_id.remote() == node_id]
+        workers = [w for w in self.workers if w.__node_id == node_id]
         return workers if workers else self.workers
 
 
