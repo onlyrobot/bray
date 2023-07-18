@@ -105,6 +105,9 @@ class ModelWorker:
             pass
         asyncio.create_task(self._subscribe_weights())
 
+    def get_node_id(self):
+        return ray.get_runtime_context().get_node_id()
+
 
 @ray.remote(num_cpus=0)
 class Model:
@@ -192,7 +195,11 @@ class Model:
         if len(names) > 1:  # cloned model
             self.workers.append(ray.remote(ModelWorker).remote(self.name))
 
-        for _ in range(num_workers if num_workers else len(ray.nodes())):
+        for _ in range(
+            num_workers
+            if num_workers
+            else len([node for node in ray.nodes() if node["Alive"]])
+        ):
             asyncio.create_task(self._create_worker())
 
         self.step_cond = asyncio.Condition()
@@ -269,10 +276,10 @@ class Model:
             await self.step_cond.wait_for(lambda: self.step > current_step)
         return self.weights, self.step
 
-    async def subscribe_workers(self):
+    async def subscribe_workers(self, node_id: str = None):
         async with self.worker_cond:
             await self.worker_cond.wait()
-        return self.workers
+        return self.get_workers(node_id)
 
     def _load_balance(self):
         if len(self.workers) == 0:
@@ -388,8 +395,11 @@ class Model:
     async def get_forward_outputs(self) -> ray.ObjectRef:
         return self.forward_outputs
 
-    async def get_workers(self) -> list[ModelWorker]:
-        return self.workers
+    async def get_workers(self, node_id: str = None) -> list[ModelWorker]:
+        if not node_id:
+            return self.workers
+        workers = [w for w in self.workers if await w.get_node_id.remote() == node_id]
+        return workers if workers else self.workers
 
 
 class RemoteModel:
@@ -438,7 +448,9 @@ class RemoteModel:
             memory_per_worker,
             use_onnx,
         )
-        self.workers = ray.get(self.model.get_workers.remote())
+        self.workers = ray.get(
+            self.model.get_workers.remote(ray.get_runtime_context().get_node_id())
+        )
         self.worker_index = random.randint(0, len(self.workers))
         self.local = local_mode
         self.local_worker = None
@@ -555,8 +567,12 @@ class RemoteModel:
         self.model.set_weights.remote([ray.put(weights, _owner=self.model)])
 
     async def sync(self):
-        self.workers = await self.model.get_workers.remote()
+        self.workers = await self.model.get_workers.remote(
+            ray.get_runtime_context().get_node_id()
+        )
 
     async def _subscribe_workers(self):
-        self.workers = await self.model.subscribe_workers.remote()
+        self.workers = await self.model.subscribe_workers.remote(
+            ray.get_runtime_context().get_node_id()
+        )
         asyncio.create_task(self._subscribe_workers())

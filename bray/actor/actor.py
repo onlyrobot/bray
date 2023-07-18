@@ -175,7 +175,7 @@ class ActorGateway:
         self.tick_id, self.num_games = 0, 0
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
-            soft=True,
+            soft=False,
         )
         self.RemoteActorWorker = ActorWorker.options(
             num_cpus=cpus_per_worker,
@@ -363,6 +363,7 @@ class RemoteActor:
                 self.use_tcp,
             )
             for node in ray.nodes()
+            if node["Alive"]
         ]
         # self.gateway.serve.remote()
         # serve.shutdown()

@@ -26,7 +26,7 @@ remote_trainer.train(
     buffer="atari_buffer",
     batch_size=8,
     weights_publish_interval=1,
-    num_steps=100000,
+    num_steps=1000000,
 )
 
 remote_actor = bray.RemoteActor(port=8000)
