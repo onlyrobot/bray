@@ -128,7 +128,7 @@ class MetricsWorker:
             name="RemoteMetrics",
             get_if_exists=True,
             scheduling_strategy=scheduling_local,
-            lifetime="detached",
+            # lifetime="detached",
         ).remote()
         self.cached_metrics = {}
         self.last_merge_remote_time = 0
