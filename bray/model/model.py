@@ -194,7 +194,7 @@ class Model:
 
         if len(names) > 1:  # cloned model
             worker = ray.remote(ModelWorker).remote(self.name)
-            worker.__node_id = ray.get(worker.get_node_id.remote())
+            worker.__node_id = ""
             self.workers.append(worker)
 
         for _ in range(
