@@ -21,7 +21,7 @@ class Metric:
 
 @ray.remote(num_cpus=0)
 class RemoteMetrics:
-    async def __init__(self, time_window=60):
+    def __init__(self, time_window=60):
         self.time_window = time_window
         self.metrics, self.last_metrics = {}, {}
         self.diff_metrics = {}
@@ -34,7 +34,7 @@ class RemoteMetrics:
     def _diff(self, current: Metric, last: Metric) -> Metric:
         return Metric(current.cnt - last.cnt, current.sum - last.sum)
 
-    def merge(self, name, metric, desc: dict[str:str]):
+    async def merge(self, name, metric, desc: dict[str:str]):
         if desc is not None:
             self.descs[name] = desc
         m = self.metrics.get(name, None)
@@ -43,11 +43,11 @@ class RemoteMetrics:
         else:
             self.metrics[name] = metric
 
-    def batch_merge(self, metrics: dict[str:Metric]):
+    async def batch_merge(self, metrics: dict[str:Metric]):
         for name, metric in metrics.items():
-            self.merge(name, metric, None)
+            await self.merge(name, metric, None)
 
-    def query(self, name, time_window: bool) -> Metric:
+    async def query(self, name, time_window: bool) -> Metric:
         if not time_window:
             return self.metrics.get(name, Metric())
         return self.diff_metrics.get(name, Metric())
