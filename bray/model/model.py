@@ -313,10 +313,10 @@ class Model:
         # 它应该等于当前测得的负载量，
         # 即(1-p)*worker_num*0.6 == worker_num * load_rate
         # 解得p = 1 - load_rate / 0.6
-        # 为了避免过度下掉，我们加入平滑因子 random.random() ** 3
+        # 为了避免过度下掉，我们加入平滑因子 random.random() ** 2
         if load_rate < 0.4 and len(self.workers) > 1:
             p = 1 - load_rate / 0.6
-            shrink_num = int(p * random.random() ** 3 * len(self.workers))
+            shrink_num = min(2, int(p * random.random() ** 2 * len(self.workers)))
             del self.workers[len(self.workers) - shrink_num :]
             return
         if load_rate < 0.55:

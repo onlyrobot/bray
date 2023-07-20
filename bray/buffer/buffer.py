@@ -91,35 +91,36 @@ class RemoteBuffer:
         self.sync()
         self.buffer_worker = None
 
-    def _push(self, worker, *replays):
+    def _push(self, worker, replays):
         if not asyncio.get_event_loop().is_running():
-            ray.get(worker.push.remote(*replays))
+            try:
+                ray.get(worker.push.remote(*replays))
+            except ray.exceptions.RayActorError:
+                self.sync()
+                self.push(*replays)
             return
 
         async def push():
-            await worker.push.remote(*replays)
+            try:
+                await worker.push.remote(*replays)
+            except ray.exceptions.RayActorError:
+                self.sync()
+                self.push(*replays)
 
         asyncio.create_task(push())
 
-    def push(self, *replays: NestedArray):
-        if len(replays) == 0:
-            return
+    def push(self, *replays: NestedArray) -> None:
         if len(self.workers) == 0:
             self.sync()
         if len(self.workers) == 0:
             print(f"No buffer worker of {self.name} found, push failed.")
             return
-        max_push_size = 25
-        if len(replays) > max_push_size:
-            self.push(*replays[max_push_size:])
-            replays = replays[:max_push_size]
-        index = self.worker_index % len(self.workers)
-        self.worker_index += 1
-        try:
-            self._push(self.workers[index], *replays)
-        except ray.exceptions.RayActorError:
-            self.sync()
-            self.push(*replays)
+        max_push_size = len(replays) // len(self.workers) + 1
+        while len(replays) > 0:
+            index = self.worker_index % len(self.workers)
+            self._push(self.workers[index], replays[:max_push_size])
+            self.worker_index += 1
+            replays = replays[max_push_size:]
 
     def sync(self):
         self.workers = ray.get(self.buffer.get_workers.remote())
