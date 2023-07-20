@@ -51,6 +51,14 @@ class RemoteTrainer:
         )
         self.executor.start()
 
+        def init_torch():
+            import torch
+
+            torch.set_num_interop_threads(cpus_per_worker)
+            torch.set_num_threads(cpus_per_worker)
+
+        self.executor.run_remote(init_torch)
+
     def train(self, train: callable, *args, **kwargs) -> list[any]:
         """
         在多个节点上执行训练函数

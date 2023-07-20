@@ -45,11 +45,19 @@ class ModelWorker:
     def _init_onnx(self, onnx_model: bytes):
         import onnxruntime as ort
 
-        ort_session = ort.InferenceSession(onnx_model)
+        num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
+        num_cpus = max(1, int(num_cpus))
+        ort_session = ort.InferenceSession(
+            onnx_model, inter_op_thread_num=num_cpus, intra_op_thread_num=num_cpus
+        )
         self.ort_session = ort_session
         self.forward_outputs = ray.get(ray.get(self.model.get_forward_outputs.remote()))
 
     def _init_torch(self):
+        num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
+        num_cpus = max(1, int(num_cpus))
+        torch.set_num_interop_threads(num_cpus)
+        torch.set_num_threads(num_cpus)
         model = ray.get(ray.get(self.model.get_model.remote()))
         model.requires_grad_(False)
         model.eval()
@@ -397,6 +405,9 @@ class Model:
 
     async def get_forward_outputs(self) -> ray.ObjectRef:
         return self.forward_outputs
+
+    async def get_cpus_per_worker(self) -> float:
+        return self.cpus_per_worker
 
     async def get_workers(self, node_id: str = None) -> list[ModelWorker]:
         if not node_id:
