@@ -1,6 +1,7 @@
 import torch
 import bray
 import horovod.torch as hvd
+import time
 
 
 def cal_kl(lhs_logits, rhs_logits):
@@ -124,7 +125,15 @@ def train_atari(
     buffer = bray.TorchTensorBuffer(buffer, to_gpu=to_gpu)
     buffer = bray.PrefetchBuffer(buffer, max_reuse=8, name=remote_buffer.name)
     for i in range(num_steps):
+        beg = time.time()
         replay = next(buffer)
+        end = time.time()
+        bray.merge(
+            "replay",
+            (end - beg) * 1000,
+            desc={"time_window_avg": "next replay latency ms"},
+        )
+
         train_step(
             remote_model,
             replay,
@@ -132,5 +141,15 @@ def train_atari(
             optimizer,
             weights_publish_interval,
             step=i,
+        )
+        if hvd.rank() != 0:
+            continue
+        bray.merge(
+            "train",
+            (time.time() - end) * 1000,
+            desc={
+                "time_window_avg": "train step latency ms",
+                "time_window_cnt": "train step per minute",
+            },
         )
     print(f"Train all {num_steps} steps done!")

@@ -109,7 +109,7 @@ class RemoteBuffer:
         if len(self.workers) == 0:
             print(f"No buffer worker of {self.name} found, push failed.")
             return
-        max_push_size = 100
+        max_push_size = 25
         if len(replays) > max_push_size:
             self.push(*replays[max_push_size:])
             replays = replays[:max_push_size]
