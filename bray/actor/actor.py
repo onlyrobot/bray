@@ -79,7 +79,11 @@ def serve_http_gateway(gateway: "ActorGateway"):
     actor_gateway = gateway
     Thread(
         target=uvicorn.run,
-        kwargs={"app": app, "host": "0.0.0.0", "log_level": logging.WARNING},
+        kwargs={
+            "app": app,
+            "host": "0.0.0.0",
+            "log_level": logging.WARNING,
+        },
     ).start()
 
 
@@ -263,9 +267,10 @@ class ActorGateway:
         except IndexError:
             worker = await self._create_worker()
         try:
-            start_ret = await worker.start.remote(game_id, data)
             self.workers[game_id] = worker
+            start_ret = await worker.start.remote(game_id, data)
         except:
+            self.workers.pop(game_id, None)
             raise
         self.num_games += 1
         asyncio.create_task(self._active_check(game_id))

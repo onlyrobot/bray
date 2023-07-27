@@ -337,6 +337,7 @@ class Model:
             return False
 
     async def _health_check(self):
+        await asyncio.sleep(60)
         worker_num = len(self.workers)
         active_workers = [
             worker
@@ -356,7 +357,6 @@ class Model:
             self._load_balance()
         elif len(self.workers) < self.num_workers:
             asyncio.create_task(self._create_worker())
-        await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
 
     def _load_checkpoint(self, step=-1) -> tuple[NestedArray, int]:
