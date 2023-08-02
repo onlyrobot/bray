@@ -1,5 +1,4 @@
 import ray
-import multiprocessing
 import time
 import asyncio
 from asyncio import StreamReader, StreamWriter
@@ -26,9 +25,12 @@ class ActorGateway:
         ]
         self.is_initialized = False
 
-    async def _initialize(self):
+    def _initialize(self):
+        if self.is_initialized:
+            return
         self.num_games = 0
         asyncio.create_task(self._check_health())
+        self.is_initialized = True
 
     async def _check_health(self):
         await asyncio.sleep(60)
@@ -48,7 +50,7 @@ class ActorGateway:
         asyncio.create_task(self._check_health())
 
     def _create_worker(self):
-        if len(self.actors) + len(self.inactive_actors) >= self.actors_per_worker:
+        if len(self.actors) >= self.actors_per_worker:
             raise Exception("Game exceeds max num.")
         return self.Actor(*self.args, **self.kwargs)
 
@@ -96,18 +98,8 @@ class ActorGateway:
             self.actors.pop(game_id, None)
             raise
 
-    async def end(self, game_id, data) -> bytes:
-        actor = self.actors.pop(game_id, None)
-        if not actor:
-            raise Exception(f"Game {game_id} not started.")
-        end_ret = actor.end(data)
-        self.inactive_actors.append(actor)
-        return end_ret
-
-    async def __call__(self, headers: dict[str:str], body: bytes) -> bytes:
-        if not self.is_initialized:
-            await self._initialize()
-            self.is_initialized = True
+    async def __call__(self, headers: dict, body: bytes) -> bytes:
+        self._initialize()
         step_kind = headers.get("step_kind")
         game_id = headers.get("game_id")
         if game_id is None:
@@ -116,9 +108,14 @@ class ActorGateway:
             return await self.tick(game_id, body)
         elif step_kind == "start":
             return await self.start(game_id, body)
-        elif step_kind == "end":
-            return await self.end(game_id, body)
-        raise Exception("Unknown step_kind:", step_kind)
+        elif step_kind != "end":
+            raise Exception("Unknown step_kind:", step_kind)
+        actor = self.actors.pop(game_id, None)
+        if not actor:
+            raise Exception(f"Game {game_id} not started.")
+        end_ret = actor.end(body)
+        self.inactive_actors.append(actor)
+        return end_ret
 
 
 ACTOR_GATEWAY: ActorGateway = None
@@ -132,14 +129,16 @@ def set_actor_gateway(gateway: ActorGateway):
 async def handle_client(reader: StreamReader, writer: StreamWriter):
     async def handle(headers, body):
         global ACTOR_GATEWAY
-        data = await ACTOR_GATEWAY(headers, body)
-        # 计算Header中的字段值
+        try:
+            data = await ACTOR_GATEWAY(headers, body)
+        except Exception as e:
+            print(e)
+            writer.close()
+            return
         game_id_size = len(headers["game_id"])
         body_size = len(data)
         time = headers["time"]
-        # 构造Header
         header = struct.pack("!3q", game_id_size, body_size, time)
-        # 构造整个包
         try:
             writer.write(header + headers["game_id"] + data)
             await writer.drain()
@@ -148,7 +147,6 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             writer.close()
 
     while True:
-        # 接收客户端请求数据
         try:
             data = await reader.readexactly(8 * 6)
             (
@@ -188,7 +186,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
 
 
 @ray.remote
-def serve_gateway(port, Actor, args, kwargs, actors_per_worker):
+def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp):
     async def serve_tcp_gateway():
         server = await asyncio.start_server(
             handle_client, "0.0.0.0", port, reuse_port=True
@@ -196,19 +194,40 @@ def serve_gateway(port, Actor, args, kwargs, actors_per_worker):
         async with server:
             await server.serve_forever()
 
-    set_actor_gateway(ActorGateway(Actor, args, kwargs, actors_per_worker))
+    gateway = ActorGateway(Actor, args, kwargs, actors_per_worker)
+    set_actor_gateway(gateway)
 
-    asyncio.run(serve_tcp_gateway())
+    if use_tcp:
+        return asyncio.run(serve_tcp_gateway())
+
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    async def step(request: Request):
+        headers, body = request.headers, await request.body()
+        return Response(content=await gateway(headers, body))
+
+    import uvicorn, fastapi, logging, socket
+
+    app = fastapi.FastAPI()
+    app.add_api_route("/step", step, methods=["POST"])
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.bind(("0.0.0.0", port))
+    uvicorn.run(app, fd=sock.fileno(), log_level=logging.WARNING)
 
 
 class RemoteActor:
     def __init__(
         self,
         port: int = 8000,
-        num_workers: int = 10,
-        cpus_per_worker: float = 0.2,
+        num_workers: int = 2,
+        cpus_per_worker: float = 1,
         memory_per_worker: int = 512,
         actors_per_worker: int = 10,
+        use_tcp: bool = False,
     ):
         """
         Args:
@@ -218,10 +237,12 @@ class RemoteActor:
             memory_per_worker: 每个 worker 的内存占用量，单位 MB
             actors_per_worker: 每个 worker 的 Actor 数量
         """
-        self.port, self.num_workers = port, num_workers
+        self.port = port
+        self.num_workers = num_workers
         self.cpus_per_worker = cpus_per_worker
         self.memory_per_worker = memory_per_worker
         self.actors_per_worker = actors_per_worker
+        self.use_tcp = use_tcp
 
     def serve(self, Actor: type[Actor], *args, **kwargs):
         """
@@ -233,15 +254,16 @@ class RemoteActor:
         print("Starting ActorGateway.")
         self.gateways = [
             [
-                serve_gateway.options(
-                    num_cpus=self.num_workers * self.cpus_per_worker,
-                    memory=self.num_workers * self.memory_per_worker,
+                ActorWorker.options(
+                    num_cpus=self.cpus_per_worker,
+                    memory=self.memory_per_worker * 1024 * 1024,
                 ).remote(
                     self.port,
                     Actor,
                     args,
                     kwargs,
                     self.actors_per_worker,
+                    self.use_tcp,
                 )
                 for _ in range(self.num_workers)
             ]

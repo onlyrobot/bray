@@ -12,7 +12,7 @@ import struct
 gym_id = "BeamRiderNoFrameskip-v4"
 
 
-def actor_step(s: socket.socket, game_id, step_kind, data: bytes):
+def actor_step(sock: socket.socket, game_id, step_kind, data: bytes):
     game_id, step_kind = game_id.encode(), step_kind.encode()
     header = struct.pack(
         "!6q",
@@ -23,12 +23,12 @@ def actor_step(s: socket.socket, game_id, step_kind, data: bytes):
         len(data),  # len(data)
         0,  # time
     )
-    s.sendall(
+    sock.sendall(
         header + game_id + step_kind + b"" + b"" + data,  # key and token is empty
     )
-    data = s.recv(8 * 3, socket.MSG_WAITALL)
+    data = sock.recv(8 * 3, socket.MSG_WAITALL)
     game_id_size, body_size, time = struct.unpack("!3q", data)
-    data = s.recv(game_id_size + body_size, socket.MSG_WAITALL)
+    data = sock.recv(game_id_size + body_size, socket.MSG_WAITALL)
     assert data[:game_id_size] == game_id and time == 0
     return data[game_id_size:]
 
@@ -41,30 +41,32 @@ def make_env(gym_id: str):
 
 def rollout(gym_id: str, game_id: str):
     # 创建一个socket对象
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # 连接到目标主机
     host, port = "127.0.0.1", 8000
-    s.connect((host, port))
+    sock.connect((host, port))
     env = make_env(gym_id)
-    game_start_res = actor_step(s, game_id, "start", b"")
+    game_start_res = actor_step(sock, game_id, "start", b"")
     print(game_start_res)
     done, reward = False, 0.0
     obs = env.reset()
     while not done:
         data = {"obs": obs.tolist(), "reward": reward}
+        beg = time.time()
         res = actor_step(
-            s,
+            sock,
             game_id,
             "tick",
             json.dumps(data).encode(),
         )
+        print("tick time:", time.time() - beg)
         cmd = json.loads(res)
         cmd = int(cmd["action"])
         obs, reward, done, _ = env.step(cmd)
     # final reward
     data = {"reward": reward}
     game_end_res = actor_step(
-        s,
+        sock,
         game_id,
         "end",
         json.dumps(data).encode(),
