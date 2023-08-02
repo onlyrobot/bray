@@ -52,14 +52,12 @@ def rollout(gym_id: str, game_id: str):
     obs = env.reset()
     while not done:
         data = {"obs": obs.tolist(), "reward": reward}
-        beg = time.time()
         res = actor_step(
             sock,
             game_id,
             "tick",
             json.dumps(data).encode(),
         )
-        print("tick time:", time.time() - beg)
         cmd = json.loads(res)
         cmd = int(cmd["action"])
         obs, reward, done, _ = env.step(cmd)

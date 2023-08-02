@@ -232,10 +232,11 @@ class RemoteActor:
         """
         Args:
             port: ActorGateway 暴露给 Gamecore 的端口
-            num_workers: Actor 的 worker 数量，默认随 Gamecore 的数量自动增长
+            num_workers: Actor 的 worker 数量
             cpus_per_worker: 每个 worker 的 CPU 占用量
             memory_per_worker: 每个 worker 的内存占用量，单位 MB
             actors_per_worker: 每个 worker 的 Actor 数量
+            use_tcp: 是否使用 TCP 作为通信协议
         """
         self.port = port
         self.num_workers = num_workers

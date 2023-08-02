@@ -47,9 +47,10 @@ class ModelWorker:
 
         num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
         num_cpus = max(1, int(num_cpus))
-        ort_session = ort.InferenceSession(
-            onnx_model, inter_op_thread_num=num_cpus, intra_op_thread_num=num_cpus
-        )
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = num_cpus
+        options.inter_op_num_threads = num_cpus
+        ort_session = ort.InferenceSession(onnx_model, options)
         self.ort_session = ort_session
         self.forward_outputs = ray.get(ray.get(self.model.get_forward_outputs.remote()))
 
@@ -133,6 +134,7 @@ class Model:
         self.trial_path = ray.get_runtime_context().namespace
         names = name.split("/")
         root_path = os.path.join(self.trial_path, f"{names[0]}")
+
         torch_path = os.path.join(root_path, f"{names[0]}.pt")
         if not os.path.exists(torch_path):
             assert torch_model is not None, "torch model must be provided"
@@ -266,6 +268,7 @@ class Model:
             weights, ckpt_step = self._load_checkpoint(step)
             torch.save(weights, weights_path)
             print(f"clone model {self.name} to {name} at step {ckpt_step}")
+
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
@@ -474,6 +477,10 @@ class RemoteModel:
         loop = asyncio.get_running_loop()
 
         async def build_local_worker():
+            from concurrent.futures import ThreadPoolExecutor
+
+            loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+
             self.local_worker = await loop.run_in_executor(
                 None, ModelWorker, self.name, loop
             )
@@ -506,21 +513,15 @@ class RemoteModel:
         self.worker_index += 1
         if tick_id := get_tick_id():
             index = tick_id % len(self.workers)
+        worker = self.workers[index]
+        beg = time.time()
         try:
-            worker = self.workers[index]
-            beg = time.time()
             outputs = await worker.forward.remote(*args, **kwargs)
-            merge(
-                "forward",
-                (time.time() - beg) * 1000,
-                desc={},
-                model=self.name,
-                mode="remote",
-            )
         except ray.exceptions.RayActorError:
             print("ray actor exception from model forward")
             await self.sync()
-            outputs = await self._remote_forward(*args, **kwargs)
+            return await self._remote_forward(*args, **kwargs)
+        merge_time_ms("forward", beg, model=self.name, mode="remote")
         return outputs
 
     async def forward(

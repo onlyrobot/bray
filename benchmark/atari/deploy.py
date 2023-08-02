@@ -11,14 +11,14 @@ remote_model = bray.RemoteModel(
     model=AtariModel(),
     forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
     use_onnx=True,
+    local_mode=True,
 )
 
-remote_actor = bray.RemoteActor(port=8000)
+remote_actor = bray.RemoteActor(port=8000, num_workers=6)
 
 remote_actor.serve(
     Actor=AtariActor,
-    model="atari_model",
-    buffer=None,
+    remote_model=remote_model,
 )
 
 bray.run_until_asked_to_stop()

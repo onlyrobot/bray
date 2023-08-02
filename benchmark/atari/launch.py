@@ -11,6 +11,7 @@ remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
     forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
+    local_mode=True,
 )
 
 remote_buffer = bray.RemoteBuffer("atari_buffer")
@@ -22,19 +23,19 @@ remote_trainer = bray.RemoteTrainer(
 
 remote_trainer.train(
     train=train_atari,
-    model="atari_model",
-    buffer="atari_buffer",
+    remote_model=remote_model,
+    remote_buffer=remote_buffer,
     batch_size=8,
     weights_publish_interval=1,
     num_steps=1000000,
 )
 
-remote_actor = bray.RemoteActor(port=8000)
+remote_actor = bray.RemoteActor(port=8000, num_workers=4)
 
 remote_actor.serve(
     Actor=AtariActor,
-    model="atari_model",
-    buffer="atari_buffer",
+    remote_model=remote_model,
+    remote_buffer=remote_buffer,
 )
 
 bray.run_until_asked_to_stop()

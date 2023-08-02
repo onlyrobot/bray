@@ -18,11 +18,11 @@ def gae(trajectory: list[NestedArray]) -> None:
 
 
 class AtariActor(bray.Actor):
-    def __init__(self, model: str, buffer: str = None):
-        self.remote_model = bray.RemoteModel(name=model)
-        self.remote_buffer = None
-        if buffer:
-            self.remote_buffer = bray.RemoteBuffer(name=buffer)
+    def __init__(
+        self, remote_model: bray.RemoteModel, remote_buffer: bray.RemoteBuffer = None
+    ):
+        self.remote_model = remote_model
+        self.remote_buffer = remote_buffer
 
     def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
