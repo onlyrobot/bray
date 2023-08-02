@@ -34,8 +34,9 @@ class ModelWorker:
         self.current_step = ray.get(self.model.get_step.remote())
 
         self.torch_model, self.ort_session = None, None
-        if onnx_model := ray.get(ray.get(self.model.get_onnx_model.remote())):
-            self._init_onnx(onnx_model)
+        onnx_model, self.use_onnx = ray.get(self.model.get_onnx_model.remote())
+        if self.use_onnx:
+            self._init_onnx(ray.get(onnx_model))
         else:
             self._init_torch()
 
@@ -52,6 +53,8 @@ class ModelWorker:
         options.inter_op_num_threads = num_cpus
         ort_session = ort.InferenceSession(onnx_model, options)
         self.ort_session = ort_session
+        if self.use_onnx == "train":
+            self.weights = ray.get(ray.get(self.model.get_weights.remote()))
         self.forward_outputs = ray.get(ray.get(self.model.get_forward_outputs.remote()))
 
     def _init_torch(self):
@@ -62,8 +65,8 @@ class ModelWorker:
         model = ray.get(ray.get(self.model.get_model.remote()))
         model.requires_grad_(False)
         model.eval()
-        weights = ray.get(self.model.get_weights.remote())
-        set_torch_model_weights(model, ray.get(weights))
+        weights = ray.get(ray.get(self.model.get_weights.remote()))
+        set_torch_model_weights(model, weights)
         self.torch_model = model
 
     def _forward_torch(self, *args, **kwargs) -> NestedArray:
@@ -80,6 +83,8 @@ class ModelWorker:
         sess = self.ort_session
         input_names = [input.name for input in sess.get_inputs()]
         flatten_input = flatten_nested_array(args + (kwargs,), sort_keys=True)
+        if self.use_onnx == "train":
+            flatten_input.extend(self.weights)
         inputs = dict(zip(input_names, flatten_input))
         # output_names = [output.name for output in sess.get_outputs()]
         # print(handle_nested_array(inputs, lambda x: (x.shape, x.dtype)))
@@ -89,7 +94,7 @@ class ModelWorker:
 
     def forward(self, *args, **kwargs) -> NestedArray:
         beg = time.time()
-        if self.torch_model:
+        if not self.use_onnx:
             outputs = self._forward_torch(*args, **kwargs)
         else:
             outputs = self._forward_onnx(*args, **kwargs)
@@ -108,10 +113,11 @@ class ModelWorker:
             raise e
         assert step > self.current_step
         self.current_step = step
-        if self.torch_model:
+        if not self.use_onnx:
             set_torch_model_weights(self.torch_model, await weights)
         else:
-            pass
+            assert self.use_onnx == "train", "Set onnx weights is only for train mode."
+            self.weights = await weights
         asyncio.create_task(self._subscribe_weights())
 
     def get_node_id(self):
@@ -129,7 +135,7 @@ class Model:
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
         memory_per_worker: int = 1024,
-        use_onnx: bool = None,
+        use_onnx: ["train", "deploy"] = None,
     ):
         self.trial_path = ray.get_runtime_context().namespace
         names = name.split("/")
@@ -179,7 +185,11 @@ class Model:
             print("Exporting onnx model to", onnx_path)
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
             forward_outputs = export_onnx(
-                torch_model, onnx_path, forward_args, forward_kwargs
+                torch_model,
+                onnx_path,
+                forward_args,
+                forward_kwargs,
+                export_params=False if use_onnx == "train" else True,
             )
             torch.save(forward_outputs, outputs_path)
             onnx_path_exists = True
@@ -190,6 +200,7 @@ class Model:
             self.forward_outputs = ray.put(torch.load(outputs_path))
         else:
             self.onnx_model = ray.put(None)
+        self.use_onnx = use_onnx
 
         self.cpus_per_worker = cpus_per_worker
         self.memory_per_worker = memory_per_worker
@@ -403,8 +414,8 @@ class Model:
     async def get_model(self) -> ray.ObjectRef:
         return self.model
 
-    async def get_onnx_model(self) -> ray.ObjectRef:
-        return self.onnx_model
+    async def get_onnx_model(self) -> tuple[ray.ObjectRef, str]:
+        return self.onnx_model, self.use_onnx
 
     async def get_forward_outputs(self) -> ray.ObjectRef:
         return self.forward_outputs
@@ -434,7 +445,7 @@ class RemoteModel:
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
         memory_per_worker: int = 1024,
-        use_onnx: bool = None,
+        use_onnx: ["train", "deploy"] = None,
     ):
         """
         Args:
@@ -446,7 +457,7 @@ class RemoteModel:
             num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
             cpus_per_worker: 每个worker的CPU核心数
             memory_per_worker: 每个worker的内存大小，单位MB
-            use_onnx: 如果为True，则model会被导出onnx格式，使用onnxruntime推理
+            use_onnx: 默认不适用onnx优化，可选值为["train", "deploy"]，分别表示训练和部署模式
         """
         self.name = name
         scheduling_local = NodeAffinitySchedulingStrategy(
@@ -471,6 +482,7 @@ class RemoteModel:
         self.worker_index = random.randint(0, len(self.workers))
         self.local = local_mode
         self.local_worker = None
+        self.cached_cloned_models = {}
         self.already_subscribe = False
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
@@ -559,16 +571,21 @@ class RemoteModel:
         set_torch_model_weights(torch_model, weights)
         return torch_model
 
-    def clone(self, step: int = -1) -> "RemoteModel":
+    def clone(self, step: int = -1, local_mode: bool = False) -> "RemoteModel":
         """
         克隆一个新的RemoteModel，用于SelfPlay和League的多智能体对抗
         Args:
             step: 克隆的模型的版本号，-1表示克隆最新版本
+            local_mode: 是否使用本地模式，本地模式下会使用本地的ModelWorker
         Returns:
             克隆的RemoteModel
         """
-        remote_model = RemoteModel(ray.get(self.model.clone.remote(step)))
-        remote_model.local = False
+        if remote_model := self.cached_cloned_models.get(step, None):
+            return remote_model
+        remote_model = RemoteModel(
+            ray.get(self.model.clone.remote(step)), local_mode=local_mode
+        )
+        self.cached_cloned_models[step] = remote_model
         return remote_model
 
     def publish_weights(self, weights: NestedArray):

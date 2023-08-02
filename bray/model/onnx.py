@@ -14,6 +14,7 @@ def export_onnx(
     path: str,
     forward_args: tuple[np.ndarray] = (),
     forward_kwargs: dict[str, np.ndarray] = {},
+    export_params: bool = False,
     check_consistency: bool = True,
     relative_diff: float = 1e-5,
 ) -> NestedArray:
@@ -31,9 +32,10 @@ def export_onnx(
         model,
         tensor_args + (tensor_kwargs,),
         path,
-        verbose=False,
-        opset_version=10,
-        do_constant_folding=True,
+        # verbose=True,
+        # opset_version=10,
+        export_params=export_params,
+        # do_constant_folding=True,
     )
 
     ort_session = ort.InferenceSession(path)
@@ -42,7 +44,9 @@ def export_onnx(
     flatten_input = flatten_nested_array(
         forward_args + (forward_kwargs,), sort_keys=True
     )
-    assert len(input_names) == len(flatten_input)
+    if not export_params:
+        flatten_input.extend([i.detach().numpy() for i in model.parameters()])
+    assert len(input_names) == len(flatten_input), "Onnx model input length error."
 
     ort_inputs = dict(zip(input_names, flatten_input))
     ort_outputs = ort_session.run(None, ort_inputs)

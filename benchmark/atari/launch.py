@@ -12,6 +12,7 @@ remote_model = bray.RemoteModel(
     model=AtariModel(),
     forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
     local_mode=True,
+    use_onnx="train",
 )
 
 remote_buffer = bray.RemoteBuffer("atari_buffer")
