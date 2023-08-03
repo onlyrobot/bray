@@ -27,9 +27,25 @@ class RemoteMetrics:
         self.diff_metrics = {}
         self.descs = {}
         trial_path = ray.get_runtime_context().namespace
-        self.writer = tensorboard.summary.Writer(f"{trial_path}/tensorboard")
-        self.step = 0
+        tensorboard_path = f"{trial_path}/tensorboard"
+        self.writer = tensorboard.summary.Writer(tensorboard_path)
+        try:
+            self.step = self._get_step(tensorboard_path)
+        except Exception as e:
+            print(e)
+            self.step = 0
         asyncio.create_task(self.dump_to_tensorboard())
+
+    def _get_step(self, tensorboard_path):
+        import os
+
+        event_files = os.listdir(tensorboard_path)
+        if not event_files:
+            return 0
+        event_files.sort()
+        last_event_file = event_files[0]
+        beg_time = int(last_event_file.split(".")[3])
+        return int(time.time() - beg_time) // self.time_window
 
     def _diff(self, current: Metric, last: Metric) -> Metric:
         return Metric(current.cnt - last.cnt, current.sum - last.sum)
@@ -166,9 +182,6 @@ class MetricsWorker:
     def query(self, name, time_window, **kwargs) -> Metric:
         name = build_name(name, **kwargs)
         return ray.get(self.remote_metrics.query.remote(name, time_window))
-
-    def __del__(self):
-        self.merge_to_remote()
 
 
 metrics_worker = None

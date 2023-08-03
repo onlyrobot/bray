@@ -32,7 +32,7 @@ def export_onnx(
         model,
         tensor_args + (tensor_kwargs,),
         path,
-        verbose=True,
+        # verbose=True,
         training=torch.onnx.TrainingMode.EVAL
         if export_params
         else torch.onnx.TrainingMode.TRAINING,
