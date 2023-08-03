@@ -571,7 +571,7 @@ class RemoteModel:
         set_torch_model_weights(torch_model, weights)
         return torch_model
 
-    def clone(self, step: int = -1, local_mode: bool = False) -> "RemoteModel":
+    def clone(self, step: int = -1, local_mode: bool = None) -> "RemoteModel":
         """
         克隆一个新的RemoteModel，用于SelfPlay和League的多智能体对抗
         Args:
@@ -583,7 +583,8 @@ class RemoteModel:
         if remote_model := self.cached_cloned_models.get(step, None):
             return remote_model
         remote_model = RemoteModel(
-            ray.get(self.model.clone.remote(step)), local_mode=local_mode
+            ray.get(self.model.clone.remote(step)),
+            local_mode=local_mode if local_mode is not None else self.local,
         )
         self.cached_cloned_models[step] = remote_model
         return remote_model

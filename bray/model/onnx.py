@@ -32,10 +32,14 @@ def export_onnx(
         model,
         tensor_args + (tensor_kwargs,),
         path,
-        # verbose=True,
+        verbose=True,
+        training=torch.onnx.TrainingMode.EVAL
+        if export_params
+        else torch.onnx.TrainingMode.TRAINING,
         # opset_version=10,
         export_params=export_params,
         # do_constant_folding=True,
+        # keep_initializers_as_inputs=True,
     )
 
     ort_session = ort.InferenceSession(path)
