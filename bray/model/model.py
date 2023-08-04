@@ -3,6 +3,7 @@ import time
 import random
 import os
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -219,6 +220,9 @@ class Model:
         ):
             asyncio.create_task(self._create_worker(self.name))
 
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
+        )
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
 
@@ -438,7 +442,7 @@ class Model:
                 ckpt_dir,
                 f"step-{meta.step}.pt",
             )
-            await asyncio.get_running_loop().run_in_executor(
+            asyncio.get_running_loop().run_in_executor(
                 None, torch.save, await meta.weights, ckpt_path
             )
             meta.ckpt_step = meta.step
@@ -564,8 +568,6 @@ class RemoteModel:
         loop = asyncio.get_running_loop()
 
         if not RemoteModel.set_executor:
-            from concurrent.futures import ThreadPoolExecutor
-
             loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
             RemoteModel.set_executor = True
 
@@ -583,7 +585,11 @@ class RemoteModel:
                 return await self._remote_forward(*args, **kwargs)
             except:
                 pass
-            await local_worker
+            try:
+                await local_worker
+            except:
+                self.local_worker = None
+                raise
             assert isinstance(self.local_worker, ModelWorker)
 
         def forward():
