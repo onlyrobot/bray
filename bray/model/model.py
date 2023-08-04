@@ -131,9 +131,10 @@ class ModelWorker:
 
 
 class ModelMeta:
-    def __init__(self, num_workers: int = None):
+    def __init__(self, num_workers: int = None, use_onnx: str = None):
         self.num_workers, self.workers = num_workers, []
         self.weights, self.step, self.ckpt_step = None, 0, 0
+        self.use_onnx = use_onnx
         self.step_cond = asyncio.Condition()
         self.worker_cond = asyncio.Condition()
 
@@ -188,7 +189,7 @@ class Model:
             print(f"Load checkpoint failed: {e}")
 
         self.num_workers = num_workers
-        meta = ModelMeta(num_workers)
+        meta = ModelMeta(num_workers, use_onnx)
         meta.weights, meta.step, meta.ckpt_step = ray.put(weights), step, step
         if meta.step > 0:
             print(f"Model {self.name} load checkpoint at step {step}")
@@ -227,7 +228,7 @@ class Model:
         onnx_path = (
             f"{self.name}/{self.name}.onnx"
             if use_onnx == "train"
-            else f"{name}/{self.name}-deploy.onnx"
+            else f"{name}/{self.name}-infer.onnx"
         )
         onnx_path = os.path.join(self.trial_path, onnx_path)
         outputs_path = os.path.join(
@@ -297,7 +298,10 @@ class Model:
             ckpt_dir = os.path.join(self.trial_path, f"{cloned_name}/checkpoint")
             if not os.path.exists(ckpt_dir):
                 os.makedirs(ckpt_dir, exist_ok=True)
-            weights_path = os.path.join(self.trial_path, f"{cloned_name}/weights.pt")
+            weights_path = os.path.join(
+                self.trial_path,
+                f"{cloned_name}/weights.pt",
+            )
             if os.path.exists(weights_path):
                 return
             os.makedirs(os.path.dirname(weights_path), exist_ok=True)
@@ -306,12 +310,16 @@ class Model:
             self._get_onnx_model(cloned_name, use_onnx)
             print(f"Clone model {name} to {cloned_name} at step {ckpt_step}")
 
-        await asyncio.get_running_loop().run_in_executor(None, initialize_cloned_model)
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            initialize_cloned_model,
+        )
 
-        meta = self.models[cloned_name] = ModelMeta(num_workers)
-        worker = ray.remote(ModelWorker).remote(self.name)
-        worker.__node_id = ""
-        meta.workers.append(worker)
+        self.models[cloned_name] = ModelMeta(num_workers, use_onnx)
+        # if num_workers is None:
+        #     worker = ray.remote(ModelWorker).remote(self.name)
+        #     worker.__node_id = ""
+        #     meta.workers.append(worker)
         for _ in range(
             num_workers
             if num_workers is not None
@@ -452,8 +460,9 @@ class Model:
         return self.model
 
     async def get_onnx_model(self, name) -> tuple[ray.ObjectRef, str]:
-        onnx_model, forward_outputs = self._get_onnx_model(name, self.use_onnx)
-        return onnx_model, forward_outputs, self.use_onnx
+        meta: ModelMeta = self.models[name]
+        onnx_model, forward_outputs = self._get_onnx_model(name, meta.use_onnx)
+        return onnx_model, forward_outputs, meta.use_onnx
 
     async def get_cpus_per_worker(self) -> float:
         return self.cpus_per_worker
@@ -484,21 +493,9 @@ class RemoteModel:
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
         memory_per_worker: int = 1024,
-        use_onnx: ["train", "deploy"] = None,
+        use_onnx: ["train", "infer"] = None,
         local_mode: bool = False,
     ):
-        """
-        Args:
-            name: 模型的名字，用于在Ray集群中标识模型
-            model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
-            forward_args: 模型forward的位置参数输入，用于初始化模型
-            forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
-            num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
-            cpus_per_worker: 每个worker的CPU核心数
-            memory_per_worker: 每个worker的内存大小，单位MB
-            use_onnx: 默认不适用onnx优化，可选值为["train", "deploy"]，分别表示训练和部署模式
-            local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
-        """
         if name in cls.remote_models and (
             (self := cls.remote_models[name]()) is not None
         ):
@@ -535,6 +532,18 @@ class RemoteModel:
         return self
 
     def __init__(self, name: str, *args, **kwargs):
+        """
+        Args:
+            name: 模型的名字，用于在Ray集群中标识模型
+            model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
+            forward_args: 模型forward的位置参数输入，用于初始化模型
+            forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
+            num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
+            cpus_per_worker: 每个worker的CPU核心数
+            memory_per_worker: 每个worker的内存大小，单位MB
+            use_onnx: 默认不适用onnx优化，可选值为["train", "infer"]，分别表示训练和部署模式
+            local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
+        """
         assert (
             name in RemoteModel.remote_models
         ), f"RemoteModel {name} is not initialized"
@@ -564,13 +573,18 @@ class RemoteModel:
             self.local_worker = await loop.run_in_executor(
                 None, ModelWorker, self.name, loop
             )
-            self.local = True
 
         if self.local_worker is None:
-            self.local = False
-            outputs = await self._remote_forward(*args, **kwargs)
-            loop.create_task(build_local_worker())
-            return outputs
+            self.local_worker = loop.create_task(build_local_worker())
+
+        local_worker = self.local_worker
+        if isinstance(local_worker, asyncio.Task):
+            try:
+                return await self._remote_forward(*args, **kwargs)
+            except:
+                pass
+            await local_worker
+            assert isinstance(self.local_worker, ModelWorker)
 
         def forward():
             return self.local_worker.forward(*args, **kwargs)
