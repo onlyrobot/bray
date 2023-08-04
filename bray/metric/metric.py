@@ -2,6 +2,7 @@ import asyncio
 import ray
 import tensorboard
 import time
+from datetime import datetime
 import copy
 
 
@@ -24,28 +25,13 @@ class RemoteMetrics:
     def __init__(self, time_window=60):
         self.time_window = time_window
         self.metrics, self.last_metrics = {}, {}
-        self.diff_metrics = {}
         self.descs = {}
+        self.diff_metrics = {}
         trial_path = ray.get_runtime_context().namespace
-        tensorboard_path = f"{trial_path}/tensorboard"
-        self.writer = tensorboard.summary.Writer(tensorboard_path)
-        try:
-            self.step = self._get_step(tensorboard_path)
-        except Exception as e:
-            print(e)
-            self.step = 0
+        launch_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self.writer = tensorboard.summary.Writer(f"{trial_path}/{launch_time}")
+        self.step = 0
         asyncio.create_task(self.dump_to_tensorboard())
-
-    def _get_step(self, tensorboard_path):
-        import os
-
-        event_files = os.listdir(tensorboard_path)
-        if not event_files:
-            return 0
-        event_files.sort()
-        last_event_file = event_files[0]
-        beg_time = int(last_event_file.split(".")[3])
-        return int(time.time() - beg_time) // self.time_window
 
     def _diff(self, current: Metric, last: Metric) -> Metric:
         return Metric(current.cnt - last.cnt, current.sum - last.sum)

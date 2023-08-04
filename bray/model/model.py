@@ -2,6 +2,7 @@ import asyncio
 import time
 import random
 import os
+import weakref
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -43,7 +44,7 @@ class ModelWorker:
             self._init_torch()
 
         loop = loop if loop else asyncio.get_running_loop()
-        loop.create_task(self._subscribe_weights())
+        self.subscribe_task = loop.create_task(self._subscribe_weights())
 
     def _init_onnx(self, onnx_model: bytes, forward_outputs: NestedArray):
         import onnxruntime as ort
@@ -118,9 +119,11 @@ class ModelWorker:
         self.current_step = step
         if not self.use_onnx:
             set_torch_model_weights(self.torch_model, await weights)
-        else:
-            assert self.use_onnx == "train", "Set onnx weights only in train mode."
+        elif self.use_onnx == "train":
             self.weights = await weights
+        else:
+            asyncio.create_task(self._subscribe_weights())
+            raise Exception("Set onnx weights only in train mode.")
         asyncio.create_task(self._subscribe_weights())
 
     def get_node_id(self):
@@ -175,6 +178,7 @@ class Model:
         if not os.path.exists(weights_path):
             os.makedirs(os.path.dirname(weights_path), exist_ok=True)
             torch.save(weights, weights_path)
+
         ckpt_dir = os.path.join(self.trial_path, f"{self.name}/checkpoint")
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
@@ -182,6 +186,7 @@ class Model:
             weights, step = self._load_checkpoint(self.name, step=-1)
         except Exception as e:
             print(f"Load checkpoint failed: {e}")
+
         self.num_workers = num_workers
         meta = ModelMeta(num_workers)
         meta.weights, meta.step, meta.ckpt_step = ray.put(weights), step, step
@@ -236,7 +241,7 @@ class Model:
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
 
             torch_model = ray.get(self.model)
-            weights = self._load_checkpoint(name)[0]
+            weights = self._load_checkpoint(name, step=0)[0]
             set_torch_model_weights(torch_model, weights)
             forward_outputs = export_onnx(
                 torch_model,
@@ -281,25 +286,27 @@ class Model:
 
     async def clone(self, name, step, num_workers, use_onnx) -> str:
         step = self.models[name].step if step == -1 else step
-        cloned_name = f"{name}/clone-step-{step}"
-        if cloned_name in self.models:
+
+        if (cloned_name := f"{name}/clone-step-{step}") in self.models:
             return cloned_name
+
         use_onnx = use_onnx if use_onnx != "" else self.use_onnx
         num_workers = num_workers if num_workers != -1 else self.num_workers
 
-        def clone_weights():
+        def initialize_cloned_model():
+            ckpt_dir = os.path.join(self.trial_path, f"{cloned_name}/checkpoint")
+            if not os.path.exists(ckpt_dir):
+                os.makedirs(ckpt_dir, exist_ok=True)
             weights_path = os.path.join(self.trial_path, f"{cloned_name}/weights.pt")
             if os.path.exists(weights_path):
                 return
             os.makedirs(os.path.dirname(weights_path), exist_ok=True)
             weights, ckpt_step = self._load_checkpoint(name, step)
             torch.save(weights, weights_path)
-            _, _ = self._get_onnx_model(
-                cloned_name, use_onnx if use_onnx else self.use_onnx
-            )
-            print(f"clone model {name} to {cloned_name} at step {ckpt_step}")
+            self._get_onnx_model(cloned_name, use_onnx)
+            print(f"Clone model {name} to {cloned_name} at step {ckpt_step}")
 
-        await asyncio.get_running_loop().run_in_executor(None, clone_weights)
+        await asyncio.get_running_loop().run_in_executor(None, initialize_cloned_model)
 
         meta = self.models[cloned_name] = ModelMeta(num_workers)
         worker = ray.remote(ModelWorker).remote(self.name)
@@ -370,12 +377,12 @@ class Model:
         except ray.exceptions.RayActorError:
             return False
         except Exception as e:
-            print(f"worker is not health: ", e)
+            print(f"Worker is not health: ", e)
             return False
 
     async def _health_check(self):
         await asyncio.sleep(60)  # wait for workers to start
-        for name, meta in self.models.items():
+        for name, meta in list(self.models.items()):
             worker_num = len(meta.workers)
             active_workers = [
                 worker
@@ -414,8 +421,8 @@ class Model:
         return torch.load(ckpt_path), ckpt_step
 
     async def _save_checkpoint(self):
-        await asyncio.sleep(10 * 60)
-        for name, meta in self.models.items():
+        await asyncio.sleep(10 * 60)  # save checkpoint every 10 minutes
+        for name, meta in list(self.models.items()):
             if meta.ckpt_step >= meta.step:
                 return
             ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
@@ -464,9 +471,13 @@ class RemoteModel:
     RemoteModel封装了一个PyTorch模型，它会在Ray集群中创建多个ModelWorker实现并行计算
     """
 
-    def __init__(
-        self,
-        name: str,
+    remote_models: dict[str : weakref.ReferenceType["RemoteModel"]] = {}
+
+    set_executor: bool = False
+
+    def __new__(
+        cls,
+        name: str = None,
         model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
@@ -488,6 +499,13 @@ class RemoteModel:
             use_onnx: 默认不适用onnx优化，可选值为["train", "deploy"]，分别表示训练和部署模式
             local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
         """
+        if name in cls.remote_models and (
+            (self := cls.remote_models[name]()) is not None
+        ):
+            return self
+        self = super().__new__(cls)
+        if name is None:  # 适配对象反序列化时调用__new__方法
+            return self
         self.name = name
         root_name = name.split("/")[0]
         scheduling_local = NodeAffinitySchedulingStrategy(
@@ -513,15 +531,36 @@ class RemoteModel:
         self.local = local_mode
         self.local_worker = None
         self.subscribe_task = None
+        cls.remote_models[name] = weakref.ref(self)
+        return self
+
+    def __init__(self, name: str, *args, **kwargs):
+        assert (
+            name in RemoteModel.remote_models
+        ), f"RemoteModel {name} is not initialized"
+
+    def __del__(self):
+        self.subscribe_task.cancel() if self.subscribe_task else None
+        if self.local_worker:
+            self.local_worker.subscribe_task.cancel()
+
+    async def subscribe_workers(cls, model, name, workers):
+        # 定义为类方法，避免引用self阻止RemoteModel被回收
+        while True:
+            workers[:] = await model.subscribe_workers.remote(
+                name, ray.get_runtime_context().get_node_id()
+            )
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
         loop = asyncio.get_running_loop()
 
-        async def build_local_worker():
+        if not RemoteModel.set_executor:
             from concurrent.futures import ThreadPoolExecutor
 
             loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+            RemoteModel.set_executor = True
 
+        async def build_local_worker():
             self.local_worker = await loop.run_in_executor(
                 None, ModelWorker, self.name, loop
             )
@@ -543,8 +582,6 @@ class RemoteModel:
         return outputs
 
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
-        if self.subscribe_task is None:
-            self.subscribe_task = asyncio.create_task(self._subscribe_workers())
         if len(self.workers) == 0:
             await self.sync()
         if len(self.workers) == 0:
@@ -558,7 +595,7 @@ class RemoteModel:
         try:
             outputs = await worker.forward.remote(*args, **kwargs)
         except ray.exceptions.RayActorError:
-            print("ray actor exception from model forward")
+            print("Ray actor exception from model forward")
             await self.sync()
             return await self._remote_forward(*args, **kwargs)
         merge_time_ms("forward", beg, model=self.name, mode="remote")
@@ -577,6 +614,12 @@ class RemoteModel:
         """
         if self.local:
             return await self._local_forward(*args, **kwargs)
+        if not self.subscribe_task:
+            self.subscribe_task = asyncio.create_task(
+                RemoteModel.subscribe_workers(
+                    RemoteModel, self.model, self.name, self.workers
+                )
+            )
         return await self._remote_forward(*args, **kwargs)
 
     @property
@@ -633,12 +676,6 @@ class RemoteModel:
         )
 
     async def sync(self):
-        self.workers = await self.model.get_workers.remote(
+        self.workers[:] = await self.model.get_workers.remote(
             self.name, ray.get_runtime_context().get_node_id()
         )
-
-    async def _subscribe_workers(self):
-        self.workers = await self.model.subscribe_workers.remote(
-            self.name, ray.get_runtime_context().get_node_id()
-        )
-        self.subscribe_task = asyncio.create_task(self._subscribe_workers())
