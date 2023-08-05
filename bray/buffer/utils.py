@@ -27,13 +27,13 @@ class BatchBuffer:
 
 
 class TorchTensorBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], to_gpu: bool):
-        self.buffer, self.to_gpu = buffer, to_gpu
+    def __init__(self, buffer: Iterator[NestedArray], device: None):
+        self.buffer, self.device = buffer, device
 
     def handle(self, array):
         tensor = torch.from_numpy(array)
-        if self.to_gpu:
-            tensor = tensor.cuda()
+        if self.device:
+            tensor = tensor.to(self.device)
         return tensor
 
     def __next__(self) -> NestedArray:

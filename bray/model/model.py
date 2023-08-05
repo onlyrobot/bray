@@ -40,7 +40,7 @@ class ModelWorker:
             self.model.get_onnx_model.remote(name)
         )
         if self.use_onnx:
-            self._init_onnx(ray.get(onnx_model), ray.get(forward_outputs))
+            self._init_onnx(onnx_model, forward_outputs)
         else:
             self._init_torch()
 
@@ -136,6 +136,7 @@ class ModelMeta:
         self.num_workers, self.workers = num_workers, []
         self.weights, self.step, self.ckpt_step = None, 0, 0
         self.use_onnx = use_onnx
+        self.pending_create_workers = 0
         self.step_cond = asyncio.Condition()
         self.worker_cond = asyncio.Condition()
 
@@ -228,7 +229,7 @@ class Model:
 
     def _get_onnx_model(self, name, use_onnx):
         if not use_onnx:
-            return ray.put(None), ray.put(None)
+            return None, None
         onnx_path = (
             f"{self.name}/{self.name}.onnx"
             if use_onnx == "train"
@@ -257,15 +258,20 @@ class Model:
             )
             torch.save(forward_outputs, outputs_path)
         with open(onnx_path, "rb") as f:
-            onnx_model = ray.put(f.read())
-        forward_outputs = ray.put(torch.load(outputs_path))
+            onnx_model = f.read()
+        forward_outputs = torch.load(outputs_path)
         return onnx_model, forward_outputs
 
     async def _create_worker(self, name):
-        worker = self.RemoteModelWorker.remote(name)
-        if not await self._is_health(worker):
-            return
         meta: ModelMeta = self.models[name]
+        if meta.pending_create_workers > (meta.num_workers or 10):
+            return
+        worker = self.RemoteModelWorker.remote(name)
+        meta.pending_create_workers += 1
+        if not await self._is_health(worker):
+            meta.pending_create_workers -= 1
+            return
+        meta.pending_create_workers -= 1
         if meta.num_workers is not None and len(meta.workers) >= meta.num_workers:
             return
         worker.__node_id = await worker.get_node_id.remote()
@@ -410,9 +416,9 @@ class Model:
                 desc={"time_window_avg": "smoothed model worker num"},
                 model=name,
             )
-            if not meta.num_workers:
+            if meta.num_workers is None:
                 self._load_balance(name)
-            elif len(meta.workers) < self.num_workers:
+            elif len(meta.workers) < meta.num_workers:
                 asyncio.create_task(self._create_worker(name))
         asyncio.create_task(self._health_check())
 
@@ -436,7 +442,7 @@ class Model:
         await asyncio.sleep(10 * 60)  # save checkpoint every 10 minutes
         for name, meta in list(self.models.items()):
             if meta.ckpt_step >= meta.step:
-                return
+                continue
             ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
             ckpt_path = os.path.join(
                 ckpt_dir,
@@ -463,9 +469,11 @@ class Model:
     async def get_model(self) -> ray.ObjectRef:
         return self.model
 
-    async def get_onnx_model(self, name) -> tuple[ray.ObjectRef, str]:
+    async def get_onnx_model(self, name) -> tuple[bytes, NestedArray, bool]:
         meta: ModelMeta = self.models[name]
-        onnx_model, forward_outputs = self._get_onnx_model(name, meta.use_onnx)
+        onnx_model, forward_outputs = await asyncio.get_running_loop().run_in_executor(
+            None, self._get_onnx_model, name, meta.use_onnx
+        )
         return onnx_model, forward_outputs, meta.use_onnx
 
     async def get_cpus_per_worker(self) -> float:
