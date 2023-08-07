@@ -122,11 +122,11 @@ class RemoteBuffer:
 
     async def _push(self, *replays: NestedArray) -> None:
         if not self.subscribe_task:
-            await self.sync()
             buffer, workers = self.buffer, self.workers
             self.subscribe_task = asyncio.create_task(
                 RemoteBuffer.subscribe_workers(RemoteBuffer, buffer, workers)
             )
+            await self.sync()
         if len(self.workers) == 0:
             await self.sync()
         if len(self.workers) == 0:

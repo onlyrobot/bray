@@ -290,7 +290,7 @@ class Model:
 
     async def set_weights(self, name, weights: list[ray.ObjectRef]):
         meta: ModelMeta = self.models[name]
-        meta.weights = weights
+        meta.weights = weights[0]
         meta.step += 1
         merge(
             "step",
