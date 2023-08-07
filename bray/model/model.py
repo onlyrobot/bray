@@ -2,7 +2,6 @@ import asyncio
 import time
 import random
 import os
-import weakref
 from concurrent.futures import ThreadPoolExecutor
 
 import ray
@@ -105,7 +104,7 @@ class ModelWorker:
         merge_time_ms("forward", beg, model=self.name)
         return outputs
 
-    async def _subscribe_weights(self):
+    async def __subscribe_weights(self):
         try:
             weights, step = await self.model.subscribe_weights.remote(
                 self.name,
@@ -113,8 +112,6 @@ class ModelWorker:
             )
         except Exception as e:
             print(f"Fail to subscribe weights from {self.name}, worker exit.", e)
-            asyncio.create_task(self._subscribe_weights())
-            raise
         assert step > self.current_step
         self.current_step = step
         if not self.use_onnx:
@@ -122,9 +119,11 @@ class ModelWorker:
         elif self.use_onnx == "train":
             self.weights = [v.numpy() for v in (await weights).values()]
         else:
-            asyncio.create_task(self._subscribe_weights())
-            raise Exception("Set onnx weights only in train mode.")
-        asyncio.create_task(self._subscribe_weights())
+            print("Set onnx weights only in train mode.")
+
+    async def _subscribe_weights(self):
+        while True:
+            await self.__subscribe_weights()
 
     def get_node_id(self):
         return ray.get_runtime_context().get_node_id()
@@ -501,7 +500,8 @@ class RemoteModel:
     RemoteModel封装了一个PyTorch模型，它会在Ray集群中创建多个ModelWorker实现并行计算
     """
 
-    remote_models: dict[str : weakref.ReferenceType["RemoteModel"]] = {}
+    remote_models: dict[str:"RemoteModel"] = {}
+    max_cached_model: int = 10
 
     set_executor: bool = False
 
@@ -518,7 +518,7 @@ class RemoteModel:
         local_mode: bool = False,
     ):
         if name in cls.remote_models and (
-            (self := cls.remote_models[name]()) is not None
+            (self := cls.remote_models[name]) is not None
         ):
             return self
         self = super().__new__(cls)
@@ -549,7 +549,10 @@ class RemoteModel:
             self.model.get_workers.remote(name, ray.get_runtime_context().get_node_id())
         )
         self.worker_index = random.randint(0, len(self.workers))
-        cls.remote_models[name] = weakref.ref(self)
+        cls.remote_models[name] = self
+        names = list(cls.remote_models.keys())
+        if len(names) > cls.max_cached_model:
+            cls.remote_models.pop(names[0])  # pop the oldest one
         return self
 
     def __init__(self, name: str, *args, **kwargs):
