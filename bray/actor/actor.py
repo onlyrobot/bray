@@ -138,8 +138,8 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         game_id_size = len(headers["game_id"])
         body_size = len(data)
         time = headers["time"]
-        header = struct.pack("!3q", game_id_size, body_size, time)
         try:
+            header = struct.pack("!3q", game_id_size, body_size, time)
             writer.write(header + headers["game_id"] + data)
             await writer.drain()
         except Exception as e:

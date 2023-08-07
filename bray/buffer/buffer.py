@@ -91,7 +91,7 @@ class Buffer:
 
 
 class RemoteBuffer:
-    def __init__(self, name: str, size: int = 256, no_drop: bool = False):
+    def __init__(self, name: str, size: int = 1024, no_drop: bool = False):
         self.name, self.size = name, size
         self.no_drop = no_drop
         self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
@@ -122,6 +122,7 @@ class RemoteBuffer:
 
     async def _push(self, *replays: NestedArray) -> None:
         if not self.subscribe_task:
+            await self.sync()
             buffer, workers = self.buffer, self.workers
             self.subscribe_task = asyncio.create_task(
                 RemoteBuffer.subscribe_workers(RemoteBuffer, buffer, workers)

@@ -16,18 +16,16 @@ from bray.utils.nested_array import (
     flatten_nested_array,
     unflatten_nested_array,
 )
-from bray.metric.metric import merge, query, merge_time_ms, flush_metrics_to_remote
+from bray.metric.metric import merge, query, merge_time_ms
 from bray.actor.actor import get_tick_id
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
-    return [p.cpu().detach().numpy() for p in model.parameters()]
+    return {k: v.cpu().detach() for k, v in model.state_dict().items()}
 
 
 def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
-    with torch.no_grad():
-        for p, w in zip(model.parameters(), weights):
-            p.copy_(torch.from_numpy(w))
+    model.load_state_dict(weights)
 
 
 class ModelWorker:
@@ -57,9 +55,11 @@ class ModelWorker:
         options.inter_op_num_threads = num_cpus
         ort_session = ort.InferenceSession(onnx_model, options)
         self.ort_session = ort_session
-        if self.use_onnx == "train":
-            self.weights = ray.get(ray.get(self.model.get_weights.remote(self.name)))
         self.forward_outputs = forward_outputs
+        if self.use_onnx != "train":
+            return
+        weights = ray.get(ray.get(self.model.get_weights.remote(self.name)))
+        self.weights = [v.numpy() for v in weights.values()]
 
     def _init_torch(self):
         num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
@@ -112,7 +112,6 @@ class ModelWorker:
                 self.current_step,
             )
         except Exception as e:
-            flush_metrics_to_remote()
             print(f"Fail to subscribe weights from {self.name}, worker exit.", e)
             asyncio.create_task(self._subscribe_weights())
             raise
@@ -121,7 +120,7 @@ class ModelWorker:
         if not self.use_onnx:
             set_torch_model_weights(self.torch_model, await weights)
         elif self.use_onnx == "train":
-            self.weights = await weights
+            self.weights = [v.numpy() for v in (await weights).values()]
         else:
             asyncio.create_task(self._subscribe_weights())
             raise Exception("Set onnx weights only in train mode.")
@@ -227,6 +226,13 @@ class Model:
         asyncio.create_task(self._save_checkpoint())
 
     def _get_onnx_model(self, name, use_onnx):
+        from inspect import ismethod
+        from functools import lru_cache
+
+        if ismethod(self._get_onnx_model):
+            self._get_onnx_model = lru_cache()(self._get_onnx_model)
+            return self._get_onnx_model(name, use_onnx)
+
         if not use_onnx:
             return None, None
         onnx_path = (
@@ -284,7 +290,7 @@ class Model:
 
     async def set_weights(self, name, weights: list[ray.ObjectRef]):
         meta: ModelMeta = self.models[name]
-        meta.weights = weights[0]
+        meta.weights = weights
         meta.step += 1
         merge(
             "step",
@@ -524,6 +530,9 @@ class RemoteModel:
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
+        self.subscribe_task = None
+        self.local = local_mode
+        self.local_worker = None
         self.model = Model.options(
             name=root_name, get_if_exists=True, scheduling_strategy=scheduling_local
         ).remote(
@@ -540,9 +549,6 @@ class RemoteModel:
             self.model.get_workers.remote(name, ray.get_runtime_context().get_node_id())
         )
         self.worker_index = random.randint(0, len(self.workers))
-        self.local = local_mode
-        self.local_worker = None
-        self.subscribe_task = None
         cls.remote_models[name] = weakref.ref(self)
         return self
 
