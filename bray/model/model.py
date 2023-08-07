@@ -156,33 +156,32 @@ class Model:
     ):
         self.trial_path = ray.get_runtime_context().namespace
         root_path = os.path.join(self.trial_path, f"{name}")
+        if not os.path.exists(root_path):
+            os.makedirs(root_path, exist_ok=True)
 
         torch_path = os.path.join(root_path, f"{name}.pt")
         if not os.path.exists(torch_path):
             assert torch_model is not None, "Missing torch model"
-            os.makedirs(os.path.dirname(torch_path), exist_ok=True)
             torch.save(torch_model, torch_path)
         else:
             print("Loading model from", torch_path)
             torch_model = torch.load(torch_path)
         self.name, self.model = name, ray.put(torch_model)
 
-        args_path = os.path.join(root_path, f"forward_inputs.pt")
+        args_path = os.path.join(root_path, "forward_inputs.pt")
         if not os.path.exists(args_path):
             assert forward_args or forward_kwargs, "Missing forward inputs"
-            os.makedirs(os.path.dirname(args_path), exist_ok=True)
             torch.save((forward_args, forward_kwargs), args_path)
         else:
             forward_args, forward_kwargs = torch.load(args_path)
         self.forward_args, self.forward_kwargs = forward_args, forward_kwargs
 
         weights, step = get_torch_model_weights(torch_model), 0
-        weights_path = os.path.join(self.trial_path, f"{self.name}/weights.pt")
+        weights_path = os.path.join(root_path, "weights.pt")
         if not os.path.exists(weights_path):
-            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
             torch.save(weights, weights_path)
 
-        ckpt_dir = os.path.join(self.trial_path, f"{self.name}/checkpoint")
+        ckpt_dir = os.path.join(root_path, "checkpoint")
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
         try:
@@ -240,26 +239,30 @@ class Model:
             self.trial_path,
             f"{self.name}/forward_outputs.pt",
         )
-        if not os.path.exists(onnx_path) or not os.path.exists(outputs_path):
-            from bray.model.onnx import export_onnx
+        if os.path.exists(onnx_path) and os.path.exists(outputs_path):
+            with open(onnx_path, "rb") as f:
+                onnx_model = f.read()
+            forward_outputs = torch.load(outputs_path)
+            return onnx_model, forward_outputs
 
-            print("Exporting onnx model to", onnx_path)
-            os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+        from bray.model.onnx import export_onnx
 
-            torch_model = ray.get(self.model)
-            weights = self._load_checkpoint(name, step=0)[0]
-            set_torch_model_weights(torch_model, weights)
-            forward_outputs = export_onnx(
-                torch_model,
-                onnx_path,
-                self.forward_args,
-                self.forward_kwargs,
-                export_params=False if use_onnx == "train" else True,
-            )
-            torch.save(forward_outputs, outputs_path)
+        print("Exporting onnx model to", onnx_path)
+        os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+
+        torch_model = ray.get(self.model)
+        weights = self._load_checkpoint(name, step=0)[0]
+        set_torch_model_weights(torch_model, weights)
+        forward_outputs = export_onnx(
+            torch_model,
+            onnx_path,
+            self.forward_args,
+            self.forward_kwargs,
+            export_params=False if use_onnx == "train" else True,
+        )
+        torch.save(forward_outputs, outputs_path)
         with open(onnx_path, "rb") as f:
             onnx_model = f.read()
-        forward_outputs = torch.load(outputs_path)
         return onnx_model, forward_outputs
 
     async def _create_worker(self, name):
@@ -427,7 +430,7 @@ class Model:
         ckpts = os.listdir(ckpt_dir)
         ckpts = [int(ckpt.split(".")[0].split("-")[1]) for ckpt in ckpts]
         if not ckpts:
-            weights_path = os.path.join(self.trial_path, f"{self.name}/weights.pt")
+            weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
             return torch.load(weights_path), 0
         ckpts.sort()
         if step == -1:
@@ -610,10 +613,15 @@ class RemoteModel:
         return outputs
 
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
+        if not self.subscribe_task:
+            model, name, workers = self.model, self.name, self.workers
+            self.subscribe_task = asyncio.create_task(
+                RemoteModel.subscribe_workers(RemoteModel, model, name, workers)
+            )
         if len(self.workers) == 0:
             await self.sync()
         if len(self.workers) == 0:
-            raise RuntimeError("No available workers")
+            raise RuntimeError(f"No available workers for model {self.name}")
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         if tick_id := get_tick_id():
@@ -642,12 +650,6 @@ class RemoteModel:
         """
         if self.local:
             return await self._local_forward(*args, **kwargs)
-        if not self.subscribe_task:
-            self.subscribe_task = asyncio.create_task(
-                RemoteModel.subscribe_workers(
-                    RemoteModel, self.model, self.name, self.workers
-                )
-            )
         return await self._remote_forward(*args, **kwargs)
 
     @property
