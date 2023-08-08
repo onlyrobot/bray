@@ -221,7 +221,8 @@ class Model:
 
         weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
         if not os.path.exists(weights_path):
-            torch.save(weights, weights_path)
+            tensor_weights = handle_nested_array(weights, torch.from_numpy)
+            torch.save(tensor_weights, weights_path)
 
         ckpt_steps, step = [], 0
         try:
@@ -459,8 +460,9 @@ class Model:
         meta: ModelMeta = self.models[name]
         if step == -1 and meta.weights:
             return await meta.weights, meta.step
-        index = np.searchsorted(meta.ckpt_steps, step, side="right")
-        step = meta.ckpt_steps[max(0, index - 1)] if meta.ckpt_steps else 0
+        ckpt_steps = [0] + meta.ckpt_steps
+        index = np.searchsorted(ckpt_steps, step, side="right")
+        step = ckpt_steps[max(0, index - 1)]
         weights = await asyncio.get_running_loop().run_in_executor(
             None, self._load_checkpoint, name, step
         )
