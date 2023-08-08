@@ -322,11 +322,12 @@ class Model:
             meta.step_cond.notify_all()
 
     async def clone(self, name, step, num_workers, use_onnx) -> str:
-        weights, step = await self._get_weights(name, step)
+        step, weights = self._get_target_step(name, step)
 
         if (cloned_name := f"{name}/clone-step-{step}") in self.models:
             return cloned_name
 
+        weights = await (weights if weights else self.get_weights(name, step))
         meta: ModelMeta = self.models[name]
         use_onnx = use_onnx if use_onnx != "" else meta.use_onnx
         num_workers = num_workers if num_workers != -1 else meta.num_workers
@@ -456,20 +457,21 @@ class Model:
             meta.ckpt_steps.append(meta.ckpt_step)
         asyncio.create_task(self._save_checkpoint())
 
-    async def _get_weights(self, name, step=-1):
+    def _get_target_step(self, name, step) -> tuple[int, object]:
         meta: ModelMeta = self.models[name]
         if step == -1 and meta.weights:
-            return await meta.weights, meta.step
+            return meta.step, meta.weights
         ckpt_steps = [0] + meta.ckpt_steps
         index = np.searchsorted(ckpt_steps, step, side="right")
-        step = ckpt_steps[max(0, index - 1)]
-        weights = await asyncio.get_running_loop().run_in_executor(
-            None, self._load_checkpoint, name, step
-        )
-        return weights, step
+        return ckpt_steps[max(0, index - 1)], None
 
     async def get_weights(self, name, step=-1) -> NestedArray:
-        return (await self._get_weights(name, step))[0]
+        step, weights = self._get_target_step(name, step)
+        if weights:
+            return await weights
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._load_checkpoint, name, step
+        )
 
     async def get_step(self, name) -> int:
         return self.models[name].step
