@@ -11,8 +11,8 @@ config = {
 actor_url = "http://localhost:8000/step"
 
 
-def actor_step(game_id, step_kind, data):
-    res = requests.post(
+def actor_step(sess: requests.Session, game_id, step_kind, data):
+    res = sess.post(
         actor_url,
         headers={
             "game_id": game_id,
@@ -26,7 +26,9 @@ def actor_step(game_id, step_kind, data):
 
 
 def rollout(game_id, config):
+    sess = requests.Session()
     res = actor_step(
+        sess,
         game_id,
         "start",
         config["fake_gamecore_step_start_data"],
@@ -37,12 +39,14 @@ def rollout(game_id, config):
 
         time.sleep(0.5)
         res = actor_step(
+            sess,
             game_id,
             "tick",
             config["fake_gamecore_step_tick_data"],
         )
         print(res)
     res = actor_step(
+        sess,
         game_id,
         "end",
         config["fake_gamecore_step_end_data"],
