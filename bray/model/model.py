@@ -20,45 +20,57 @@ from bray.actor.actor import get_tick_id
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
-    return {k: v.cpu().detach() for k, v in model.state_dict().items()}
+    return {k: v.cpu().detach().numpy() for k, v in model.state_dict().items()}
 
 
 def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
-    model.load_state_dict(weights)
+    model.load_state_dict(handle_nested_array(weights, torch.from_numpy))
 
 
 class ModelWorker:
+    ort_session_and_forward_outputs: dict[str, tuple] = {}
+
     def __init__(self, name: str, loop: asyncio.AbstractEventLoop = None):
         self.name, self.model = name, ray.get_actor(name.split("/")[0])
         self.current_step = ray.get(self.model.get_step.remote(name))
 
-        self.torch_model, self.ort_session = None, None
-        onnx_model, forward_outputs, self.use_onnx = ray.get(
-            self.model.get_onnx_model.remote(name)
-        )
-        if self.use_onnx:
-            self._init_onnx(onnx_model, forward_outputs)
-        else:
-            self._init_torch()
+        self.use_onnx = ray.get(self.model.get_use_onnx.remote(name))
+        self._init_onnx() if self.use_onnx else self._init_torch()
 
         loop = loop if loop else asyncio.get_running_loop()
         self.subscribe_task = loop.create_task(self._subscribe_weights())
 
-    def _init_onnx(self, onnx_model: bytes, forward_outputs: NestedArray):
-        import onnxruntime as ort
-
+    def _build_ort_session(self, onnx_model):
         num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
         num_cpus = max(1, int(num_cpus))
+        import onnxruntime as ort
+
         options = ort.SessionOptions()
         options.intra_op_num_threads = num_cpus
         options.inter_op_num_threads = num_cpus
-        ort_session = ort.InferenceSession(onnx_model, options)
-        self.ort_session = ort_session
-        self.forward_outputs = forward_outputs
+        return ort.InferenceSession(onnx_model, options)
+
+    def _init_onnx(self):
+        self.ort_session, self.forward_outputs = None, None
+        base_name = self.name.split("/")[0]
+        if self.use_onnx == "train":
+            (
+                self.ort_session,
+                self.forward_outputs,
+            ) = ModelWorker.ort_session_and_forward_outputs.get(base_name, (None, None))
+        if not self.ort_session:
+            onnx_model, self.forward_outputs = ray.get(
+                self.model.get_onnx_model.remote(self.name)
+            )
+            self.ort_session = self._build_ort_session(onnx_model)
         if self.use_onnx != "train":
             return
-        weights = ray.get(ray.get(self.model.get_weights.remote(self.name)))
-        self.weights = [v.numpy() for v in weights.values()]
+        ModelWorker.ort_session_and_forward_outputs[base_name] = (
+            self.ort_session,
+            self.forward_outputs,
+        )
+        weights = ray.get(self.model.get_weights.remote(self.name))
+        self.weights = [v for v in weights.values()]
 
     def _init_torch(self):
         num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
@@ -68,7 +80,7 @@ class ModelWorker:
         model = ray.get(ray.get(self.model.get_model.remote()))
         model.requires_grad_(False)
         model.eval()
-        weights = ray.get(ray.get(self.model.get_weights.remote(self.name)))
+        weights = ray.get(self.model.get_weights.remote(self.name))
         set_torch_model_weights(model, weights)
         self.torch_model = model
 
@@ -107,17 +119,16 @@ class ModelWorker:
     async def __subscribe_weights(self):
         try:
             weights, step = await self.model.subscribe_weights.remote(
-                self.name,
-                self.current_step,
+                self.name, self.current_step
             )
         except Exception as e:
-            print(f"Fail to subscribe weights from {self.name}, worker exit.", e)
+            print(f"Fail to subscribe weights from {self.name}.", e)
         assert step > self.current_step
         self.current_step = step
         if not self.use_onnx:
             set_torch_model_weights(self.torch_model, await weights)
         elif self.use_onnx == "train":
-            self.weights = [v.numpy() for v in (await weights).values()]
+            self.weights = [v for v in (await weights).values()]
         else:
             print("Set onnx weights only in train mode.")
 
@@ -135,6 +146,7 @@ class ModelMeta:
         self.weights, self.step, self.ckpt_step = None, 0, 0
         self.use_onnx = use_onnx
         self.pending_create_workers = 0
+        self.ckpt_steps = []
         self.step_cond = asyncio.Condition()
         self.worker_cond = asyncio.Condition()
 
@@ -168,37 +180,21 @@ class Model:
 
         args_path = os.path.join(root_path, "forward_inputs.pt")
         if not os.path.exists(args_path):
-            assert forward_args or forward_kwargs, "Missing forward inputs"
+            assert forward_args or forward_kwargs, "Missing forward args"
             torch.save((forward_args, forward_kwargs), args_path)
         else:
             forward_args, forward_kwargs = torch.load(args_path)
-        self.forward_args, self.forward_kwargs = forward_args, forward_kwargs
+        self.forward_args = forward_args
+        self.forward_kwargs = forward_kwargs
 
-        weights, step = get_torch_model_weights(torch_model), 0
-        weights_path = os.path.join(root_path, "weights.pt")
-        if not os.path.exists(weights_path):
-            torch.save(weights, weights_path)
+        self.models: dict[str:ModelMeta] = {}
 
-        ckpt_dir = os.path.join(root_path, "checkpoint")
-        if not os.path.exists(ckpt_dir):
-            os.makedirs(ckpt_dir, exist_ok=True)
-        try:
-            weights, step = self._load_checkpoint(self.name, step=-1)
-        except Exception as e:
-            print(f"Load checkpoint failed: {e}")
-
-        self.num_workers = num_workers
-        meta = ModelMeta(num_workers, use_onnx)
-        meta.weights, meta.step, meta.ckpt_step = ray.put(weights), step, step
-        if meta.step > 0:
-            print(f"Model {self.name} load checkpoint at step {step}")
-
-        self.use_onnx = use_onnx
-        self.onnx_model, self.forward_outputs = self._get_onnx_model(
-            self.name, self.use_onnx
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
         )
-        if self.use_onnx:
-            print(f"Using onnx model for {self.name} {self.use_onnx}.")
+
+        weights = get_torch_model_weights(torch_model)
+        self._initialize_model(self.name, weights, num_workers, use_onnx)
 
         self.cpus_per_worker = cpus_per_worker
         self.memory_per_worker = memory_per_worker
@@ -208,38 +204,59 @@ class Model:
             memory=memory_per_worker * 1024 * 1024,
             scheduling_strategy="SPREAD",
         )
-
-        self.models: dict[str:ModelMeta] = {self.name: meta}
-
         for _ in range(
-            num_workers
-            if num_workers is not None
-            else len([node for node in ray.nodes() if node["Alive"]])
+            len([node for node in ray.nodes() if node["Alive"]])
+            if num_workers is None
+            else num_workers
         ):
             asyncio.create_task(self._create_worker(self.name))
 
-        asyncio.get_running_loop().set_default_executor(
-            ThreadPoolExecutor(max_workers=1)
-        )
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
 
+    def _initialize_model(self, name, weights, num_workers, use_onnx):
+        ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
+        if not os.path.exists(ckpt_dir):
+            os.makedirs(ckpt_dir, exist_ok=True)
+
+        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
+        if not os.path.exists(weights_path):
+            torch.save(weights, weights_path)
+
+        ckpt_steps, step = [], 0
+        try:
+            ckpt_steps = [
+                int(ckpt.split(".")[0].split("-")[1]) for ckpt in os.listdir(ckpt_dir)
+            ]
+            ckpt_steps.sort()
+            step = ckpt_steps[-1] if ckpt_steps else 0
+            weights = self._load_checkpoint(name, step=step)
+        except Exception as e:
+            print(f"Load checkpoint failed: {e}")
+
+        meta = ModelMeta(num_workers, use_onnx)
+        meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
+        if meta.step != 0:
+            meta.weights = ray.put(weights)
+        self.models[name] = meta
+        if meta.step > 0:
+            print(f"Model {name} load checkpoint at step {step}")
+
+        if meta.use_onnx:
+            onnx_model, forward_outputs = self._get_onnx_model(name, meta.use_onnx)
+            print(f"Using onnx model for {name} {meta.use_onnx}.")
+        else:
+            onnx_model, forward_outputs = None, None
+
+        if name != self.name:
+            return
+        self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
+
     def _get_onnx_model(self, name, use_onnx):
-        from inspect import ismethod
-        from functools import lru_cache
-
-        if ismethod(self._get_onnx_model):
-            self._get_onnx_model = lru_cache()(self._get_onnx_model)
-            return self._get_onnx_model(name, use_onnx)
-
-        if not use_onnx:
-            return None, None
-        onnx_path = (
-            f"{self.name}/{self.name}.onnx"
-            if use_onnx == "train"
-            else f"{name}/{self.name}-infer.onnx"
-        )
-        onnx_path = os.path.join(self.trial_path, onnx_path)
+        onnx_path_postfix = f"{name}/{self.name}-infer.onnx"
+        if use_onnx == "train":
+            onnx_path_postfix = f"{self.name}/{self.name}.onnx"
+        onnx_path = os.path.join(self.trial_path, onnx_path_postfix)
         outputs_path = os.path.join(
             self.trial_path,
             f"{self.name}/forward_outputs.pt",
@@ -256,7 +273,7 @@ class Model:
         os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
 
         torch_model = ray.get(self.model)
-        weights = self._load_checkpoint(name, step=0)[0]
+        weights = self._load_checkpoint(name, step=0)
         set_torch_model_weights(torch_model, weights)
         forward_outputs = export_onnx(
             torch_model,
@@ -304,44 +321,22 @@ class Model:
             meta.step_cond.notify_all()
 
     async def clone(self, name, step, num_workers, use_onnx) -> str:
-        step = self.models[name].step if step == -1 else step
+        weights, step = await self._get_weights(name, step)
 
         if (cloned_name := f"{name}/clone-step-{step}") in self.models:
             return cloned_name
 
-        use_onnx = use_onnx if use_onnx != "" else self.use_onnx
-        num_workers = num_workers if num_workers != -1 else self.num_workers
-
-        def initialize_cloned_model():
-            ckpt_dir = os.path.join(self.trial_path, f"{cloned_name}/checkpoint")
-            if not os.path.exists(ckpt_dir):
-                os.makedirs(ckpt_dir, exist_ok=True)
-            weights_path = os.path.join(
-                self.trial_path,
-                f"{cloned_name}/weights.pt",
-            )
-            if os.path.exists(weights_path):
-                return
-            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
-            weights, ckpt_step = self._load_checkpoint(name, step)
-            torch.save(weights, weights_path)
-            self._get_onnx_model(cloned_name, use_onnx)
-            print(f"Clone model {name} to {cloned_name} at step {ckpt_step}")
+        meta: ModelMeta = self.models[name]
+        use_onnx = use_onnx if use_onnx != "" else meta.use_onnx
+        num_workers = num_workers if num_workers != -1 else meta.num_workers
 
         await asyncio.get_running_loop().run_in_executor(
-            None,
-            initialize_cloned_model,
+            None, self._initialize_model, cloned_name, weights, num_workers, use_onnx
         )
-
-        self.models[cloned_name] = ModelMeta(num_workers, use_onnx)
-        # if num_workers is None:
-        #     worker = ray.remote(ModelWorker).remote(self.name)
-        #     worker.__node_id = ""
-        #     meta.workers.append(worker)
         for _ in range(
-            num_workers
-            if num_workers is not None
-            else len([node for node in ray.nodes() if node["Alive"]])
+            len([node for node in ray.nodes() if node["Alive"]])
+            if num_workers is None
+            else num_workers
         ):
             asyncio.create_task(self._create_worker(cloned_name))
         return cloned_name
@@ -430,21 +425,15 @@ class Model:
                 asyncio.create_task(self._create_worker(name))
         asyncio.create_task(self._health_check())
 
-    def _load_checkpoint(self, name, step=-1) -> tuple[NestedArray, int]:
+    def _load_checkpoint(self, name, step):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
-        ckpts = os.listdir(ckpt_dir)
-        ckpts = [int(ckpt.split(".")[0].split("-")[1]) for ckpt in ckpts]
-        if not ckpts:
+        if step == 0:
             weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-            return torch.load(weights_path), 0
-        ckpts.sort()
-        if step == -1:
-            ckpt_step = ckpts[-1]
         else:
-            index = np.searchsorted(ckpts, step, side="right")
-            ckpt_step = ckpts[max(0, index - 1)]
-        ckpt_path = os.path.join(ckpt_dir, f"step-{ckpt_step}.pt")
-        return torch.load(ckpt_path), ckpt_step
+            weights_path = os.path.join(ckpt_dir, f"step-{step}.pt")
+        return handle_nested_array(
+            torch.load(weights_path), lambda x: x.numpy(), type_check=False
+        )
 
     async def _save_checkpoint(self):
         await asyncio.sleep(10 * 60)  # save checkpoint every 10 minutes
@@ -457,19 +446,28 @@ class Model:
                 f"step-{meta.step}.pt",
             )
             asyncio.get_running_loop().run_in_executor(
-                None, torch.save, await meta.weights, ckpt_path
+                None,
+                torch.save,
+                handle_nested_array(await meta.weights, torch.from_numpy),
+                ckpt_path,
             )
             meta.ckpt_step = meta.step
+            meta.ckpt_steps.append(meta.ckpt_step)
         asyncio.create_task(self._save_checkpoint())
 
-    async def get_weights(self, name) -> ray.ObjectRef:
+    async def _get_weights(self, name, step=-1):
         meta: ModelMeta = self.models[name]
-        if meta.weights:
-            return meta.weights
-        weights, _ = await asyncio.get_running_loop().run_in_executor(
-            None, self._load_checkpoint, name
+        if step == -1 and meta.weights:
+            return await meta.weights, meta.step
+        index = np.searchsorted(meta.ckpt_steps, step, side="right")
+        step = meta.ckpt_steps[max(0, index - 1)] if meta.ckpt_steps else 0
+        weights = await asyncio.get_running_loop().run_in_executor(
+            None, self._load_checkpoint, name, step
         )
-        return ray.put(weights)
+        return weights, step
+
+    async def get_weights(self, name, step=-1) -> NestedArray:
+        return (await self._get_weights(name, step))[0]
 
     async def get_step(self, name) -> int:
         return self.models[name].step
@@ -477,12 +475,16 @@ class Model:
     async def get_model(self) -> ray.ObjectRef:
         return self.model
 
-    async def get_onnx_model(self, name) -> tuple[bytes, NestedArray, bool]:
+    async def get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
         meta: ModelMeta = self.models[name]
-        onnx_model, forward_outputs = await asyncio.get_running_loop().run_in_executor(
+        if not meta.use_onnx:
+            return None, None
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._get_onnx_model, name, meta.use_onnx
         )
-        return onnx_model, forward_outputs, meta.use_onnx
+
+    async def get_use_onnx(self, name) -> bool:
+        return self.models[name].use_onnx
 
     async def get_cpus_per_worker(self) -> float:
         return self.cpus_per_worker
@@ -525,7 +527,7 @@ class RemoteModel:
         if name is None:  # 适配对象反序列化时调用__new__方法
             return self
         self.name = name
-        root_name = name.split("/")[0]
+        base_name = name.split("/")[0]
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
@@ -534,9 +536,9 @@ class RemoteModel:
         self.local = local_mode
         self.local_worker = None
         self.model = Model.options(
-            name=root_name, get_if_exists=True, scheduling_strategy=scheduling_local
+            name=base_name, get_if_exists=True, scheduling_strategy=scheduling_local
         ).remote(
-            root_name,
+            base_name,
             model,
             forward_args,
             forward_kwargs,
@@ -677,7 +679,7 @@ class RemoteModel:
             被封装的Pytorch模型，权重为最新的权重
         """
         torch_model = ray.get(ray.get(self.model.get_model.remote()))
-        weights = ray.get(ray.get(self.model.get_weights.remote(self.name)))
+        weights = ray.get(self.model.get_weights.remote(self.name))
         set_torch_model_weights(torch_model, weights)
         return torch_model
 
@@ -695,10 +697,10 @@ class RemoteModel:
             克隆的RemoteModel
         """
         local_mode = local_mode if local_mode is not None else self.local
-        remote_model = RemoteModel(
-            ray.get(self.model.clone.remote(self.name, step, num_workers, use_onnx)),
-            local_mode=local_mode,
+        cloned_name = ray.get(
+            self.model.clone.remote(self.name, step, num_workers, use_onnx)
         )
+        remote_model = RemoteModel(cloned_name, local_mode=local_mode)
         return remote_model
 
     def publish_weights(self, weights: NestedArray):
