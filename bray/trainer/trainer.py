@@ -25,7 +25,7 @@ class RemoteTrainer:
         total_cpus = ray.available_resources()["CPU"]
         total_gpus = ray.available_resources().get("GPU", 0)
 
-        use_gpu = use_gpu if use_gpu else total_gpus > 0
+        use_gpu = use_gpu if use_gpu == True else use_gpu is None and total_gpus > 0
 
         if not use_gpu:
             trainer_cpus = max(1, int(total_cpus * total_cpus_ratio))

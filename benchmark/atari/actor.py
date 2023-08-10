@@ -6,7 +6,7 @@ from bray import NestedArray
 
 def gae(trajectory: list[NestedArray]) -> None:
     if len(trajectory) == 0:
-        return []
+        return
     trajectory[-1]["advantage"] = np.array(0.0, dtype=np.float32)
     for i in reversed(range(len(trajectory) - 1)):
         t, next_t = trajectory[i], trajectory[i + 1]
@@ -14,7 +14,7 @@ def gae(trajectory: list[NestedArray]) -> None:
         delta = t["reward"] + 0.99 * next_t["value"] - t["value"]
         # 0.95: discount factor of the gae
         advantage = delta + 0.99 * 0.95 * next_t["advantage"]
-        t["advantage"] = np.array(advantage, dtype=np.float32)
+        t["advantage"] = np.squeeze(np.array(advantage, dtype=np.float32))
 
 
 class AtariActor(bray.Actor):
@@ -28,7 +28,7 @@ class AtariActor(bray.Actor):
         self.game_id = game_id
         self.trajectory = []
         self.episode_reward = 0.0
-        print("Actor.start: ", game_id)
+        bray.logger.info(f"Actor.start: {game_id}")
         return b"Game started."
 
     async def tick(self, data: bytes) -> bytes:
@@ -46,7 +46,7 @@ class AtariActor(bray.Actor):
         self.episode_reward += reward
         bray.merge("episode_reward", self.episode_reward)
         self._append_to_trajectory(None, None, reward, None, None, end=True)
-        print("Actor.end: ", self.game_id)
+        bray.logger.info(f"Actor.end: {self.game_id}")
         return b"Game ended."
 
     def _append_to_trajectory(

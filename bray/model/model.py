@@ -10,10 +10,11 @@ import torch
 import numpy as np
 from bray.utils.nested_array import (
     NestedArray,
-    make_batch,
     handle_nested_array,
     flatten_nested_array,
     unflatten_nested_array,
+    make_batch,
+    split_batch,
 )
 from bray.metric.metric import merge, query, merge_time_ms
 from bray.actor.actor import get_tick_id
@@ -34,21 +35,33 @@ class ModelWorker:
         self.name, self.model = name, ray.get_actor(name.split("/")[0])
         self.current_step = ray.get(self.model.get_step.remote(name))
 
+        self.max_batch_size = ray.get(self.model.get_max_batch_size.remote(name))
+        self.pending_forwards: list[tuple, dict] = []
+        self.ready_forwards: list[NestedArray] = []
+        self.forward_cond = asyncio.Condition()
+
         self.use_onnx = ray.get(self.model.get_use_onnx.remote(name))
+        self.num_cpus, self.num_gpus = ray.get(
+            self.model.get_cpus_gpus_per_worker.remote()
+        )
         self._init_onnx() if self.use_onnx else self._init_torch()
+        self.__forward = self._forward_onnx if self.use_onnx else self._forward_torch
 
         loop = loop if loop else asyncio.get_running_loop()
+        self.forward_task = loop.create_task(self._forward_coro())
+        self.forward_task.add_done_callback(lambda t: t.result())
         self.subscribe_task = loop.create_task(self._subscribe_weights())
+        self.subscribe_task.add_done_callback(lambda t: t.result())
 
     def _build_ort_session(self, onnx_model):
-        num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
-        num_cpus = max(1, int(num_cpus))
+        provider = "CUDAExecutionProvider" if self.num_gpus else "CPUExecutionProvider"
+        num_cpus = max(1, int(self.num_cpus))
         import onnxruntime as ort
 
         options = ort.SessionOptions()
         options.intra_op_num_threads = num_cpus
         options.inter_op_num_threads = num_cpus
-        return ort.InferenceSession(onnx_model, options)
+        return ort.InferenceSession(onnx_model, options, [provider])
 
     def _init_onnx(self):
         self.ort_session, self.forward_outputs = None, None
@@ -73,8 +86,7 @@ class ModelWorker:
         self.weights = [v for v in weights.values()]
 
     def _init_torch(self):
-        num_cpus = ray.get(self.model.get_cpus_per_worker.remote())
-        num_cpus = max(1, int(num_cpus))
+        num_cpus = max(1, int(self.num_cpus))
         torch.set_num_interop_threads(num_cpus)
         torch.set_num_threads(num_cpus)
         model = ray.get(ray.get(self.model.get_model.remote()))
@@ -82,39 +94,76 @@ class ModelWorker:
         model.eval()
         weights = ray.get(self.model.get_weights.remote(self.name))
         set_torch_model_weights(model, weights)
+        if self.num_gpus:
+            model = model.cuda()
         self.torch_model = model
 
-    def _forward_torch(self, *args, **kwargs) -> NestedArray:
-        args, kwargs = make_batch([(args, kwargs)])
-        args = handle_nested_array(args, torch.from_numpy)
-        kwargs = handle_nested_array(kwargs, torch.from_numpy)
-        outputs = self.torch_model(*args, **kwargs)
+    def _forward_torch(self, batch_args, batch_kwargs):
+        handler = (
+            (lambda x: torch.from_numpy(x).cuda())
+            if self.num_gpus
+            else torch.from_numpy
+        )
+        batch_args, batch_kwargs = handle_nested_array(
+            (batch_args, batch_kwargs), handler
+        )
+        outputs = self.torch_model(*batch_args, **batch_kwargs)
         return handle_nested_array(
-            outputs, lambda x: x.squeeze(0).numpy(), type_check=False
+            outputs, lambda x: x.cpu().detach().numpy(), type_check=False
         )
 
-    def _forward_onnx(self, *args, **kwargs) -> NestedArray:
-        args, kwargs = make_batch([(args, kwargs)])
+    def _forward_onnx(self, batch_args, batch_kwargs):
         sess = self.ort_session
         input_names = [input.name for input in sess.get_inputs()]
-        flatten_input = flatten_nested_array(args + (kwargs,), sort_keys=True)
+        flatten_input = flatten_nested_array(
+            batch_args + (batch_kwargs,), sort_keys=True
+        )
         if self.use_onnx == "train":
             flatten_input.extend(self.weights)
         inputs = dict(zip(input_names, flatten_input))
         # output_names = [output.name for output in sess.get_outputs()]
         # print(handle_nested_array(inputs, lambda x: (x.shape, x.dtype)))
         outputs = sess.run(None, inputs)
-        outputs = unflatten_nested_array(self.forward_outputs, outputs)
-        return handle_nested_array(outputs, lambda x: x.squeeze(0))
+        return unflatten_nested_array(self.forward_outputs, outputs)
 
-    def forward(self, *args, **kwargs) -> NestedArray:
+    async def _forward(self, pending_forwards: list[tuple, dict]):
         beg = time.time()
-        if not self.use_onnx:
-            outputs = self._forward_torch(*args, **kwargs)
-        else:
-            outputs = self._forward_onnx(*args, **kwargs)
+        batch_args, batch_kwargs = make_batch(pending_forwards)
+        outputs = await asyncio.get_running_loop().run_in_executor(
+            None, self.__forward, batch_args, batch_kwargs
+        )
+        ready_forwards = split_batch(outputs)
         merge_time_ms("forward", beg, model=self.name)
-        return outputs
+        return ready_forwards
+
+    async def _forward_coro(self, forward_cond=asyncio.Condition()):
+        while True:
+            pending_forwards = self.pending_forwards
+            async with self.forward_cond:
+                await self.forward_cond.wait_for(lambda: pending_forwards)
+            self.pending_forwards = []
+            ready_forwards = self.ready_forwards
+            self.ready_forwards = []
+            forward_cond, self.forward_cond = self.forward_cond, forward_cond
+            # set the ready_forwards to the previous pending_forwards
+            ready_forwards[:] = await self._forward(pending_forwards)
+            async with forward_cond:
+                forward_cond.notify_all()
+
+    async def forward(self, *args, **kwargs) -> NestedArray:
+        if self.max_batch_size == 1:
+            return (await self._forward([(args, kwargs)]))[0]
+        while len(self.pending_forwards) >= self.max_batch_size:
+            await asyncio.sleep(0.001)
+        forward_index = len(self.pending_forwards)
+        self.pending_forwards.append((args, kwargs))
+        previous_forward_cond = self.forward_cond
+        previous_ready_forwards = self.ready_forwards
+        async with previous_forward_cond:
+            if forward_index == 0:
+                previous_forward_cond.notify_all()
+            await previous_forward_cond.wait_for(lambda: previous_ready_forwards)
+        return previous_ready_forwards[forward_index]
 
     async def __subscribe_weights(self):
         try:
@@ -123,7 +172,9 @@ class ModelWorker:
             )
         except Exception as e:
             print(f"Fail to subscribe weights from {self.name}.", e)
-        assert step > self.current_step
+        if step <= self.current_step:
+            print(f"Skip weights from {self.name}.")
+            return
         self.current_step = step
         if not self.use_onnx:
             set_torch_model_weights(self.torch_model, await weights)
@@ -143,6 +194,7 @@ class ModelWorker:
 class ModelMeta:
     def __init__(self, num_workers: int = None, use_onnx: str = None):
         self.num_workers, self.workers = num_workers, []
+        self.max_batch_size = 1
         self.weights, self.step, self.ckpt_step = None, 0, 0
         self.use_onnx = use_onnx
         self.pending_create_workers = 0
@@ -159,8 +211,10 @@ class Model:
         torch_model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = None,
         forward_kwargs: dict[str : np.ndarray] = None,
+        max_batch_size: int = 1,
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
+        gpus_per_worker: float = 0.0,
         memory_per_worker: int = 1024,
         use_onnx: str = None,
     ):
@@ -194,13 +248,17 @@ class Model:
         )
 
         weights = get_torch_model_weights(torch_model)
-        self._initialize_model(self.name, weights, num_workers, use_onnx)
+        self._initialize_model(
+            self.name, weights, max_batch_size, num_workers, use_onnx
+        )
 
         self.cpus_per_worker = cpus_per_worker
+        self.gpus_per_worker = gpus_per_worker
         self.memory_per_worker = memory_per_worker
 
         self.RemoteModelWorker = ray.remote(ModelWorker).options(
             num_cpus=cpus_per_worker,
+            num_gpus=gpus_per_worker,
             memory=memory_per_worker * 1024 * 1024,
             scheduling_strategy="SPREAD",
         )
@@ -214,7 +272,7 @@ class Model:
         asyncio.create_task(self._health_check())
         asyncio.create_task(self._save_checkpoint())
 
-    def _initialize_model(self, name, weights, num_workers, use_onnx):
+    def _initialize_model(self, name, weights, max_batch_size, num_workers, use_onnx):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
@@ -237,6 +295,7 @@ class Model:
 
         meta = ModelMeta(num_workers, use_onnx)
         meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
+        meta.max_batch_size = max_batch_size
         if meta.step != 0:
             meta.weights = ray.put(weights)
         self.models[name] = meta
@@ -321,7 +380,7 @@ class Model:
         async with meta.step_cond:
             meta.step_cond.notify_all()
 
-    async def clone(self, name, step, num_workers, use_onnx) -> str:
+    async def clone(self, name, step, max_batch_size, num_workers, use_onnx) -> str:
         step, weights = self._get_target_step(name, step)
 
         if (cloned_name := f"{name}/clone-step-{step}") in self.models:
@@ -330,10 +389,19 @@ class Model:
         weights = await (weights if weights else self.get_weights(name, step))
         meta: ModelMeta = self.models[name]
         use_onnx = use_onnx if use_onnx != "" else meta.use_onnx
+        max_batch_size = (
+            max_batch_size if max_batch_size is not None else meta.max_batch_size
+        )
         num_workers = num_workers if num_workers != -1 else meta.num_workers
 
         await asyncio.get_running_loop().run_in_executor(
-            None, self._initialize_model, cloned_name, weights, num_workers, use_onnx
+            None,
+            self._initialize_model,
+            cloned_name,
+            weights,
+            max_batch_size,
+            num_workers,
+            use_onnx,
         )
         for _ in range(
             len([node for node in ray.nodes() if node["Alive"]])
@@ -487,11 +555,15 @@ class Model:
             None, self._get_onnx_model, name, meta.use_onnx
         )
 
+    async def get_max_batch_size(self, name) -> int:
+        meta: ModelMeta = self.models[name]
+        return meta.max_batch_size
+
     async def get_use_onnx(self, name) -> bool:
         return self.models[name].use_onnx
 
-    async def get_cpus_per_worker(self) -> float:
-        return self.cpus_per_worker
+    async def get_cpus_gpus_per_worker(self) -> tuple[float, float]:
+        return self.cpus_per_worker, self.gpus_per_worker
 
     async def get_workers(self, name, node_id: str = None) -> list[ModelWorker]:
         model: ModelMeta = self.models[name]
@@ -517,8 +589,10 @@ class RemoteModel:
         model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
+        max_batch_size: int = 1,
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
+        gpus_per_worker: float = 0.0,
         memory_per_worker: int = 1024,
         use_onnx: ["train", "infer"] = None,
         local_mode: bool = False,
@@ -546,8 +620,10 @@ class RemoteModel:
             model,
             forward_args,
             forward_kwargs,
+            max_batch_size,
             num_workers,
             cpus_per_worker,
+            gpus_per_worker,
             memory_per_worker,
             use_onnx,
         )
@@ -568,8 +644,10 @@ class RemoteModel:
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
+            max_batch_size: 模型的max_batch_size
             num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
             cpus_per_worker: 每个worker的CPU核心数
+            gpus_per_worker: 每个worker的GPU数量，如果为0，则表示不使用GPU
             memory_per_worker: 每个worker的内存大小，单位MB
             use_onnx: 默认不适用onnx优化，可选值为["train", "infer"]，分别表示训练和部署模式
             local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
@@ -580,8 +658,10 @@ class RemoteModel:
 
     def __del__(self):
         self.subscribe_task.cancel() if self.subscribe_task else None
-        if self.local_worker:
-            self.local_worker.subscribe_task.cancel()
+        if not self.local_worker:
+            return
+        self.local_worker.forward_task.cancel()
+        self.local_worker.subscribe_task.cancel()
 
     async def subscribe_workers(cls, model, name, workers):
         # 定义为类方法，避免引用self阻止RemoteModel被回收
@@ -618,25 +698,28 @@ class RemoteModel:
                 raise
             assert isinstance(self.local_worker, ModelWorker)
 
-        def forward():
-            return self.local_worker.forward(*args, **kwargs)
-
         beg = time.time()
-        outputs = await loop.run_in_executor(None, forward)
+        outputs = await self.local_worker.forward(*args, **kwargs)
         forward_time_ms = (time.time() - beg) * 1000
         merge("forward", forward_time_ms, model=self.name, desc={}, mode="local")
         return outputs
 
-    async def _remote_forward(self, *args, **kwargs) -> NestedArray:
-        if not self.subscribe_task:
-            model, name, workers = self.model, self.name, self.workers
-            self.subscribe_task = asyncio.create_task(
-                RemoteModel.subscribe_workers(RemoteModel, model, name, workers)
+    async def _init_subscribe_task(self):
+        if len(self.workers) != 0 and self.subscribe_task:
+            return
+        if self.subscribe_task:
+            await asyncio.sleep(1)
+            assert len(self.workers) != 0, f"No model worker for {self.name}"
+        self.subscribe_task = asyncio.create_task(
+            RemoteModel.subscribe_workers(
+                RemoteModel, self.model, self.name, self.workers
             )
-        if len(self.workers) == 0:
-            await self.sync()
-        if len(self.workers) == 0:
-            raise RuntimeError(f"No available workers for model {self.name}")
+        )
+        self.subscribe_task.add_done_callback(lambda t: t.result())
+        await self.sync()
+
+    async def _remote_forward(self, *args, **kwargs) -> NestedArray:
+        await self._init_subscribe_task()
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         if tick_id := get_tick_id():
@@ -688,13 +771,19 @@ class RemoteModel:
         return torch_model
 
     def clone(
-        self, step: int = -1, local_mode=None, num_workers=-1, use_onnx=""
+        self,
+        step: int = -1,
+        max_batch_size: int = None,
+        num_workers: int = -1,
+        use_onnx: ["train", "infer"] = "",
+        local_mode: bool = None,
     ) -> "RemoteModel":
         """
         克隆一个新的RemoteModel，可以用于SelfPlay和League的多智能体对抗
         Args:
             step: 克隆的模型的版本号，-1表示克隆最新版本
             local_mode: 是否使用本地模式，None表示使用原来的配置
+            max_batch_size: 克隆的模型的max_batch_size，None表示使用原来的
             num_workers: 克隆的模型的worker数量，-1表示使用原来的worker数量， None表示自动负载均衡
             use_onnx: 克隆的模型是否使用onnx，""表示使用原来的配置
         Returns:
@@ -702,7 +791,9 @@ class RemoteModel:
         """
         local_mode = local_mode if local_mode is not None else self.local
         cloned_name = ray.get(
-            self.model.clone.remote(self.name, step, num_workers, use_onnx)
+            self.model.clone.remote(
+                self.name, step, max_batch_size, num_workers, use_onnx
+            )
         )
         remote_model = RemoteModel(cloned_name, local_mode=local_mode)
         return remote_model

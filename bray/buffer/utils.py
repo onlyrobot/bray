@@ -49,7 +49,7 @@ class TorchPrefetchBuffer:
 
 class PrefetchBuffer:
     def __init__(
-        self, buffer: Iterator[NestedArray], max_reuse: int = 10, name: str = "default"
+        self, buffer: Iterator[NestedArray], max_reuse: int = 0, name: str = "default"
     ):
         """
         Args:

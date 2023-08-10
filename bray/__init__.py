@@ -17,6 +17,10 @@ from bray.actor.base import Actor
 from bray.utils.nested_array import NestedArray
 from bray.metric.metric import merge, query, get_metrics_worker
 
+import ray, logging
+
+logger = logging.getLogger("ray")
+
 
 def run_until_asked_to_stop():
     import signal
@@ -33,7 +37,6 @@ def init(project: str, trial: str, **kwargs):
         **kwargs: ray.init 的参数
     """
     import os
-    import ray
 
     trial_path = os.path.join(project, trial)
     trial_path = os.path.abspath(trial_path)

@@ -6,7 +6,7 @@ import numpy as np
 NestedArray = NewType("NestedArray", any)
 
 
-def handle_nested_array(inputs, handler: callable, type_check=True, sort_keys=False):
+def handle_nested_array(inputs, handler: callable, type_check=False, sort_keys=False):
     if isinstance(inputs, np.ndarray):
         return handler(inputs)
     elif isinstance(inputs, list):
@@ -76,7 +76,6 @@ def make_batch(nested_arrays: list[NestedArray]) -> NestedArray:
     try:
         batch_arrays = [np.stack(a) for a in arrays]
     except ValueError:
-        # if the arrays have different shapes, stack will raise ValueError
         print("Error: the arrays have different shapes or dtypes.")
         print("Batch signatures: ")
         for signature in handle_nested_array(
@@ -85,6 +84,12 @@ def make_batch(nested_arrays: list[NestedArray]) -> NestedArray:
             print(signature)
         raise
     return unflatten_nested_array(nested_arrays[0], batch_arrays)
+
+
+def split_batch(batch: NestedArray) -> list[NestedArray]:
+    flatten_arrays = flatten_nested_array(batch)
+    arrays = zip(*flatten_arrays)
+    return [unflatten_nested_array(batch, a) for a in arrays]
 
 
 if __name__ == "__main__":
@@ -113,4 +118,6 @@ if __name__ == "__main__":
     ]
     batch = make_batch(nested_arrays)
     assert np.allclose(batch[0], np.vstack([nested_arrays[0][0], nested_arrays[1][0]]))
+    split_array = split_batch(batch)
+    np.testing.assert_array_equal(split_array[0][0], nested_arrays[0][0])
     print("test make_batch passed")

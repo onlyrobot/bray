@@ -10,7 +10,7 @@ RUN pip3 install torch torchvision torchaudio --index-url https://download.pytor
 RUN pip install ray[all]==2.6.1
 RUN HOROVOD_WITH_GLOO=1 HOROVOD_WITH_TORCH=1 pip install horovod[ray]
 RUN pip install tensorboard==2.13.0
-RUN pip install onnx==1.14.0 onnxruntime==1.15.1
+RUN pip install onnx==1.14.0 onnxruntime==1.15.1 onnxruntime-gpu==1.15.1
 
 RUN apt update && apt install -y ssh vim git
 
