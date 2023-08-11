@@ -29,18 +29,15 @@ class Gateway:
         index = self.server_index % len(self.server_addrs)
         self.server_index += 1
         ip, port = self.server_addrs[index]
-        is_ok = True
 
         async def handle(r: StreamReader, w: StreamWriter):
             try:
-                nonlocal is_ok
-                while is_ok:
-                    w.write(await r.read(4096))
+                while data := await r.read(4096):
+                    w.write(data)
                     await w.drain()
-            except:
+            finally:
                 w.close()
                 await w.wait_closed()
-                is_ok = False
 
         try:
             r, w = await asyncio.open_connection(ip, port)
