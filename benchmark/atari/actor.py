@@ -5,16 +5,15 @@ from bray import NestedArray
 
 
 def gae(trajectory: list[NestedArray]) -> None:
-    if len(trajectory) == 0:
-        return
-    trajectory[-1]["advantage"] = np.array(0.0, dtype=np.float32)
+    trajectory.append({"advantage": 0.0, "value": 0.0})
     for i in reversed(range(len(trajectory) - 1)):
         t, next_t = trajectory[i], trajectory[i + 1]
         # 0.99: discount factor of the MDP
         delta = t["reward"] + 0.99 * next_t["value"] - t["value"]
         # 0.95: discount factor of the gae
         advantage = delta + 0.99 * 0.95 * next_t["advantage"]
-        t["advantage"] = np.squeeze(np.array(advantage, dtype=np.float32))
+        t["advantage"] = np.array(advantage, dtype=np.float32)
+    trajectory.pop(-1)  # drop the fake
 
 
 class AtariActor(bray.Actor):

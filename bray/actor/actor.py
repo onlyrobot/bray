@@ -106,6 +106,7 @@ class ActorGateway:
         game_id = headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
+        
         if step_kind == "tick":
             return await self.tick(game_id, body)
         if step_kind == "start":
@@ -115,6 +116,7 @@ class ActorGateway:
         actor = self.actors.pop(game_id, None)
         if not actor:
             raise Exception(f"Game {game_id} not started.")
+        
         end_ret = actor.end(body)
         self.inactive_actors.append(actor)
         return end_ret
@@ -136,6 +138,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         except Exception as e:
             print(e)
             writer.close()
+            await writer.wait_closed()
             return
         game_id_size = len(headers["game_id"])
         body_size = len(data)
@@ -147,6 +150,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         except Exception as e:
             print(e)
             writer.close()
+            await writer.wait_closed()
 
     while True:
         try:
@@ -165,10 +169,12 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         except ConnectionResetError:
             print("Client disconnected")
             writer.close()
+            await writer.wait_closed()
             return
         except Exception as e:
             print(e)
             writer.close()
+            await writer.wait_closed()
             return
         game_id = data[0:game_id_size]
         step_kind = data[game_id_size : game_id_size + step_kind_size]
