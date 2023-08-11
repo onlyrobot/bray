@@ -4,6 +4,7 @@ import asyncio
 from asyncio import StreamReader, StreamWriter
 import struct
 from bray.actor.base import Actor
+from bray.actor.gateway import Gateway
 
 from bray.metric.metric import (
     merge,
@@ -99,16 +100,17 @@ class ActorGateway:
             raise
 
     async def __call__(self, headers: dict, body: bytes) -> bytes:
-        self._initialize()
+        if not self.is_initialized:
+            self._initialize()
         step_kind = headers.get("step_kind")
         game_id = headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
         if step_kind == "tick":
             return await self.tick(game_id, body)
-        elif step_kind == "start":
+        if step_kind == "start":
             return await self.start(game_id, body)
-        elif step_kind != "end":
+        if step_kind != "end":
             raise Exception("Unknown step_kind:", step_kind)
         actor = self.actors.pop(game_id, None)
         if not actor:
@@ -186,7 +188,9 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
 
 
 @ray.remote
-def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp):
+def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
+    gateway.register.remote("localhost", port) if gateway else None
+
     async def serve_tcp_gateway():
         server = await asyncio.start_server(
             handle_client, "0.0.0.0", port, reuse_port=True
@@ -228,6 +232,7 @@ class RemoteActor:
         memory_per_worker: int = 512,
         actors_per_worker: int = 10,
         use_tcp: bool = False,
+        use_gateway: ["node", "head", None] = "node",
     ):
         """
         Args:
@@ -237,6 +242,7 @@ class RemoteActor:
             memory_per_worker: 每个 worker 的内存占用量，单位 MB
             actors_per_worker: 每个 worker 的 Actor 数量
             use_tcp: 是否使用 TCP 作为通信协议
+            gateway: ActorGateway 的位置，可以是 "node" 或 "head" 或 None
         """
         self.port = port
         self.num_workers = num_workers
@@ -244,6 +250,7 @@ class RemoteActor:
         self.memory_per_worker = memory_per_worker
         self.actors_per_worker = actors_per_worker
         self.use_tcp = use_tcp
+        self.use_gateway = use_gateway
 
     def serve(self, Actor: type[Actor], *args, **kwargs):
         """
@@ -253,22 +260,48 @@ class RemoteActor:
             **kwargs: Actor 的关键字参数
         """
         print("Starting ActorGateway.")
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        self.node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
+        gateway = (
+            None
+            if self.use_gateway != "head"
+            else Gateway.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(), soft=False
+                )
+            ).remote(self.port)
+        )
         self.gateways = [
+            gateway
+            if gateway or not self.use_gateway
+            else Gateway.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=node_id, soft=False
+                )
+            ).remote(self.port)
+            for node_id in self.node_ids
+        ]
+
+        self.workers = [
             [
                 ActorWorker.options(
                     num_cpus=self.cpus_per_worker,
                     memory=self.memory_per_worker * 1024 * 1024,
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=node_id, soft=False
+                    ),
                 ).remote(
-                    self.port,
+                    self.port + (i + 1 if self.use_gateway else 0),
                     Actor,
                     args,
                     kwargs,
                     self.actors_per_worker,
                     self.use_tcp,
+                    gateway,
                 )
-                for _ in range(self.num_workers)
             ]
-            for node in ray.nodes()
-            if node["Alive"]
+            for i in range(self.num_workers)
+            for node_id, gateway in zip(self.node_ids, self.gateways)
         ]
         print("ActorGateway started.")

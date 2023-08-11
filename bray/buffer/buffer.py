@@ -124,16 +124,18 @@ class RemoteBuffer:
         if len(self.workers) != 0 and self.subscribe_task:
             return
         if self.subscribe_task:
-            await asyncio.sleep(1)
-            assert len(self.workers) != 0, f"No buffer worker for {self.name}"
+            await asyncio.sleep(3)
+            assert self.workers, f"No buffer worker for {self.name}"
         self.subscribe_task = asyncio.create_task(
             RemoteBuffer.subscribe_workers(RemoteBuffer, self.buffer, self.workers)
         )
         self.subscribe_task.add_done_callback(lambda t: t.result())
         await self.sync()
+        await self._init_subscribe_task()
 
     async def _push(self, *replays: NestedArray) -> None:
-        await self._init_subscribe_task()
+        if len(self.workers) == 0 or not self.subscribe_task:
+            await self._init_subscribe_task()
         step = max(len(replays) // len(self.workers), 1)
         tasks = [
             self.__push(
@@ -150,9 +152,9 @@ class RemoteBuffer:
 
     async def sync(self):
         if not self.no_drop:
-            self.workers = await self.buffer.get_workers.remote()
+            self.workers[:] = await self.buffer.get_workers.remote()
             return
-        self.workers = await self.buffer.subscribe_workers.remote()
+        self.workers[:] = await self.buffer.subscribe_workers.remote()
 
     def _new_local_worker(self) -> BufferWorker:
         """

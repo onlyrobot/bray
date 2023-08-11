@@ -23,14 +23,20 @@ class Metric:
 @ray.remote(num_cpus=0)
 class RemoteMetrics:
     def __init__(self, time_window=60):
-        self.time_window = time_window
         self.metrics, self.last_metrics = {}, {}
         self.descs = {}
         self.diff_metrics = {}
-        trial_path = ray.get_runtime_context().namespace
-        launch_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        self.writer = tensorboard.summary.Writer(f"{trial_path}/{launch_time}")
         self.step = 0
+        self.time_window = time_window
+        asyncio.create_task(self.start_tensorboard())
+
+    async def start_tensorboard(self):
+        launch_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        await asyncio.sleep(self.time_window)
+        trial_path = ray.get_runtime_context().namespace
+        self.writer = tensorboard.summary.Writer(
+            f"{trial_path}/{launch_time}",
+        )
         asyncio.create_task(self.dump_to_tensorboard())
 
     def _diff(self, current: Metric, last: Metric) -> Metric:

@@ -42,7 +42,7 @@ def export_onnx(
         # keep_initializers_as_inputs=True,
     )
 
-    ort_session = ort.InferenceSession(path)
+    ort_session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
 
     input_names = [i.name for i in ort_session.get_inputs()]
     flatten_input = flatten_nested_array(

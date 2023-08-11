@@ -709,7 +709,7 @@ class RemoteModel:
             return
         if self.subscribe_task:
             await asyncio.sleep(1)
-            assert len(self.workers) != 0, f"No model worker for {self.name}"
+            assert self.workers, f"No model worker for {self.name}"
         self.subscribe_task = asyncio.create_task(
             RemoteModel.subscribe_workers(
                 RemoteModel, self.model, self.name, self.workers
@@ -717,9 +717,12 @@ class RemoteModel:
         )
         self.subscribe_task.add_done_callback(lambda t: t.result())
         await self.sync()
+        await self._init_subscribe_task()
+
 
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
-        await self._init_subscribe_task()
+        if len(self.workers) == 0 or not self.subscribe_task:
+            await self._init_subscribe_task()
         index = self.worker_index % len(self.workers)
         self.worker_index += 1
         if tick_id := get_tick_id():
