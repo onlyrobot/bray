@@ -49,9 +49,13 @@ class ModelWorker:
 
         loop = loop if loop else asyncio.get_running_loop()
         self.forward_task = loop.create_task(self._forward_coro())
-        self.forward_task.add_done_callback(lambda t: t.result())
+        self.forward_task.add_done_callback(
+            lambda t: None if t.cancelled() else t.result()
+        )
         self.subscribe_task = loop.create_task(self._subscribe_weights())
-        self.subscribe_task.add_done_callback(lambda t: t.result())
+        self.subscribe_task.add_done_callback(
+            lambda t: None if t.cancelled() else t.result()
+        )
 
     def _build_ort_session(self, onnx_model):
         provider = "CUDAExecutionProvider" if self.num_gpus else "CPUExecutionProvider"
@@ -187,7 +191,11 @@ class ModelWorker:
         while True:
             await self.__subscribe_weights()
 
-    def get_node_id(self):
+    def get_model_step(self) -> int:
+        """Get the current step of the model from worker to reduce Model overhead."""
+        return self.current_step
+
+    def get_node_id(self) -> str:
         return ray.get_runtime_context().get_node_id()
 
 
@@ -211,6 +219,7 @@ class Model:
         torch_model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = None,
         forward_kwargs: dict[str : np.ndarray] = None,
+        checkpoint_interval: int = None,
         max_batch_size: int = 1,
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
@@ -241,6 +250,8 @@ class Model:
         self.forward_args = forward_args
         self.forward_kwargs = forward_kwargs
 
+        self.checkpoint_interval = checkpoint_interval
+
         self.models: dict[str:ModelMeta] = {}
 
         asyncio.get_running_loop().set_default_executor(
@@ -270,7 +281,8 @@ class Model:
             asyncio.create_task(self._create_worker(self.name))
 
         asyncio.create_task(self._health_check())
-        asyncio.create_task(self._save_checkpoint())
+        if self.checkpoint_interval is None:
+            asyncio.create_task(self._save_checkpoint())
 
     def _initialize_model(self, name, weights, max_batch_size, num_workers, use_onnx):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
@@ -379,6 +391,11 @@ class Model:
         )
         async with meta.step_cond:
             meta.step_cond.notify_all()
+        if (
+            self.checkpoint_interval is not None
+            and meta.step % self.checkpoint_interval == 0
+        ):
+            await self.__save_checkpoint(name)
 
     async def clone(self, name, step, max_batch_size, num_workers, use_onnx) -> str:
         step, weights = self._get_target_step(name, step)
@@ -471,28 +488,32 @@ class Model:
             print(f"Worker is not health: ", e)
             return False
 
+    async def __health_check(self, name):
+        meta: ModelMeta = self.models[name]
+        worker_num = len(meta.workers)
+        active_workers = [
+            worker
+            for worker in meta.workers[:worker_num]
+            if await self._is_health(worker)
+        ]
+        old_workers = meta.workers
+        meta.workers = active_workers
+        meta.workers.extend(old_workers[worker_num:])
+        merge(
+            "worker",
+            len(meta.workers),
+            desc={"time_window_avg": "smoothed model worker num"},
+            model=name,
+        )
+        if meta.num_workers is None:
+            self._load_balance(name)
+        elif len(meta.workers) < meta.num_workers:
+            asyncio.create_task(self._create_worker(name))
+
     async def _health_check(self):
         await asyncio.sleep(60)  # wait for workers to start
-        for name, meta in list(self.models.items()):
-            worker_num = len(meta.workers)
-            active_workers = [
-                worker
-                for worker in meta.workers[:worker_num]
-                if await self._is_health(worker)
-            ]
-            old_workers = meta.workers
-            meta.workers = active_workers
-            meta.workers.extend(old_workers[worker_num:])
-            merge(
-                "worker",
-                len(meta.workers),
-                desc={"time_window_avg": "smoothed model worker num"},
-                model=name,
-            )
-            if meta.num_workers is None:
-                self._load_balance(name)
-            elif len(meta.workers) < meta.num_workers:
-                asyncio.create_task(self._create_worker(name))
+        for name in list(self.models.keys()):
+            await self.__health_check(name)
         asyncio.create_task(self._health_check())
 
     def _load_checkpoint(self, name, step):
@@ -505,24 +526,28 @@ class Model:
             torch.load(weights_path), lambda x: x.numpy(), type_check=False
         )
 
+    async def __save_checkpoint(self, name):
+        meta: ModelMeta = self.models[name]
+        ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
+        ckpt_path = os.path.join(
+            ckpt_dir,
+            f"step-{meta.step}.pt",
+        )
+        asyncio.get_running_loop().run_in_executor(
+            None,
+            torch.save,
+            handle_nested_array(await meta.weights, torch.from_numpy),
+            ckpt_path,
+        )
+        meta.ckpt_step = meta.step
+        meta.ckpt_steps.append(meta.ckpt_step)
+
     async def _save_checkpoint(self):
         await asyncio.sleep(10 * 60)  # save checkpoint every 10 minutes
         for name, meta in list(self.models.items()):
             if meta.ckpt_step >= meta.step:
                 continue
-            ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
-            ckpt_path = os.path.join(
-                ckpt_dir,
-                f"step-{meta.step}.pt",
-            )
-            asyncio.get_running_loop().run_in_executor(
-                None,
-                torch.save,
-                handle_nested_array(await meta.weights, torch.from_numpy),
-                ckpt_path,
-            )
-            meta.ckpt_step = meta.step
-            meta.ckpt_steps.append(meta.ckpt_step)
+            await self.__save_checkpoint(name)
         asyncio.create_task(self._save_checkpoint())
 
     def _get_target_step(self, name, step) -> tuple[int, object]:
@@ -589,6 +614,7 @@ class RemoteModel:
         model: torch.nn.Module = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
+        checkpoint_interval: int = None,
         max_batch_size: int = 1,
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
@@ -620,6 +646,7 @@ class RemoteModel:
             model,
             forward_args,
             forward_kwargs,
+            checkpoint_interval,
             max_batch_size,
             num_workers,
             cpus_per_worker,
@@ -644,6 +671,7 @@ class RemoteModel:
             model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
+            checkpoint_interval: 模型的checkpoint间隔，单位step，默认10分钟保存一次
             max_batch_size: 模型的max_batch_size
             num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
             cpus_per_worker: 每个worker的CPU核心数
@@ -715,10 +743,11 @@ class RemoteModel:
                 RemoteModel, self.model, self.name, self.workers
             )
         )
-        self.subscribe_task.add_done_callback(lambda t: t.result())
+        self.subscribe_task.add_done_callback(
+            lambda t: None if t.cancelled() else t.result()
+        )
         await self.sync()
         await self._init_subscribe_task()
-
 
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
         if len(self.workers) == 0 or not self.subscribe_task:
@@ -760,7 +789,12 @@ class RemoteModel:
         Returns:
             模型的版本号
         """
-        return ray.get(self.model.get_step.remote(self.name))
+        if isinstance(self.local_worker, ModelWorker):
+            return self.local_worker.get_model_step()
+        if not self.workers:
+            return ray.get(self.model.get_step.remote(self.name))
+        worker = self.workers[random.randint(0, len(self.workers))]
+        return ray.get(worker.get_model_step.remote())
 
     def get_model(self) -> torch.nn.Module:
         """

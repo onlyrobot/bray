@@ -129,7 +129,9 @@ class RemoteBuffer:
         self.subscribe_task = asyncio.create_task(
             RemoteBuffer.subscribe_workers(RemoteBuffer, self.buffer, self.workers)
         )
-        self.subscribe_task.add_done_callback(lambda t: t.result())
+        self.subscribe_task.add_done_callback(
+            lambda t: None if t.cancelled() else t.result()
+        )
         await self.sync()
         await self._init_subscribe_task()
 
