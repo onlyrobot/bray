@@ -149,8 +149,8 @@ class RemoteBuffer:
         await asyncio.gather(*tasks)
         self.worker_index += len(tasks)
 
-    def push(self, *replays: NestedArray) -> None:
-        asyncio.create_task(self._push(*replays))
+    def push(self, *replays: NestedArray) -> asyncio.Task:
+        return asyncio.create_task(self._push(*replays))
 
     async def sync(self):
         if not self.no_drop:

@@ -43,6 +43,17 @@ class TorchTensorBuffer:
         return self
 
 
+class CallbackBuffer:
+    def __init__(self, buffer: Iterator[NestedArray], callback):
+        self.buffer, self.callback = buffer, callback
+
+    def __next__(self) -> NestedArray:
+        return self.callback(next(self.buffer))
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        return self
+
+
 class TorchPrefetchBuffer:
     pass
 

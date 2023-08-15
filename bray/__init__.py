@@ -4,6 +4,7 @@ from bray.buffer.utils import (
     TorchTensorBuffer,
     TorchPrefetchBuffer,
     PrefetchBuffer,
+    CallbackBuffer,
 )
 from bray.model.model import (
     RemoteModel,
