@@ -60,11 +60,11 @@ class ActorGateway:
         actor = self.actors.get(game_id, None)
         if not actor:
             return
-        if time.time() - actor.__bray_active_time < 60:
+        if time.time() - actor.__bray_atime < 60:
             asyncio.create_task(self._check_active(game_id))
             return
-        self.actors.pop(game_id)
         self.inactive_actors.append(actor)
+        self.actors.pop(game_id)
         print(f"Actor with game_id={game_id} inactive.")
 
     async def start(self, game_id, data) -> bytes:
@@ -77,7 +77,7 @@ class ActorGateway:
             actor = self._create_worker()
         self.actors[game_id] = actor
         try:
-            actor.__bray_active_time = time.time()
+            actor.__bray_atime = time.time()
             start_ret = actor.start(game_id, data)
         except:
             self.actors.pop(game_id, None)
@@ -91,9 +91,9 @@ class ActorGateway:
         if not actor:
             raise Exception(f"Game {game_id} not started.")
         try:
-            actor.__bray_active_time = time.time()
+            actor.__bray_atime = time.time()
             tick_ret = await actor.tick(data)
-            merge_time_ms("tick", actor.__bray_active_time)
+            merge_time_ms("tick", actor.__bray_atime)
             return tick_ret
         except:
             self.actors.pop(game_id, None)
@@ -106,7 +106,7 @@ class ActorGateway:
         game_id = headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
-        
+
         if step_kind == "tick":
             return await self.tick(game_id, body)
         if step_kind == "start":
@@ -116,7 +116,7 @@ class ActorGateway:
         actor = self.actors.pop(game_id, None)
         if not actor:
             raise Exception(f"Game {game_id} not started.")
-        
+
         end_ret = actor.end(body)
         self.inactive_actors.append(actor)
         return end_ret
@@ -226,7 +226,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.bind(("0.0.0.0", port))
-    uvicorn.run(app, fd=sock.fileno(), log_level=logging.WARNING)
+    uvicorn.run(app, fd=sock.fileno(), timeout_keep_alive=60, log_level=logging.WARNING)
 
 
 class RemoteActor:

@@ -1,4 +1,4 @@
-from typing import Iterator
+from typing import Iterator, Callable
 import torch
 from threading import Thread, Condition
 
@@ -44,7 +44,11 @@ class TorchTensorBuffer:
 
 
 class CallbackBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], callback):
+    def __init__(
+        self,
+        buffer: Iterator[NestedArray],
+        callback: Callable[[NestedArray], NestedArray],
+    ):
         self.buffer, self.callback = buffer, callback
 
     def __next__(self) -> NestedArray:

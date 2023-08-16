@@ -28,7 +28,7 @@ config = {
 }
 actor_port = 8000
 
-remote_actor = bray.RemoteActor(port=actor_port, use_tcp=True)
+remote_actor = bray.RemoteActor(port=actor_port, use_tcp=False)
 remote_actor.serve(Actor=FakeActor, config=config)
 
 bray.run_until_asked_to_stop()

@@ -11,9 +11,10 @@ from bray.metric.metric import merge
 
 @ray.remote
 class BufferWorker:
-    def __init__(self, name: str, size: int):
+    def __init__(self, name: str, size: int, no_drop: bool = False):
         self.name, self.buffer = name, ray.get_actor(name)
         self.replays, self.size = [], size
+        self.no_drop = no_drop
         self_handle = ray.get_runtime_context().current_actor
         ray.get(self.buffer.register.remote(self_handle))
         self.pop_cond = asyncio.Condition()
@@ -25,10 +26,15 @@ class BufferWorker:
             desc={"time_window_sum": "push per minute"},
             buffer=self.name,
         )
+        while self.no_drop and len(self.replays) > self.size:
+            await asyncio.sleep(0.01)
+        before_size = len(self.replays)
         self.replays.extend(replays)
-        if len(self.replays) > self.size:
-            del self.replays[: -self.size]
+        if not self.no_drop and len(self.replays) > self.size:
             print(f"Buffer {self.name} is full")
+            del self.replays[: -self.size]
+        if before_size != 0:
+            return
         async with self.pop_cond:
             self.pop_cond.notify_all()
 
@@ -153,8 +159,8 @@ class RemoteBuffer:
         return asyncio.create_task(self._push(*replays))
 
     async def sync(self):
-        if not self.no_drop:
-            self.workers[:] = await self.buffer.get_workers.remote()
+        self.workers[:] = await self.buffer.get_workers.remote()
+        if not self.no_drop or len(self.workers) != 0:
             return
         self.workers[:] = await self.buffer.subscribe_workers.remote()
 
@@ -168,20 +174,31 @@ class RemoteBuffer:
             soft=False,
         )
         return BufferWorker.options(scheduling_strategy=scheduling_local).remote(
-            self.name, self.size
+            self.name, self.size, self.no_drop
         )
 
     def __next__(self) -> NestedArray:
         if not self.buffer_worker:
             self.buffer_worker = self._new_local_worker()
-            self.replays, self.last_size, self.next_replays = [], 0, None
-        size = len(self.replays)
+            self.replays = []
+            self.last_size, self.next_replays = 0, None
+            self.pop_index = -1
+        self.pop_index += 1
+        size = len(self.replays) - self.pop_index
         if not self.next_replays and size <= self.last_size // 2:
             self.next_replays = self.buffer_worker.pop.remote()
         if size == 0:
             self.replays = ray.get(self.next_replays)
             self.next_replays, self.last_size = None, len(self.replays)
-        return self.replays.pop()
+            self.pop_index = 0
+        return self.replays[self.pop_index]
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
+
+    def add_source(self, source: Iterator[NestedArray]) -> ray.ObjectRef:
+        async def generate():
+            for data in source:
+                await self.push(data)
+
+        return ray.remote(lambda: asyncio.run(generate())).remote()
