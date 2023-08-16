@@ -210,23 +210,28 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
     if use_tcp:
         return asyncio.run(serve_tcp_gateway())
 
+    from fastapi import FastAPI, HTTPException
+    import uvicorn, socket
     from starlette.requests import Request
     from starlette.responses import Response
+    from logging import WARN
 
     async def step(request: Request):
         headers, body = request.headers, await request.body()
-        return Response(content=await gateway(headers, body))
+        try:
+            data = await gateway(headers, body)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return Response(content=data)
 
-    import uvicorn, fastapi, logging, socket
-
-    app = fastapi.FastAPI()
+    app = FastAPI()
     app.add_api_route("/step", step, methods=["POST"])
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.bind(("0.0.0.0", port))
-    uvicorn.run(app, fd=sock.fileno(), timeout_keep_alive=60, log_level=logging.WARNING)
+    uvicorn.run(app, fd=sock.fileno(), timeout_keep_alive=60, log_level=WARN)
 
 
 class RemoteActor:
@@ -288,26 +293,23 @@ class RemoteActor:
             ).remote(self.port)
             for node_id in self.node_ids
         ]
-
         self.workers = [
-            [
-                ActorWorker.options(
-                    num_cpus=self.cpus_per_worker,
-                    memory=self.memory_per_worker * 1024 * 1024,
-                    scheduling_strategy=NodeAffinitySchedulingStrategy(
-                        node_id=node_id, soft=False
-                    ),
-                ).remote(
-                    self.port + (i + 1 if self.use_gateway else 0),
-                    Actor,
-                    args,
-                    kwargs,
-                    self.actors_per_worker,
-                    self.use_tcp,
-                    gateway,
-                )
-            ]
-            for i in range(self.num_workers)
+            ActorWorker.options(
+                num_cpus=self.cpus_per_worker,
+                memory=self.memory_per_worker * 1024 * 1024,
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=node_id, soft=False
+                ),
+            ).remote(
+                self.port + (i + 1 if self.use_gateway else 0),
+                Actor,
+                args,
+                kwargs,
+                self.actors_per_worker,
+                self.use_tcp,
+                gateway,
+            )
             for node_id, gateway in zip(self.node_ids, self.gateways)
+            for i in range(self.num_workers)
         ]
         print("ActorGateway started.")

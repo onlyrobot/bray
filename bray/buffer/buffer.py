@@ -130,7 +130,7 @@ class RemoteBuffer:
         if len(self.workers) != 0 and self.subscribe_task:
             return
         if self.subscribe_task:
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             assert self.workers, f"No buffer worker for {self.name}"
         self.subscribe_task = asyncio.create_task(
             RemoteBuffer.subscribe_workers(RemoteBuffer, self.buffer, self.workers)
