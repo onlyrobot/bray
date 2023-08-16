@@ -12,22 +12,23 @@ from bray.metric.metric import merge
 
 
 class BatchBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], batch_size):
+    def __init__(self, buffer: Iterator[NestedArray], batch_size, concate=False):
         self.buffer = buffer
         self.batch_size = batch_size
+        self.concate = concate
 
     def __next__(self) -> NestedArray:
         batch = []
         for _ in range(self.batch_size):
             batch.append(next(self.buffer))
-        return make_batch(batch)
+        return make_batch(batch, self.concate)
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
 
 
 class TorchTensorBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], device: None):
+    def __init__(self, buffer: Iterator[NestedArray], device=None):
         self.buffer, self.device = buffer, device
 
     def handle(self, array):
@@ -56,10 +57,6 @@ class CallbackBuffer:
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
-
-
-class TorchPrefetchBuffer:
-    pass
 
 
 class PrefetchBuffer:

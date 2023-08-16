@@ -82,8 +82,8 @@ class ActorGateway:
         except:
             self.actors.pop(game_id, None)
             raise
-        asyncio.create_task(self._check_active(game_id))
         self.num_games += 1
+        asyncio.create_task(self._check_active(game_id))
         return start_ret
 
     async def tick(self, game_id, data) -> bytes:

@@ -1,4 +1,4 @@
-from typing import NewType
+from typing import NewType, Callable
 import numpy as np
 
 # 可以是单个 numpy.ndarray，也可以是 numpy.ndarray 的列表，
@@ -6,7 +6,7 @@ import numpy as np
 NestedArray = NewType("NestedArray", any)
 
 
-def handle_nested_array(inputs, handler: callable, type_check=False, sort_keys=False):
+def handle_nested_array(inputs, handler: Callable, type_check=False, sort_keys=False):
     if isinstance(inputs, np.ndarray):
         return handler(inputs)
     elif isinstance(inputs, list):
@@ -68,13 +68,12 @@ def unflatten_nested_array(
     return handle_nested_array(inputs, unflatten)
 
 
-def make_batch(nested_arrays: list[NestedArray]) -> NestedArray:
-    if len(nested_arrays) == 0:
-        return []
+def make_batch(nested_arrays: list[NestedArray], concate=False) -> NestedArray:
     flatten_arrays = [flatten_nested_array(arrays) for arrays in nested_arrays]
     arrays = zip(*flatten_arrays)
     try:
-        batch_arrays = [np.stack(a) for a in arrays]
+        batch = np.concatenate if concate else np.stack
+        batch_arrays = [batch(a) for a in arrays]
     except ValueError:
         print("Error: the arrays have different shapes or dtypes.")
         print("Batch signatures: ")
@@ -83,7 +82,9 @@ def make_batch(nested_arrays: list[NestedArray]) -> NestedArray:
         ):
             print(signature)
         raise
-    return unflatten_nested_array(nested_arrays[0], batch_arrays)
+    return unflatten_nested_array(
+        nested_arrays[0] if nested_arrays else [], batch_arrays
+    )
 
 
 def split_batch(batch: NestedArray) -> list[NestedArray]:
@@ -106,12 +107,12 @@ if __name__ == "__main__":
     # test make_batch
     nested_arrays = [
         [
-            np.array([1, 2, 3]),
+            np.array([[1, 2, 3]]),
             np.array([4, 5, 6]),
             {"a": np.array([7, 8, 9]), "b": np.array([10, 11, 12])},
         ],
         [
-            np.array([1, 2, 3]),
+            np.array([[1, 2, 3]]),
             np.array([4, 5, 6]),
             {"a": np.array([7, 8, 9]), "b": np.array([10, 11, 12])},
         ],
@@ -120,4 +121,8 @@ if __name__ == "__main__":
     assert np.allclose(batch[0], np.vstack([nested_arrays[0][0], nested_arrays[1][0]]))
     split_array = split_batch(batch)
     np.testing.assert_array_equal(split_array[0][0], nested_arrays[0][0])
+    batch2 = make_batch(nested_arrays, concate=True)
+    split_array2 = split_batch(batch2)
+    np.testing.assert_array_equal(split_array2[0][0], nested_arrays[0][0][0])
+    np.testing.assert_array_equal(split_array2[0][1], nested_arrays[0][1][0])
     print("test make_batch passed")
