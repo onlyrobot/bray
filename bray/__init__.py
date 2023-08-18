@@ -2,7 +2,6 @@ from bray.buffer.buffer import RemoteBuffer
 from bray.buffer.utils import (
     BatchBuffer,
     TorchTensorBuffer,
-    TorchPrefetchBuffer,
     PrefetchBuffer,
     CallbackBuffer,
 )

@@ -11,26 +11,25 @@ from bray.metric.metric import merge
 
 @ray.remote
 class BufferWorker:
-    def __init__(self, name: str, size: int, no_drop: bool = False):
+    def __init__(self, name: str, size: int):
         self.name, self.buffer = name, ray.get_actor(name)
         self.replays, self.size = [], size
-        self.no_drop = no_drop
         self_handle = ray.get_runtime_context().current_actor
         ray.get(self.buffer.register.remote(self_handle))
         self.pop_cond = asyncio.Condition()
 
-    async def push(self, *replays: NestedArray):
+    async def push(self, drop=True, *replays: NestedArray):
+        while not drop and len(self.replays) > self.size:
+            await asyncio.sleep(0.01)
+        before_size = len(self.replays)
+        self.replays.extend(replays)
         merge(
             "push",
             len(replays),
             desc={"time_window_sum": "push per minute"},
             buffer=self.name,
         )
-        while self.no_drop and len(self.replays) > self.size:
-            await asyncio.sleep(0.01)
-        before_size = len(self.replays)
-        self.replays.extend(replays)
-        if not self.no_drop and len(self.replays) > self.size:
+        if drop and len(self.replays) > self.size:
             print(f"Buffer {self.name} is full")
             del self.replays[: -self.size]
         if before_size != 0:
@@ -97,9 +96,8 @@ class Buffer:
 
 
 class RemoteBuffer:
-    def __init__(self, name: str, size: int = 256, no_drop: bool = False):
+    def __init__(self, name: str, size: int = 256):
         self.name, self.size = name, size
-        self.no_drop = no_drop
         self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
         self.workers = ray.get(self.buffer.get_workers.remote())
         self.worker_index = 0
@@ -114,21 +112,13 @@ class RemoteBuffer:
         while True:
             workers[:] = await buffer.subscribe_workers.remote()
 
-    async def __push(self, worker, replays):
-        async def push():
-            try:
-                await worker.push.remote(*replays)
-            except ray.exceptions.RayActorError:
-                await self.sync()
-                await self.push(*replays)
-
-        if self.no_drop:
-            return await push()
-        asyncio.create_task(push())
-
-    async def _init_subscribe_task(self):
+    async def _init_subscribe_task(self, drop=True):
         if len(self.workers) != 0 and self.subscribe_task:
             return
+        while not drop and len(self.workers) == 0:
+            await self.sync()
+            await asyncio.sleep(0.01)
+
         if self.subscribe_task:
             await asyncio.sleep(5)
             assert self.workers, f"No buffer worker for {self.name}"
@@ -141,28 +131,28 @@ class RemoteBuffer:
         await self.sync()
         await self._init_subscribe_task()
 
-    async def _push(self, *replays: NestedArray) -> None:
+    async def _push(self, drop: bool, *replays: NestedArray) -> None:
         if len(self.workers) == 0 or not self.subscribe_task:
-            await self._init_subscribe_task()
-        step = max(len(replays) // len(self.workers), 1)
+            await self._init_subscribe_task(drop)
+        workers_num = len(self.workers)
+        step = max(len(replays) // workers_num, 1)
         tasks = [
-            self.__push(
-                self.workers[(self.worker_index + i) % len(self.workers)],
-                replays[i : i + step],
+            self.workers[(self.worker_index + i) % workers_num].push.remote(
+                drop, *replays[i : i + step]
             )
             for i in range(0, len(replays), step)
         ]
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        except ray.exceptions.RayActorError:
+            await self.sync()
         self.worker_index += len(tasks)
 
     def push(self, *replays: NestedArray) -> asyncio.Task:
-        return asyncio.create_task(self._push(*replays))
+        return asyncio.create_task(self._push(True, *replays))
 
     async def sync(self):
         self.workers[:] = await self.buffer.get_workers.remote()
-        if not self.no_drop or len(self.workers) != 0:
-            return
-        self.workers[:] = await self.buffer.subscribe_workers.remote()
 
     def _new_local_worker(self) -> BufferWorker:
         """
@@ -174,31 +164,39 @@ class RemoteBuffer:
             soft=False,
         )
         return BufferWorker.options(scheduling_strategy=scheduling_local).remote(
-            self.name, self.size, self.no_drop
+            self.name, self.size
         )
 
     def __next__(self) -> NestedArray:
         if not self.buffer_worker:
             self.buffer_worker = self._new_local_worker()
             self.replays = []
-            self.last_size, self.next_replays = 0, None
             self.pop_index = -1
+            self.last_size, self.next_replays = 0, None
         self.pop_index += 1
         size = len(self.replays) - self.pop_index
+
+        # prefetch from buffer worker
         if not self.next_replays and size <= self.last_size // 2:
             self.next_replays = self.buffer_worker.pop.remote()
+
         if size == 0:
             self.replays = ray.get(self.next_replays)
-            self.next_replays, self.last_size = None, len(self.replays)
             self.pop_index = 0
+            self.next_replays = None
+            self.last_size = len(self.replays)
+
         return self.replays[self.pop_index]
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
 
-    def add_source(self, source: Iterator[NestedArray]) -> ray.ObjectRef:
-        async def generate():
-            for data in source:
-                await self.push(data)
+    async def _generate(self, source: Iterator[NestedArray]):
+        for data in source:
+            await self._push(False, data)
 
-        return ray.remote(lambda: asyncio.run(generate())).remote()
+    def add_source(self, source: Iterator[NestedArray]) -> ray.ObjectRef:
+        def generate():
+            asyncio.run(self._generate(source))
+
+        return ray.remote(generate).options(num_cpus=1).remote()

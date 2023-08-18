@@ -12,16 +12,31 @@ from bray.metric.metric import merge
 
 
 class BatchBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], batch_size, concate=False):
+    def __init__(
+        self,
+        buffer: Iterator[NestedArray],
+        batch_size,
+        kind: ["stack", "concate", None] = "stack",
+    ):
+        """
+        Args:
+            buffer: 迭代器，样本的shape和dtype要求参考kind参数
+            batch_size: batch大小
+            kind: batch的拼接方式，可选：
+                1. "stack": 表示堆叠，要求每个样本的shape和dtype相同
+                2. "concate": 表示拼接，样本除了第一维度外，其他维度必须相同
+                3. None: 表示直接返回样本的list
+        """
         self.buffer = buffer
-        self.batch_size = batch_size
-        self.concate = concate
+        self.batch_size, self.kind = batch_size, kind
 
     def __next__(self) -> NestedArray:
         batch = []
         for _ in range(self.batch_size):
             batch.append(next(self.buffer))
-        return make_batch(batch, self.concate)
+        if self.kind is None:
+            return batch
+        return make_batch(batch, concate=self.kind != "stack")
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
@@ -60,9 +75,7 @@ class CallbackBuffer:
 
 
 class PrefetchBuffer:
-    def __init__(
-        self, buffer: Iterator[NestedArray], max_reuse: int = 0, name: str = "default"
-    ):
+    def __init__(self, buffer: Iterator[NestedArray], max_reuse=0, name="default"):
         """
         Args:
             buffer: 迭代器
