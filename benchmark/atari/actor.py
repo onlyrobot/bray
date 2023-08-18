@@ -2,6 +2,7 @@ import numpy as np
 import bray
 import json
 from bray import NestedArray
+import base64
 
 
 def gae(trajectory: list[NestedArray]) -> None:
@@ -32,7 +33,8 @@ class AtariActor(bray.Actor):
 
     async def tick(self, data: bytes) -> bytes:
         data = json.loads(data)
-        obs = np.array(data["obs"], dtype=np.float32)
+        obs = base64.b64decode(data["obs"])
+        obs = np.frombuffer(obs, dtype=np.float32).reshape(42, 42, 4)
         reward = data["reward"]
         self.episode_reward += reward
         value, logit, action = await self.remote_model.forward(obs)

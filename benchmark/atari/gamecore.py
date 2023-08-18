@@ -5,6 +5,7 @@ import json
 from threading import Thread
 from .atari_wrappers import wrap_deepmind
 import time
+import base64
 
 actor_url = "http://localhost:8000/step"
 gym_id = "BeamRiderNoFrameskip-v4"
@@ -38,7 +39,8 @@ def rollout(gym_id: str, game_id: str):
     done, reward = False, 0.0
     obs = env.reset()
     while not done:
-        data = {"obs": obs.tolist(), "reward": reward}
+        obs = base64.b64encode(obs.tobytes()).decode('utf-8')
+        data = {"obs": obs, "reward": reward}
         res = actor_step(sess, game_id, "tick", json.dumps(data))
         cmd = json.loads(res)
         cmd = int(cmd["action"])
