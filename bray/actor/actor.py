@@ -221,6 +221,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
         try:
             data = await gateway(headers, body)
         except Exception as e:
+            print(e)
             raise HTTPException(status_code=400, detail=str(e))
         return Response(content=data)
 
