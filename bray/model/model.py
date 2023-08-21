@@ -329,7 +329,6 @@ class Model:
             print(f"Using onnx model for {name} {meta.use_onnx}.")
         else:
             onnx_model, forward_outputs = None, None
-
         if name != self.name:
             return
         self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
@@ -527,10 +526,10 @@ class Model:
         asyncio.create_task(self._health_check())
 
     def _load_checkpoint(self, name, step):
-        ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
         if step == 0:
             weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
         else:
+            ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
             weights_path = os.path.join(ckpt_dir, f"step-{step}.pt")
         return handle_nested_array(
             torch.load(weights_path), lambda x: x.numpy(), type_check=False
