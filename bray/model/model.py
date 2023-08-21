@@ -176,20 +176,30 @@ class ModelWorker:
             )
         except Exception as e:
             print(f"Fail to subscribe weights from {self.name}.", e)
+            return
         if step <= self.current_step:
             print(f"Skip weights from {self.name}.")
             return
         self.current_step = step
+        try:
+            weights = await weights
+        except Exception as e:
+            print(f"Fail to get weights from {self.name}.", e)
+            return
         if not self.use_onnx:
-            set_torch_model_weights(self.torch_model, await weights)
+            set_torch_model_weights(self.torch_model, weights)
         elif self.use_onnx == "train":
-            self.weights = [v for v in (await weights).values()]
+            self.weights = [v for v in weights.values()]
         else:
             print("Set onnx weights only in train mode.")
 
     async def _subscribe_weights(self):
         while True:
-            await self.__subscribe_weights()
+            try:
+                await self.__subscribe_weights()
+            except Exception as e:
+                print(f"Fail to subscribe weights from {self.name}.", e)
+                pass
 
     def get_model_step(self) -> int:
         """Get the current step of the model from worker to reduce Model overhead."""
