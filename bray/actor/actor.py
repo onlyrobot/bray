@@ -25,6 +25,7 @@ class ActorGateway:
             Actor(*args, **kwargs) for _ in range(actors_per_worker)
         ]
         self.is_initialized = False
+        self.active_check_interval = 60
 
     def _initialize(self):
         if self.is_initialized:
@@ -56,11 +57,12 @@ class ActorGateway:
         return self.Actor(*self.args, **self.kwargs)
 
     async def _check_active(self, game_id):
-        await asyncio.sleep(60)
+        await asyncio.sleep(self.active_check_interval)
         actor = self.actors.get(game_id, None)
         if not actor:
             return
-        if time.time() - actor.__bray_atime < 60:
+        interval = time.time() - actor.__bray_atime
+        if interval < self.active_check_interval:
             asyncio.create_task(self._check_active(game_id))
             return
         self.inactive_actors.append(actor)
@@ -232,7 +234,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.bind(("0.0.0.0", port))
-    uvicorn.run(app, fd=sock.fileno(), timeout_keep_alive=60, log_level=WARN)
+    uvicorn.run(app, fd=sock.fileno(), timeout_keep_alive=60 * 5, log_level=WARN)
 
 
 class RemoteActor:
