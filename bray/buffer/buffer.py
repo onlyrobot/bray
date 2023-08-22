@@ -19,6 +19,8 @@ class BufferWorker:
         self.pop_cond = asyncio.Condition()
 
     async def push(self, drop=True, *replays: NestedArray):
+        if not replays:
+            return
         while not drop and len(self.replays) > self.size:
             await asyncio.sleep(0.01)
         before_size = len(self.replays)
@@ -54,8 +56,8 @@ class BufferWorker:
 @ray.remote
 class Buffer:
     async def __init__(self):
-        self.workers = []
         self.worker_cond = asyncio.Condition()
+        self.workers = []
         asyncio.create_task(self._health_check())
 
     async def register(self, worker: BufferWorker):
@@ -100,7 +102,7 @@ class RemoteBuffer:
         self.name, self.size = name, size
         self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
         self.workers = ray.get(self.buffer.get_workers.remote())
-        self.worker_index = 0
+        self.worker_index = random.randint(0, 100)
         self.buffer_worker = None
         self.subscribe_task = None
 
@@ -112,7 +114,7 @@ class RemoteBuffer:
         while True:
             workers[:] = await buffer.subscribe_workers.remote()
 
-    async def _init_subscribe_task(self, drop=True):
+    async def _init_subscribe_task(self, drop):
         if len(self.workers) != 0 and self.subscribe_task:
             return
         while not drop and len(self.workers) == 0:
@@ -129,7 +131,7 @@ class RemoteBuffer:
             lambda t: None if t.cancelled() else t.result()
         )
         await self.sync()
-        await self._init_subscribe_task()
+        await self._init_subscribe_task(drop)
 
     async def _push(self, drop: bool, *replays: NestedArray) -> None:
         if len(self.workers) == 0 or not self.subscribe_task:
@@ -195,8 +197,7 @@ class RemoteBuffer:
         for data in source:
             await self._push(False, data)
 
-    def add_source(self, source: Iterator[NestedArray]) -> ray.ObjectRef:
-        def generate():
-            asyncio.run(self._generate(source))
-
-        return ray.remote(generate).options(num_cpus=1).remote()
+    def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
+        generate = lambda source: asyncio.run(self._generate(source))
+        generate = ray.remote(generate).options(num_cpus=0)
+        return [generate.remote(source) for source in sources]

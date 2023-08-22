@@ -31,8 +31,12 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
 class ModelWorker:
     ort_session_and_forward_outputs: dict[str, tuple] = {}
 
-    def __init__(self, name: str, loop: asyncio.AbstractEventLoop = None):
-        self.name, self.model = name, ray.get_actor(name.split("/")[0])
+    def __init__(
+        self, name: str, model: "Model" = None, loop: asyncio.AbstractEventLoop = None
+    ):
+        self.name, self.model = name, model if model else ray.get_actor(
+            name.split("/")[0]
+        )
         self.current_step = ray.get(self.model.get_step.remote(name))
 
         self.max_batch_size = ray.get(self.model.get_max_batch_size.remote(name))
@@ -648,7 +652,10 @@ class RemoteModel:
         self.subscribe_task = None
         self.local = local_mode
         self.local_worker = None
-        self.model = Model.options(
+        model_ = None
+        if m := cls.remote_models.get(base_name, None):
+            model_ = m.model
+        self.model = model_ or Model.options(
             name=base_name, get_if_exists=True, scheduling_strategy=scheduling_local
         ).remote(
             base_name,
@@ -716,7 +723,7 @@ class RemoteModel:
 
         async def build_local_worker():
             self.local_worker = await loop.run_in_executor(
-                None, ModelWorker, self.name, loop
+                None, ModelWorker, self.name, self.model, loop
             )
 
         if self.local_worker is None:
@@ -835,6 +842,7 @@ class RemoteModel:
         Returns:
             克隆的RemoteModel
         """
+        RemoteModel.remote_models[self.name] = self
         local_mode = local_mode if local_mode is not None else self.local
         cloned_name = ray.get(
             self.model.clone.remote(
