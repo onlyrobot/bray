@@ -424,21 +424,26 @@ class Model:
         )
         num_workers = num_workers if num_workers != -1 else meta.num_workers
 
+        def initialize_model_if_needed(loop):
+            if cloned_name in self.models:
+                return
+            self._initialize_model(
+                cloned_name,
+                weights,
+                max_batch_size,
+                num_workers,
+                use_onnx,
+            )
+            for _ in range(
+                len([node for node in ray.nodes() if node["Alive"]])
+                if num_workers is None
+                else num_workers
+            ):
+                loop.create_task(self._create_worker(cloned_name))
+
         await asyncio.get_running_loop().run_in_executor(
-            None,
-            self._initialize_model,
-            cloned_name,
-            weights,
-            max_batch_size,
-            num_workers,
-            use_onnx,
+            None, initialize_model_if_needed, asyncio.get_running_loop()
         )
-        for _ in range(
-            len([node for node in ray.nodes() if node["Alive"]])
-            if num_workers is None
-            else num_workers
-        ):
-            asyncio.create_task(self._create_worker(cloned_name))
         return cloned_name
 
     async def subscribe_weights(self, name, current_step):

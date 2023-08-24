@@ -32,7 +32,7 @@ class BufferWorker:
             buffer=self.name,
         )
         if drop and len(self.replays) > self.size:
-            print(f"Buffer {self.name} is full")
+            # print(f"Buffer {self.name} is full")
             del self.replays[: -self.size]
         if before_size != 0:
             return
@@ -122,7 +122,7 @@ class RemoteBuffer:
             await asyncio.sleep(0.01)
 
         if self.subscribe_task:
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
             assert self.workers, f"No buffer worker for {self.name}"
         self.subscribe_task = asyncio.create_task(
             RemoteBuffer.subscribe_workers(RemoteBuffer, self.buffer, self.workers)

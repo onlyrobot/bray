@@ -1,6 +1,7 @@
 import ray
 import time
 import asyncio
+import traceback
 from asyncio import StreamReader, StreamWriter
 import struct
 from bray.actor.base import Actor
@@ -137,8 +138,8 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         global ACTOR_GATEWAY
         try:
             data = await ACTOR_GATEWAY(headers, body)
-        except Exception as e:
-            print(e)
+        except:
+            print(traceback.print_exc())
             writer.close()
             await writer.wait_closed()
             return
@@ -149,8 +150,8 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             header = struct.pack("!3q", game_id_size, body_size, time)
             writer.write(header + headers["game_id"] + data)
             await writer.drain()
-        except Exception as e:
-            print(e)
+        except:
+            print(traceback.print_exc())
             writer.close()
             await writer.wait_closed()
 
@@ -173,8 +174,8 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             writer.close()
             await writer.wait_closed()
             return
-        except Exception as e:
-            print(e)
+        except:
+            print(traceback.print_exc())
             writer.close()
             await writer.wait_closed()
             return
@@ -223,7 +224,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
         try:
             data = await gateway(headers, body)
         except Exception as e:
-            print(e)
+            print(traceback.print_exc())
             raise HTTPException(status_code=400, detail=str(e))
         return Response(content=data)
 

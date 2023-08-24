@@ -2,7 +2,6 @@ import numpy as np
 import bray
 import json
 from bray import NestedArray
-import base64
 
 
 def gae(trajectory: list[NestedArray], bootstrap_value):
@@ -17,36 +16,46 @@ def gae(trajectory: list[NestedArray], bootstrap_value):
     trajectory.pop(-1)  # drop the fake
 
 
-class AtariActor(bray.Actor):
+class GridShootingActor(bray.Actor):
     def __init__(
-        self, remote_model: bray.RemoteModel, remote_buffer: bray.RemoteBuffer = None
+        self,
+        remote_model: bray.RemoteModel,
+        remote_buffer: bray.RemoteBuffer = None,
+        target_step_interval=1000,
     ):
         self.remote_model = remote_model
         self.remote_buffer = remote_buffer
+        self.target_step_interval = target_step_interval
 
     def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
         self.trajectory = []
         self.episode_reward = 0.0
+        self.target_model = self.remote_model.clone(
+            self.remote_model.step
+            // self.target_step_interval
+            * self.target_step_interval
+        )
         bray.logger.info(f"Actor.start: {game_id}")
         return b"Game started."
 
     async def tick(self, data: bytes) -> bytes:
         data = json.loads(data)
-        obs = base64.b64decode(data["obs"])
-        obs = np.frombuffer(obs, dtype=np.float32).reshape(42, 42, 4)
-        reward = data["reward"]
-        self.episode_reward += reward
-        value, logit, action = await self.remote_model.forward(obs)
-        self._append_to_trajectory(obs, action, reward, value, logit)
-        return json.dumps({"action": action.tolist()}).encode()
+        state_0, state_1 = np.array(data["obs"], dtype=np.float32)
+        reward_0, _ = data["rewards"]
+        self.episode_reward += reward_0
+        value, logit, action = await self.remote_model.forward(state_0)
+        self._append_to_trajectory(state_0, action, reward_0, value, logit)
+        _, _, action_1 = await self.target_model.forward(state_1)
+        return json.dumps({"action": [int(action), int(action_1)]}).encode()
 
     def end(self, data: bytes) -> bytes:
         data = json.loads(data)
-        reward = data["reward"]
-        self.episode_reward += reward
+        reward_0, _ = data["rewards"]
+        self.episode_reward += reward_0
         bray.merge("episode_reward", self.episode_reward)
-        self._append_to_trajectory(None, None, reward, None, None, end=True)
+        bray.merge("episode_reward", self.episode_reward, target=self.target_model.name)
+        self._append_to_trajectory(None, None, reward_0, None, None, end=True)
         bray.logger.info(f"Actor.end: {self.game_id}")
         return b"Game ended."
 
@@ -62,7 +71,7 @@ class AtariActor(bray.Actor):
         if not self.remote_buffer:
             return
         # clip reward
-        reward = np.array(np.sign(reward), dtype=np.float32)
+        reward = np.array(reward, dtype=np.float32).clip(-100, 100)
         if len(self.trajectory) > 0:
             self.trajectory[-1]["reward"] = reward
         if end or len(self.trajectory) > 128:
