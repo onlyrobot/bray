@@ -2,6 +2,7 @@ import numpy as np
 import bray
 import json
 from bray import NestedArray
+import random
 
 
 def gae(trajectory: list[NestedArray], bootstrap_value):
@@ -26,16 +27,23 @@ class GridShootingActor(bray.Actor):
         self.remote_model = remote_model
         self.remote_buffer = remote_buffer
         self.target_step_interval = target_step_interval
+        self.target_model = None
+        self.target_model_reuse = 0
 
     def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
         self.trajectory = []
         self.episode_reward = 0.0
-        self.target_model = self.remote_model.clone(
-            self.remote_model.step
-            // self.target_step_interval
-            * self.target_step_interval
-        )
+        if not self.target_model or self.target_model_reuse > 100:
+            target_step = (
+                random.randint(0, self.remote_model.step)
+                // self.target_step_interval
+                * self.target_step_interval
+            )
+            self.target_model = self.remote_model.clone(target_step)
+            self.target_model_reuse = 0
+        else:
+            self.target_model_reuse += 1
         bray.logger.info(f"Actor.start: {game_id}")
         return b"Game started."
 
@@ -44,9 +52,24 @@ class GridShootingActor(bray.Actor):
         state_0, state_1 = np.array(data["obs"], dtype=np.float32)
         reward_0, _ = data["rewards"]
         self.episode_reward += reward_0
-        value, logit, action = await self.remote_model.forward(state_0)
-        self._append_to_trajectory(state_0, action, reward_0, value, logit)
-        _, _, action_1 = await self.target_model.forward(state_1)
+        extra_info_0, extra_info_1 = data["extra_info"]
+
+        def build_action_mask(legal_actions):
+            if not legal_actions:
+                return np.ones(9, dtype=np.float32)
+            action_mask = np.zeros(9, dtype=np.float32)
+            for action in legal_actions:
+                action_mask[int(action)] = 1.0
+            return action_mask
+
+        action_mask_0 = build_action_mask(extra_info_0["legal_actions"])
+        obs = {"obs": state_0, "action_mask": action_mask_0}
+        value, logit, action = await self.remote_model.forward(obs)
+        self._append_to_trajectory(obs, action, reward_0, value, logit)
+        action_mask_1 = build_action_mask(extra_info_1["legal_actions"])
+        _, _, action_1 = await self.target_model.forward(
+            {"obs": state_1, "action_mask": action_mask_1}
+        )
         return json.dumps({"action": [int(action), int(action_1)]}).encode()
 
     def end(self, data: bytes) -> bytes:

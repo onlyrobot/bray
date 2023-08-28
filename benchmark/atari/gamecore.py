@@ -31,9 +31,8 @@ def make_env(gym_id: str):
     return env
 
 
-def rollout(gym_id: str, game_id: str):
+def rollout(env, game_id: str):
     sess = requests.Session()
-    env = make_env(gym_id)
     game_start_res = actor_step(sess, game_id, "start", b"")
     print(game_start_res)
     done, reward = False, 0.0
@@ -52,10 +51,11 @@ def rollout(gym_id: str, game_id: str):
 
 
 def endless_rollout(gym_id: str, game_id: str):
+    env = make_env(gym_id)
     while True:
         # rollout(gym_id, game_id)
         try:
-            rollout(gym_id, game_id)
+            rollout(env, game_id)
         except Exception as e:
             print(e)
         time.sleep(5)

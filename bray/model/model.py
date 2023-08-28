@@ -424,7 +424,9 @@ class Model:
         )
         num_workers = num_workers if num_workers != -1 else meta.num_workers
 
-        def initialize_model_if_needed(loop):
+        loop = asyncio.get_running_loop()
+
+        def initialize_model_if_needed():
             if cloned_name in self.models:
                 return
             self._initialize_model(
@@ -441,9 +443,7 @@ class Model:
             ):
                 loop.create_task(self._create_worker(cloned_name))
 
-        await asyncio.get_running_loop().run_in_executor(
-            None, initialize_model_if_needed, asyncio.get_running_loop()
-        )
+        await loop.run_in_executor(None, initialize_model_if_needed)
         return cloned_name
 
     async def subscribe_weights(self, name, current_step):
@@ -551,7 +551,7 @@ class Model:
             ckpt_dir,
             f"step-{meta.step}.pt",
         )
-        asyncio.get_running_loop().run_in_executor(
+        await asyncio.get_running_loop().run_in_executor(
             None,
             torch.save,
             handle_nested_array(await meta.weights, torch.from_numpy),

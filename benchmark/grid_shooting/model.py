@@ -17,13 +17,15 @@ class GridShootingModel(torch.nn.Module):
             out_features=action_space,
         )
 
-    def forward(self, obs):
+    def forward(self, state):
+        obs, action_mask = state["obs"], state["action_mask"]
         logits = self.base_net(obs)
         values = torch.squeeze(
             self.values_net(logits),
             dim=1,
         )
         logits = self.logits_net(logits)
+        logits = logits - (1 - action_mask) * 1e5
         actions = torch.multinomial(
             torch.exp(logits),
             num_samples=1,

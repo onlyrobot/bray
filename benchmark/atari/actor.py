@@ -62,7 +62,7 @@ class AtariActor(bray.Actor):
         if not self.remote_buffer:
             return
         # clip reward
-        reward = np.array(np.sign(reward), dtype=np.float32)
+        reward = np.array(0.1 * reward, dtype=np.float32)
         if len(self.trajectory) > 0:
             self.trajectory[-1]["reward"] = reward
         if end or len(self.trajectory) > 128:

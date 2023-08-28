@@ -93,14 +93,14 @@ class ActorGateway:
         actor = self.actors.get(game_id, None)
         if not actor:
             raise Exception(f"Game {game_id} not started.")
+        actor.__bray_atime = time.time()
         try:
-            actor.__bray_atime = time.time()
             tick_ret = await actor.tick(data)
-            merge_time_ms("tick", actor.__bray_atime)
-            return tick_ret
         except:
             self.actors.pop(game_id, None)
             raise
+        merge_time_ms("tick", actor.__bray_atime)
+        return tick_ret
 
     async def __call__(self, headers: dict, body: bytes) -> bytes:
         if not self.is_initialized:
@@ -112,10 +112,13 @@ class ActorGateway:
 
         if step_kind == "tick":
             return await self.tick(game_id, body)
+
         if step_kind == "start":
             return await self.start(game_id, body)
+
         if step_kind != "end":
             raise Exception("Unknown step_kind:", step_kind)
+
         actor = self.actors.pop(game_id, None)
         if not actor:
             raise Exception(f"Game {game_id} not started.")
@@ -139,7 +142,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         try:
             data = await ACTOR_GATEWAY(headers, body)
         except:
-            print(traceback.print_exc())
+            traceback.print_exc()
             writer.close()
             await writer.wait_closed()
             return
@@ -151,7 +154,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             writer.write(header + headers["game_id"] + data)
             await writer.drain()
         except:
-            print(traceback.print_exc())
+            traceback.print_exc()
             writer.close()
             await writer.wait_closed()
 
@@ -175,7 +178,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             await writer.wait_closed()
             return
         except:
-            print(traceback.print_exc())
+            traceback.print_exc()
             writer.close()
             await writer.wait_closed()
             return
@@ -207,8 +210,12 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
         async with server:
             await server.serve_forever()
 
-    gateway = ActorGateway(Actor, args, kwargs, actors_per_worker)
-    set_actor_gateway(gateway)
+    try:
+        gateway = ActorGateway(Actor, args, kwargs, actors_per_worker)
+        set_actor_gateway(gateway)
+    except:
+        traceback.print_exc()
+        raise
 
     if use_tcp:
         return asyncio.run(serve_tcp_gateway())
@@ -224,7 +231,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
         try:
             data = await gateway(headers, body)
         except Exception as e:
-            print(traceback.print_exc())
+            traceback.print_exc()
             raise HTTPException(status_code=400, detail=str(e))
         return Response(content=data)
 

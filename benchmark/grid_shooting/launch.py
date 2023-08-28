@@ -7,10 +7,16 @@ from .trainer import train_grid_shooting
 
 bray.init(project="./grid-shooting", trial="ppo-v0")
 
+input_dict = {
+    "obs": np.random.randn(56).astype(np.float32),
+    "action_mask": np.ones(9).astype(np.float32),
+}
+
 remote_model = bray.RemoteModel(
     name="grid_shooting_model",
     model=GridShootingModel(),
-    forward_args=(np.random.randn(56).astype(np.float32),),
+    forward_args=(input_dict,),
+    checkpoint_interval=1000,
     num_workers=0,
     local_mode=True,
     use_onnx="train",

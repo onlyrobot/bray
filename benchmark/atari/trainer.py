@@ -4,26 +4,6 @@ import horovod.torch as hvd
 import time
 
 
-def cal_kl(lhs_logits, rhs_logits):
-    lhs_a = lhs_logits - torch.max(lhs_logits, dim=-1, keepdim=True).values
-    rhs_a = rhs_logits - torch.max(rhs_logits, dim=-1, keepdim=True).values
-    lhs_ea = torch.exp(lhs_a)
-    rhs_ea = torch.exp(rhs_a)
-    lhs_z = torch.sum(lhs_ea, dim=-1, keepdim=True)
-    rhs_z = torch.sum(rhs_ea, dim=-1, keepdim=True)
-    lhs_p = lhs_ea / lhs_z
-    kl = lhs_p * (lhs_a - torch.log(lhs_z) - rhs_a + torch.log(rhs_z))
-    return torch.sum(kl, dim=-1, keepdim=False)
-
-
-def cal_entroy(logits):
-    a = logits - torch.max(logits, axis=-1, keepdim=True).values
-    ea = torch.exp(a)
-    z = torch.sum(ea, dim=-1, keepdim=True)
-    p = ea / z
-    return torch.sum(p * (torch.log(z) - a), axis=-1, keepdim=False)
-
-
 def train_step(
     remote_model,
     replay,
@@ -73,11 +53,12 @@ def train_step(
     value_loss = torch.max(value_loss1, value_loss2)
     value_loss = 0.5 * torch.mean(value_loss, dim=0, keepdim=False)
 
-    entropy_loss = torch.mean(cal_entroy(t_logit), dim=0, keepdim=False)
+    exp_logit = torch.exp(t_logit)
+    prob = exp_logit / torch.sum(exp_logit, dim=-1, keepdim=True)
+    entropy_loss = -torch.sum(torch.log(prob + 1e-6) * prob, dim=-1)
+    entropy_loss = torch.mean(entropy_loss, dim=0, keepdim=False)
 
-    kl_loss = torch.mean(cal_kl(logit, t_logit), dim=0, keepdim=False)
-
-    loss = policy_loss + value_loss - 0.01 * entropy_loss + 0.5 * kl_loss
+    loss = policy_loss + value_loss - 0.01 * entropy_loss
     loss.backward()
     optimizer.synchronize()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 40.0)
@@ -88,11 +69,10 @@ def train_step(
     bray.merge("loss", policy_loss, type="policy")
     bray.merge("loss", value_loss, type="value")
     bray.merge("loss", entropy_loss, type="entropy")
-    bray.merge("loss", kl_loss, type="kl")
     bray.merge(
         "loss",
         loss,
-        desc={"time_window_avg": "total = policy + value - 0.01 * entropy + 0.5 * kl"},
+        desc={"time_window_avg": "total = policy + value - 0.01 * entropy"},
     )
     if step % weights_publish_interval == 0:
         weights = bray.get_torch_model_weights(model)
