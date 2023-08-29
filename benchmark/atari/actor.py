@@ -23,6 +23,9 @@ class AtariActor(bray.Actor):
     ):
         self.remote_model = remote_model
         self.remote_buffer = remote_buffer
+        self.reward_metric = bray.Metric("reward", max_samples=1000)
+        self.value_metric = bray.Metric("value", max_samples=1000)
+        self.logit_metric = bray.Metric("logit", max_samples=1000)
 
     def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
@@ -36,8 +39,12 @@ class AtariActor(bray.Actor):
         obs = base64.b64decode(data["obs"])
         obs = np.frombuffer(obs, dtype=np.float32).reshape(42, 42, 4)
         reward = data["reward"]
+        # self.reward_metric.merge(reward)
         self.episode_reward += reward
         value, logit, action = await self.remote_model.forward(obs)
+        # for l in logit:
+        #     self.logit_metric.merge(l)
+        # self.value_metric.merge(value)
         self._append_to_trajectory(obs, action, reward, value, logit)
         return json.dumps({"action": action.tolist()}).encode()
 
