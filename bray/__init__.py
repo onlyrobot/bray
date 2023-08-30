@@ -15,7 +15,12 @@ from bray.trainer.trainer import RemoteTrainer
 from bray.actor.actor import RemoteActor
 from bray.actor.base import Actor
 from bray.utils.nested_array import NestedArray, handle_nested_array
-from bray.metric.metric import merge, query, get_metrics_worker
+from bray.metric.metric import (
+    merge,
+    query,
+    get_metrics_worker,
+    set_tensorboard_step,
+)
 from bray.metric.validate import Metric
 
 import ray, logging

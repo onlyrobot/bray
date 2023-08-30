@@ -26,7 +26,7 @@ class RemoteMetrics:
         self.metrics, self.last_metrics = {}, {}
         self.descs = {}
         self.diff_metrics = {}
-        self.step = 0
+        self.step, self.get_step = 0, None
         self.time_window = time_window
         asyncio.create_task(self.start_tensorboard())
 
@@ -105,6 +105,8 @@ class RemoteMetrics:
 
     async def dump_to_tensorboard(self):
         current_metrics = copy.deepcopy(self.metrics)
+        if self.get_step:
+            self.step = self.get_step()
         for name, current in current_metrics.items():
             last = self.last_metrics.get(name, Metric())
             diff = self._diff(current, last)
@@ -115,6 +117,10 @@ class RemoteMetrics:
         self.step += 1
         await asyncio.sleep(self.time_window)
         asyncio.create_task(self.dump_to_tensorboard())
+
+    async def set_tensorboard_step(self, model: str):
+        step_model = ray.get_actor(model.split("/")[0])
+        self.get_step = lambda: ray.get(step_model.get_step.remote(model))
 
 
 def build_name(name, **kwargs) -> str:
@@ -174,6 +180,9 @@ class MetricsWorker:
     def query(self, name, time_window, **kwargs) -> Metric:
         name = build_name(name, **kwargs)
         return ray.get(self.remote_metrics.query.remote(name, time_window))
+
+    def set_tensorboard_step(self, model: str):
+        ray.get(self.remote_metrics.set_tensorboard_step.remote(model))
 
 
 metrics_worker = None
@@ -246,3 +255,13 @@ def merge_time_ms(name, beg, **kwargs):
         },
         **kwargs,
     )
+
+
+def set_tensorboard_step(model: str):
+    """
+    设置 TensorBoard 的 step，用于在 TensorBoard 中显示横轴
+    Args:
+        model: RemoteModel的名称
+    """
+    metrics_worker = get_metrics_worker()
+    metrics_worker.set_tensorboard_step(model)

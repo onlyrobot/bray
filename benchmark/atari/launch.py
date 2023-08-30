@@ -15,6 +15,7 @@ remote_model = bray.RemoteModel(
     local_mode=True,
     use_onnx="train",
 )
+# bray.set_tensorboard_step(remote_model.name)
 
 remote_buffer = bray.RemoteBuffer("atari_buffer")
 
