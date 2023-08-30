@@ -9,8 +9,9 @@ def gae(trajectory: list[NestedArray], bootstrap_value):
     trajectory.append({"advantage": 0.0, "value": bootstrap_value})
     for i in reversed(range(len(trajectory) - 1)):
         t, next_t = trajectory[i], trajectory[i + 1]
+        t["target_value"] = t["reward"] + 0.99 * next_t["value"]
         # 0.99: discount factor of the MDP
-        delta = t["reward"] + 0.99 * next_t["value"] - t["value"]
+        delta = t["target_value"] - t["value"]
         # 0.95: discount factor of the gae
         advantage = delta + 0.99 * 0.95 * next_t["advantage"]
         t["advantage"] = np.array(advantage, dtype=np.float32)
