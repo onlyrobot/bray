@@ -657,6 +657,7 @@ class RemoteModel:
         self.subscribe_task = None
         self.local = local_mode
         self.local_worker = None
+        self.cached_cloned_names = {}
         model_ = None
         if m := cls.remote_models.get(base_name, None):
             model_ = m.model
@@ -849,13 +850,16 @@ class RemoteModel:
         """
         RemoteModel.remote_models[self.name] = self
         local_mode = local_mode if local_mode is not None else self.local
+        if step in self.cached_cloned_names:
+            return RemoteModel(cloned_name, local_mode=local_mode)
         cloned_name = ray.get(
             self.model.clone.remote(
                 self.name, step, max_batch_size, num_workers, use_onnx
             )
         )
-        remote_model = RemoteModel(cloned_name, local_mode=local_mode)
-        return remote_model
+        if step != -1:
+            self.cached_cloned_names[step] = cloned_name
+        return RemoteModel(cloned_name, local_mode=local_mode)
 
     def publish_weights(self, weights: NestedArray):
         """
