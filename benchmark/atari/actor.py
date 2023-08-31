@@ -5,13 +5,13 @@ from bray import NestedArray
 import base64
 
 
-def gae(trajectory: list[NestedArray], bootstrap_value):
+def gae(trajectory, bootstrap_value=0.0):
     trajectory.append({"advantage": 0.0, "value": bootstrap_value})
     for i in reversed(range(len(trajectory) - 1)):
         t, next_t = trajectory[i], trajectory[i + 1]
-        t["target_value"] = t["reward"] + 0.99 * next_t["value"]
+        target_value = t["reward"] + 0.99 * next_t["value"]
         # 0.99: discount factor of the MDP
-        delta = t["target_value"] - t["value"]
+        delta = target_value - t["value"]
         # 0.95: discount factor of the gae
         advantage = delta + 0.99 * 0.95 * next_t["advantage"]
         t["advantage"] = np.array(advantage, dtype=np.float32)
@@ -73,13 +73,15 @@ class AtariActor(bray.Actor):
         reward = np.array(0.02 * reward, dtype=np.float32)
         if len(self.trajectory) > 0:
             self.trajectory[-1]["reward"] = reward
-        if end or len(self.trajectory) > 128:
+        if end or len(self.trajectory) >= 128:
             gae(
                 self.trajectory,
-                bootstrap_value=0.0 if end else self.trajectory[-1]["value"],
+                bootstrap_value=0.0 if end else value,
             )
             self.remote_buffer.push(*self.trajectory)
             self.trajectory = []
+        if end:
+            return
         transition = {
             "obs": obs,
             "action": action,

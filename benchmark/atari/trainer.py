@@ -12,16 +12,16 @@ def train_step(
     weights_publish_interval,
     step,
 ):
-    obs, value, logit, action, advantage, target_value = (
+    obs, value, logit, action, advantage = (
         replay["obs"],
         replay["value"],
         replay["logit"],
         replay["action"],
         replay["advantage"],
-        replay["target_value"],
     )
     local_batch_size = advantage.shape[0]
     global_batch_size = local_batch_size * hvd.size()
+    target_value = value + advantage
 
     advantage_sum = torch.sum(advantage)
     advantage_sum = hvd.allreduce(advantage_sum, op=hvd.Sum)
