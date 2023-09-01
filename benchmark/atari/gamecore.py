@@ -8,6 +8,7 @@ import time
 import base64
 
 actor_url = "http://localhost:8000/step"
+# gym_id = "BreakoutNoFrameskip-v4"
 gym_id = "BeamRiderNoFrameskip-v4"
 
 
@@ -28,6 +29,8 @@ def actor_step(sess: requests.Session, game_id, step_kind, data):
 def make_env(gym_id: str):
     env = gym.make(gym_id)
     env = wrap_deepmind(env)
+    # print(env.action_space.n)
+    # print(env.observation_space.shape)
     return env
 
 

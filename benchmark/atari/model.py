@@ -2,7 +2,7 @@ import torch
 
 
 class AtariModel(torch.nn.Module):
-    def __init__(self, action_space=6):
+    def __init__(self, action_space=9):
         super().__init__()
         self.base_net = torch.nn.Sequential(
             torch.nn.Conv2d(
