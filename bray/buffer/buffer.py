@@ -1,12 +1,13 @@
 from typing import Iterator
 import random
+import time
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import asyncio
 
 from bray.utils.nested_array import NestedArray
-from bray.metric.metric import merge
+from bray.metric.metric import merge, merge_time_ms
 
 
 @ray.remote
@@ -98,12 +99,12 @@ class Buffer:
 
 
 class RemoteBuffer:
-    def __init__(self, name: str, size: int = 256):
+    def __init__(self, name: str, size: int = 128):
         self.name, self.size = name, size
         self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
         self.workers = ray.get(self.buffer.get_workers.remote())
         self.worker_index = random.randint(0, 100)
-        self.buffer_worker = None
+        self.buffer_workers = None
         self.subscribe_task = None
 
     def __del__(self):
@@ -144,10 +145,13 @@ class RemoteBuffer:
             )
             for i in range(0, len(replays), step)
         ]
+        # beg = time.time()
         try:
             await asyncio.gather(*tasks)
         except ray.exceptions.RayActorError:
+            print("Buffer worker is not health, try to sync buffer")
             await self.sync()
+        # merge_time_ms("push_", beg, buffer=self.name)
         self.worker_index += len(tasks)
 
     def push(self, *replays: NestedArray) -> asyncio.Task:
@@ -170,22 +174,24 @@ class RemoteBuffer:
         )
 
     def __next__(self) -> NestedArray:
-        if not self.buffer_worker:
-            self.buffer_worker = self._new_local_worker()
+        if not self.buffer_workers:
+            self.buffer_workers = [self._new_local_worker() for _ in range(2)]
             self.replays = []
             self.pop_index = -1
-            self.last_size, self.next_replays = 0, None
+            self.last_size, self.next_replays = 0, []
         self.pop_index += 1
         size = len(self.replays) - self.pop_index
 
         # prefetch from buffer worker
         if not self.next_replays and size <= self.last_size // 2:
-            self.next_replays = self.buffer_worker.pop.remote()
+            self.next_replays = [w.pop.remote() for w in self.buffer_workers]
 
         if size == 0:
-            self.replays = ray.get(self.next_replays)
+            ready_replays, self.next_replays = ray.wait(self.next_replays)
+            self.replays.clear()
+            for replays in ready_replays:
+                self.replays.extend(replays)
             self.pop_index = 0
-            self.next_replays = None
             self.last_size = len(self.replays)
 
         return self.replays[self.pop_index]
