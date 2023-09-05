@@ -175,7 +175,7 @@ class RemoteBuffer:
 
     def __next__(self) -> NestedArray:
         if not self.buffer_workers:
-            self.buffer_workers = [self._new_local_worker() for _ in range(2)]
+            self.buffer_workers = [self._new_local_worker() for _ in range(1)]
             self.replays = []
             self.pop_index = -1
             self.last_size, self.next_replays = 0, []
@@ -184,15 +184,16 @@ class RemoteBuffer:
 
         # prefetch from buffer worker
         if not self.next_replays and size <= self.last_size // 2:
+            self.last_size = 0
             self.next_replays = [w.pop.remote() for w in self.buffer_workers]
 
         if size == 0:
             ready_replays, self.next_replays = ray.wait(self.next_replays)
             self.replays.clear()
             for replays in ready_replays:
-                self.replays.extend(replays)
+                self.replays.extend(ray.get(replays))
             self.pop_index = 0
-            self.last_size = len(self.replays)
+            self.last_size += len(self.replays)
 
         return self.replays[self.pop_index]
 

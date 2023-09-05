@@ -113,7 +113,10 @@ def train_atari(
     # initialize optimizer
     parameters = model.parameters()
     optimizer = torch.optim.Adam(parameters, lr=5e-4)
-    optimizer = hvd.DistributedOptimizer(optimizer)
+    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
+    named_parameters = model.named_parameters()
+    optimizer = hvd.DistributedOptimizer(optimizer, named_parameters)
     # initialize buffer
     buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size)
     buffer = bray.TorchTensorBuffer(buffer, device)
