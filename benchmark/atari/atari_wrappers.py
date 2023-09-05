@@ -159,7 +159,7 @@ class EpisodicLifeEnv(gym.Wrapper):
             # for Qbert sometimes we stay in lives == 0 condtion for a few fr
             # so its important to keep lives > 0, so that we only reset once
             # the environment advertises done.
-            done = done # TODO(pengyao): checkout
+            done = True
             # done = DoneType.EPISODE_DONE
         self.lives = lives
         return obs, reward, done, info

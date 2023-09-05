@@ -75,7 +75,7 @@ def train_step(
     loss = policy_loss + value_loss - 0.01 * entropy_loss + 0.5 * kl_loss
     loss.backward()
     optimizer.synchronize()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     with optimizer.skip_synchronize():
         optimizer.step()
     if hvd.rank() != 0:
