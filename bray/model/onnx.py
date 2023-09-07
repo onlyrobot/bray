@@ -46,7 +46,7 @@ def export_onnx(
 
     input_names = [i.name for i in ort_session.get_inputs()]
     flatten_input = flatten_nested_array(
-        forward_args + (forward_kwargs,), sort_keys=True
+        forward_args + tuple(forward_kwargs.values()), sort_keys=True
     )
     if not export_params:
         flatten_input.extend([i.detach().numpy() for i in model.parameters()])
@@ -88,7 +88,7 @@ if __name__ == "__main__":
 
     class Model(torch.nn.Module):
         def forward(self, x, y, z):
-            return x + y + z
+            return x.dot(x) + y[0].dot(y[0]) + z
             # return {"xyz": x + y + z, "xy": x * y}
             return x + y + z, x * y
 
@@ -96,26 +96,26 @@ if __name__ == "__main__":
     export_onnx(
         model,
         "model.onnx",
-        (np.array(1), np.array(2), np.array(3)),
+        (np.array(1), np.array([2, 2]), np.array([[3]])),
     )
 
     export_onnx(
         model,
         "model.onnx",
-        (np.array(1), np.array(2)),
-        {"z": np.array(3)},
+        (np.array(1), np.array([2, 2])),
+        {"z": np.array([[3]])},
     )
 
     export_onnx(
         model,
         "model.onnx",
         (np.array(1),),
-        {"y": np.array(2), "z": np.array(3)},
+        {"y": np.array([2, 2]), "z": np.array([[3]])},
     )
 
     export_onnx(
         model,
         "model.onnx",
         (),
-        {"x": np.array(1), "y": np.array(2), "z": np.array(3)},
+        {"x": np.array(1), "y": np.array([2, 2]), "z": np.array([[3]])},
     )
