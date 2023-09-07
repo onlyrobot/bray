@@ -51,8 +51,9 @@ class AtariModel(torch.nn.Module):
             dim=1,
         )
         logits = self.logits_net(logits)
+        probs = torch.softmax(logits, dim=1)
         actions = torch.multinomial(
-            torch.exp(logits),
+            probs,
             num_samples=1,
         )
         actions = torch.squeeze(actions, dim=1)

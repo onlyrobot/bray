@@ -101,7 +101,13 @@ class Buffer:
 class RemoteBuffer:
     def __init__(self, name: str, size: int = 128):
         self.name, self.size = name, size
-        self.buffer = Buffer.options(name=name, get_if_exists=True).remote()
+        scheduling_local = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        )
+        self.buffer = Buffer.options(
+            name=name, get_if_exists=True, scheduling_strategy=scheduling_local
+        ).remote()
         self.workers = ray.get(self.buffer.get_workers.remote())
         self.worker_index = random.randint(0, 100)
         self.buffer_workers = None
@@ -138,7 +144,7 @@ class RemoteBuffer:
         if len(self.workers) == 0 or not self.subscribe_task:
             await self._init_subscribe_task(drop)
         workers_num = len(self.workers)
-        step = max(len(replays) // workers_num, 1)
+        step = max(len(replays) // workers_num, 16)
         tasks = [
             self.workers[(self.worker_index + i) % workers_num].push.remote(
                 drop, *replays[i : i + step]
@@ -175,7 +181,7 @@ class RemoteBuffer:
 
     def __next__(self) -> NestedArray:
         if not self.buffer_workers:
-            self.buffer_workers = [self._new_local_worker() for _ in range(1)]
+            self.buffer_workers = [self._new_local_worker() for _ in range(2)]
             self.replays = []
             self.pop_index = -1
             self.last_size, self.next_replays = 0, []

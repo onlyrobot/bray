@@ -4,6 +4,9 @@ import tensorboard
 import time
 from datetime import datetime
 import copy
+from typing import Callable
+
+from concurrent.futures import ThreadPoolExecutor
 
 
 class Metric:
@@ -28,6 +31,9 @@ class RemoteMetrics:
         self.diff_metrics = {}
         self.step, self.get_step = 0, None
         self.time_window = time_window
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
+        )
         asyncio.create_task(self.start_tensorboard())
 
     async def start_tensorboard(self):
@@ -106,7 +112,12 @@ class RemoteMetrics:
     async def dump_to_tensorboard(self):
         current_metrics = copy.deepcopy(self.metrics)
         if self.get_step:
-            self.step = self.get_step()
+            try:
+                self.step = await asyncio._get_running_loop().run_in_executor(
+                    None, self.get_step
+                )
+            except Exception as e:
+                print(f"Get step error: {e}")
         for name, current in current_metrics.items():
             last = self.last_metrics.get(name, Metric())
             diff = self._diff(current, last)
@@ -118,7 +129,10 @@ class RemoteMetrics:
         await asyncio.sleep(self.time_window)
         asyncio.create_task(self.dump_to_tensorboard())
 
-    async def set_tensorboard_step(self, model: str):
+    async def set_tensorboard_step(self, model: str, get_step: Callable):
+        self.get_step = get_step
+        if self.get_step:
+            return
         step_model = ray.get_actor(model.split("/")[0])
         self.get_step = lambda: ray.get(step_model.get_step.remote(model))
 
@@ -181,8 +195,8 @@ class MetricsWorker:
         name = build_name(name, **kwargs)
         return ray.get(self.remote_metrics.query.remote(name, time_window))
 
-    def set_tensorboard_step(self, model: str):
-        ray.get(self.remote_metrics.set_tensorboard_step.remote(model))
+    def set_tensorboard_step(self, model: str, get_step: Callable):
+        ray.get(self.remote_metrics.set_tensorboard_step.remote(model, get_step))
 
 
 metrics_worker = None
@@ -257,11 +271,16 @@ def merge_time_ms(name, beg, **kwargs):
     )
 
 
-def set_tensorboard_step(model: str):
+def set_tensorboard_step(model: str = None, get_step: Callable = None):
     """
-    设置 TensorBoard 的 step，用于在 TensorBoard 中显示横轴
+    设置 TensorBoard 的 step，用于自定义 TensorBoard 的横坐标
     Args:
-        model: RemoteModel的名称
+        model: RemoteModel的名称，Tensorboard的横坐标将被设置为该模型的step
+        get_step: 一个函数，用于获取当前的TensorBoard的横坐标，比如：
+            将TensorBoard的横坐标设置为tick数：
+        ` get_step = lambda: bray.query("tick", kind="cnt", time_window=False) `
+            将Tensorboard的横坐标设为指定buffer的pop数：
+        ` get_step = lambda: bray.query("pop", kind="sum", time_window=False, buffer="my_buffer") `
     """
     metrics_worker = get_metrics_worker()
-    metrics_worker.set_tensorboard_step(model)
+    metrics_worker.set_tensorboard_step(model, get_step)

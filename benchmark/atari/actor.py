@@ -79,13 +79,13 @@ class AtariActor(bray.Actor):
                 bootstrap_value=0.0 if end else value,
             )
             self.remote_buffer.push(*self.trajectory)
-            self.trajectory = []
+            self.trajectory.clear()
         if end:
             return
         transition = {
             "obs": obs,
             "action": action,
-            "reward": reward,
+            "reward": 0.0,
             "value": value,
             "logit": logit,
         }
