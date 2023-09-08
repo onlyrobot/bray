@@ -182,7 +182,7 @@ class ModelWorker:
             print(f"Fail to subscribe weights from {self.name}.", e)
             return
         if step <= self.current_step:
-            print(f"Skip weights from {self.name}.")
+            # print(f"Skip weights from {self.name}.")
             return
         self.current_step = step
         try:
@@ -203,7 +203,6 @@ class ModelWorker:
                 await self.__subscribe_weights()
             except Exception as e:
                 print(f"Fail to subscribe weights from {self.name}.", e)
-                pass
 
     def get_model_step(self) -> int:
         """Get the current step of the model from worker to reduce Model overhead."""
@@ -449,13 +448,26 @@ class Model:
     async def subscribe_weights(self, name, current_step):
         meta: ModelMeta = self.models[name]
         async with meta.step_cond:
-            await meta.step_cond.wait_for(lambda: meta.step > current_step)
+            pred = lambda: meta.step > current_step
+            try:
+                await asyncio.wait_for(
+                    meta.step_cond.wait_for(pred),
+                    timeout=10 * 60,
+                )
+            except asyncio.TimeoutError:
+                return None, meta.step
         return meta.weights, meta.step
 
     async def subscribe_workers(self, name, node_id: str = None):
         meta: ModelMeta = self.models[name]
         async with meta.worker_cond:
-            await meta.worker_cond.wait()
+            try:
+                await asyncio.wait_for(
+                    meta.worker_cond.wait(),
+                    timeout=10 * 60,
+                )
+            except asyncio.TimeoutError:
+                pass
         return await self.get_workers(name, node_id)
 
     def _load_balance(self, name):
@@ -535,9 +547,8 @@ class Model:
         asyncio.create_task(self._health_check())
 
     def _load_checkpoint(self, name, step):
-        if step == 0:
-            weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-        else:
+        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
+        if step != 0:
             ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
             weights_path = os.path.join(ckpt_dir, f"step-{step}.pt")
         return handle_nested_array(
