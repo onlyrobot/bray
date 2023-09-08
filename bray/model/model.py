@@ -850,13 +850,12 @@ class RemoteModel:
         """
         RemoteModel.remote_models[self.name] = self
         local_mode = local_mode if local_mode is not None else self.local
-        if step in self.cached_cloned_names:
+        if cloned_name := self.cached_cloned_names.get(step, None):
             return RemoteModel(cloned_name, local_mode=local_mode)
-        cloned_name = ray.get(
-            self.model.clone.remote(
-                self.name, step, max_batch_size, num_workers, use_onnx
-            )
+        cloned_name = self.model.clone.remote(
+            self.name, step, max_batch_size, num_workers, use_onnx
         )
+        cloned_name = ray.get(cloned_name)
         if step != -1:
             self.cached_cloned_names[step] = cloned_name
         return RemoteModel(cloned_name, local_mode=local_mode)

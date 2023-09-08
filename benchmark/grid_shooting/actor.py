@@ -23,18 +23,23 @@ class GridShootingActor(bray.Actor):
         remote_model: bray.RemoteModel,
         remote_buffer: bray.RemoteBuffer = None,
         target_step_interval=1000,
+        target_model_max_reuse=100,
     ):
         self.remote_model = remote_model
         self.remote_buffer = remote_buffer
         self.target_step_interval = target_step_interval
         self.target_model = None
         self.target_model_reuse = 0
+        self.target_model_max_reuse = target_model_max_reuse
 
     def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
         self.trajectory = []
         self.episode_reward = 0.0
-        if not self.target_model or self.target_model_reuse > 100:
+        if (
+            not self.target_model
+            or self.target_model_reuse > self.target_model_max_reuse
+        ):
             target_step = (
                 random.randint(0, self.remote_model.step)
                 // self.target_step_interval
@@ -107,7 +112,7 @@ class GridShootingActor(bray.Actor):
         transition = {
             "obs": obs,
             "action": action,
-            "reward": reward,
+            "reward": np.array(0.0, dtype=np.float32),
             "value": value,
             "logit": logit,
         }

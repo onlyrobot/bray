@@ -85,7 +85,7 @@ class AtariActor(bray.Actor):
         transition = {
             "obs": obs,
             "action": action,
-            "reward": 0.0,
+            "reward": np.array(0.0, dtype=np.float32),
             "value": value,
             "logit": logit,
         }
