@@ -1,10 +1,4 @@
-#include <iostream>
-#include <cstring>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <cassert>
-
+#include "fake_gamecore.h"
 using namespace std;
 
 #define ACTOR_IP "127.0.0.1"
@@ -12,6 +6,19 @@ using namespace std;
 char buffer[1024 * 5];
 const string key("fake_key");
 const string token("fake_token");
+
+// windows平台通过封装htonll实现htobe64
+#ifdef _WIN32
+uint64_t htobe64(uint64_t value) {
+    return htonll(value);        // 转换为网络字节序（大端字节序）
+    //return _byteswap_uint64(value);  // 或者翻转字节序
+}
+
+// windows平台通过封装ntohll实现be64toh
+uint64_t be64toh(uint64_t value) {
+    return ntohll(value);  // 转换为主机字节序
+}
+#endif
 
 string actor_step(int sock, string game_id, string msg, string kind)
 {
@@ -46,6 +53,8 @@ string actor_step(int sock, string game_id, string msg, string kind)
     send(sock, buffer, offset, 0);
     send(sock, msg.c_str(), strlen(msg.c_str()), 0);
 
+    // buffer 初始化
+    memset(buffer, 0, sizeof(buffer));
     // 接收服务器的响应
     recv(sock, buffer, sizeof(int64_t) * 3, 0);
     memcpy(&size, buffer, sizeof(int64_t));
@@ -62,8 +71,18 @@ string actor_step(int sock, string game_id, string msg, string kind)
     return move(msg_recv);
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    // windows平台需要初始化Winsock库
+    WSADATA wsaData;
+    int err = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (err != 0) {
+        std::cerr << "WSAStartup failed with error: " << err << std::endl;
+        return 1;
+    }
+#endif
+
     cout << "fake gamecore start" << endl;
     int sock;
     struct sockaddr_in server_address;
@@ -73,7 +92,13 @@ int main(int argc, char *argv[])
     // 设置服务器地址和端口号
     server_address.sin_family = AF_INET;
     server_address.sin_port = htons(ACTOR_PORT);
+#ifdef _WIN32
+    // 高版本c++版本ip转换要使用inet_pton函数
+    inet_pton(AF_INET, ACTOR_IP, &server_address.sin_addr);
+#else
     server_address.sin_addr.s_addr = inet_addr(ACTOR_IP);
+#endif
+
 
     // 连接服务器
     connect(sock, (struct sockaddr *)&server_address, sizeof(server_address));
@@ -90,7 +115,13 @@ int main(int argc, char *argv[])
     res = actor_step(sock, game_id, "end game", "end");
     cout << res << endl;
     // 关闭套接字
+#ifdef _WIN32
+    // windows关闭socket
+    closesocket(sock);
+    WSACleanup();
+#else
     close(sock);
+#endif
     cout << "fake gamecore end" << endl;
     return 0;
 }
