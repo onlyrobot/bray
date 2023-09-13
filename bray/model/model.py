@@ -274,9 +274,8 @@ class Model:
         )
 
         weights = get_torch_model_weights(torch_model)
-        self._initialize_model(
-            self.name, weights, max_batch_size, num_workers, use_onnx
-        )
+        meta = ModelMeta(num_workers, use_onnx)
+        self._initialize_model(self.name, weights, max_batch_size, meta)
 
         self.cpus_per_worker = cpus_per_worker
         self.gpus_per_worker = gpus_per_worker
@@ -299,7 +298,7 @@ class Model:
         if self.checkpoint_interval is None:
             asyncio.create_task(self._save_checkpoint())
 
-    def _initialize_model(self, name, weights, max_batch_size, num_workers, use_onnx):
+    def _initialize_model(self, name, weights, max_batch_size, meta: ModelMeta):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
@@ -320,7 +319,6 @@ class Model:
         except Exception as e:
             print(f"Load checkpoint failed: {e}")
 
-        meta = ModelMeta(num_workers, use_onnx)
         meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
         meta.max_batch_size = max_batch_size
         if meta.step != 0:
@@ -426,6 +424,7 @@ class Model:
         num_workers = num_workers if num_workers != -1 else meta.num_workers
 
         loop = asyncio.get_running_loop()
+        cloned_meta = ModelMeta(num_workers, use_onnx)
 
         def initialize_model_if_needed():
             if cloned_name in self.models:
@@ -434,8 +433,7 @@ class Model:
                 cloned_name,
                 weights,
                 max_batch_size,
-                num_workers,
-                use_onnx,
+                cloned_meta,
             )
             for _ in range(
                 len([node for node in ray.nodes() if node["Alive"]])
@@ -675,7 +673,10 @@ class RemoteModel:
         if m := cls.remote_models.get(base_name, None):
             model_ = m.model
         self.model = model_ or Model.options(
-            name=base_name, get_if_exists=True, scheduling_strategy=scheduling_local
+            name=base_name,
+            get_if_exists=True,
+            scheduling_strategy=scheduling_local,
+            max_concurrency=100000,
         ).remote(
             base_name,
             model,
