@@ -200,6 +200,8 @@ class ModelWorker:
             print("Set onnx weights only in train mode.")
 
     async def _subscribe_weights(self):
+        if len(self.name.split("/")) != 1:
+            return
         while True:
             try:
                 await self.__subscribe_weights()
@@ -752,7 +754,8 @@ class RemoteModel:
         local_worker = self.local_worker
         if isinstance(local_worker, asyncio.Task):
             try:
-                return await self._remote_forward(*args, **kwargs)
+                pass
+                # return await self._remote_forward(*args, **kwargs)
             except:
                 pass
             try:
