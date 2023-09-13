@@ -174,6 +174,7 @@ class ModelWorker:
         return previous_ready_forwards[forward_index]
 
     async def __subscribe_weights(self):
+        beg = time.time()
         try:
             weights, step = await self.model.subscribe_weights.remote(
                 self.name, self.current_step
@@ -190,6 +191,7 @@ class ModelWorker:
         except Exception as e:
             print(f"Fail to get weights from {self.name}.", e)
             return
+        merge_time_ms("subscribe weights", beg, model=self.name)
         if not self.use_onnx:
             set_torch_model_weights(self.torch_model, weights)
         elif self.use_onnx == "train":
@@ -581,7 +583,7 @@ class Model:
 
     def _get_target_step(self, name, step) -> tuple[int, object]:
         meta: ModelMeta = self.models[name]
-        if step == -1 and meta.weights:
+        if step == -1:
             return meta.step, meta.weights
         ckpt_steps = [0] + meta.ckpt_steps
         index = np.searchsorted(ckpt_steps, step, side="right")
