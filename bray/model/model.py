@@ -259,10 +259,10 @@ class Model:
         self.name, self.model = name, ray.put(torch_model)
 
         args_path = os.path.join(root_path, "forward_inputs.pt")
-        if not os.path.exists(args_path):
-            assert forward_args or forward_kwargs, "Missing forward args"
+        if forward_args or forward_kwargs:
             torch.save((forward_args, forward_kwargs), args_path)
         else:
+            assert os.path.exists(args_path), "Missing forward args"
             forward_args, forward_kwargs = torch.load(args_path)
         self.forward_args = forward_args
         self.forward_kwargs = forward_kwargs

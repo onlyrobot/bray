@@ -38,7 +38,7 @@ def export_onnx(
         else torch.onnx.TrainingMode.TRAINING,
         # opset_version=10,
         export_params=export_params,
-        # do_constant_folding=True,
+        do_constant_folding=False,
         # keep_initializers_as_inputs=True,
     )
 
@@ -49,6 +49,12 @@ def export_onnx(
         forward_args + tuple(forward_kwargs.values()), sort_keys=True
     )
     if not export_params:
+        # state_dict = model.state_dict()
+        # params = [
+        #     state_dict[name].detach().numpy()
+        #     for name in input_names[len(flatten_input) :]
+        # ]
+        # flatten_input.extend(params)
         flatten_input.extend([i.detach().numpy() for i in model.parameters()])
     assert len(input_names) == len(flatten_input), "Onnx model input length error."
 
