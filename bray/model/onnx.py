@@ -49,13 +49,13 @@ def export_onnx(
         forward_args + tuple(forward_kwargs.values()), sort_keys=True
     )
     if not export_params:
-        # state_dict = model.state_dict()
-        # params = [
-        #     state_dict[name].detach().numpy()
-        #     for name in input_names[len(flatten_input) :]
-        # ]
-        # flatten_input.extend(params)
-        flatten_input.extend([i.detach().numpy() for i in model.parameters()])
+        # flatten_input.extend([i.detach().numpy() for i in model.parameters()])
+        state_dict = model.state_dict()
+        params = [
+            state_dict[name].detach().numpy()
+            for name in input_names[len(flatten_input) :]
+        ]
+        flatten_input.extend(params)
     assert len(input_names) == len(flatten_input), "Onnx model input length error."
 
     ort_inputs = dict(zip(input_names, flatten_input))

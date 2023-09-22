@@ -78,7 +78,10 @@ class ModelWorker:
             (
                 self.ort_session,
                 self.forward_outputs,
-            ) = ModelWorker.ort_session_and_forward_outputs.get(base_name, (None, None))
+            ) = ModelWorker.ort_session_and_forward_outputs.get(
+                base_name,
+                (None, None),
+            )
         if not self.ort_session:
             onnx_model, self.forward_outputs = ray.get(
                 self.model.get_onnx_model.remote(self.name)
@@ -144,7 +147,8 @@ class ModelWorker:
         merge_time_ms("forward", beg, model=self.name)
         return ready_forwards
 
-    async def _forward_coro(self, forward_cond=asyncio.Condition()):
+    async def _forward_coro(self):
+        forward_cond = asyncio.Condition()
         while True:
             pending_forwards = self.pending_forwards
             async with self.forward_cond:
