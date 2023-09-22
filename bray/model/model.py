@@ -87,6 +87,7 @@ class ModelWorker:
                 self.model.get_onnx_model.remote(self.name)
             )
             self.ort_session = self._build_ort_session(onnx_model)
+        self.onnx_input_names = [input.name for input in self.ort_session.get_inputs()]
         if self.use_onnx != "train":
             return
         ModelWorker.ort_session_and_forward_outputs[base_name] = (
@@ -94,7 +95,7 @@ class ModelWorker:
             self.forward_outputs,
         )
         weights = ray.get(self.model.get_weights.remote(self.name))
-        self.weights = [v for v in weights.values()]
+        self.weights = [weights[n] for n in self.onnx_input_names if n in weights]
 
     def _init_torch(self):
         num_cpus = max(1, int(self.num_cpus))
@@ -125,13 +126,12 @@ class ModelWorker:
 
     def _forward_onnx(self, batch_args, batch_kwargs):
         sess = self.ort_session
-        input_names = [input.name for input in sess.get_inputs()]
         flatten_input = flatten_nested_array(
             batch_args + (batch_kwargs,), sort_keys=True
         )
         if self.use_onnx == "train":
             flatten_input.extend(self.weights)
-        inputs = dict(zip(input_names, flatten_input))
+        inputs = dict(zip(self.onnx_input_names, flatten_input))
         # output_names = [output.name for output in sess.get_outputs()]
         # print(handle_nested_array(inputs, lambda x: (x.shape, x.dtype)))
         outputs = sess.run(None, inputs)
@@ -199,7 +199,7 @@ class ModelWorker:
         if not self.use_onnx:
             set_torch_model_weights(self.torch_model, weights)
         elif self.use_onnx == "train":
-            self.weights = [v for v in weights.values()]
+            self.weights = [weights[n] for n in self.onnx_input_names if n in weights]
         else:
             print("Set onnx weights only in train mode.")
 

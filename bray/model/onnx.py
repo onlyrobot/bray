@@ -56,6 +56,10 @@ def export_onnx(
             for name in input_names[len(flatten_input) :]
         ]
         flatten_input.extend(params)
+        for name in state_dict:
+            if name in input_names:
+                continue
+            print("Warning: unused parameter:", name)
     assert len(input_names) == len(flatten_input), "Onnx model input length error."
 
     ort_inputs = dict(zip(input_names, flatten_input))
