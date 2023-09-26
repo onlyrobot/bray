@@ -235,7 +235,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
             raise HTTPException(status_code=400, detail=str(e))
         return Response(content=data)
 
-    app = FastAPI()
+    app = FastAPI(docs_url=None, redoc_url=None)
     app.add_api_route("/step", step, methods=["POST"])
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

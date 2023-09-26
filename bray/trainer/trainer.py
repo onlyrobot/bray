@@ -10,6 +10,7 @@ class RemoteTrainer:
         num_workers: int = None,
         cpus_per_worker: int = None,
         total_cpus_ratio: float = 0.75,
+        framework: ["torch", "tensorflow"] = "torch",
     ):
         """
         Args:
@@ -57,7 +58,14 @@ class RemoteTrainer:
             torch.set_num_interop_threads(cpus_per_worker)
             torch.set_num_threads(cpus_per_worker)
 
-        ray.get(self.executor.run_remote(init_torch))
+        def init_tensorflow():
+            import tensorflow as tf
+
+            tf.config.threading.set_inter_op_parallelism_threads(cpus_per_worker)
+            tf.config.threading.set_intra_op_parallelism_threads(cpus_per_worker)
+
+        init_framework = init_torch if framework == "torch" else init_tensorflow
+        ray.get(self.executor.run_remote(init_framework))
 
     def train(self, train: callable, *args, **kwargs) -> list[any]:
         """

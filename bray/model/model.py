@@ -48,6 +48,7 @@ class ModelWorker:
         self.num_cpus, self.num_gpus = ray.get(
             self.model.get_cpus_gpus_per_worker.remote()
         )
+        self.set_model_weights = set_torch_model_weights
         self._init_onnx() if self.use_onnx else self._init_torch()
         self.__forward = self._forward_onnx if self.use_onnx else self._forward_torch
 
@@ -98,10 +99,12 @@ class ModelWorker:
         self.weights = [weights[n] for n in self.onnx_input_names if n in weights]
 
     def _init_torch(self):
+        model = ray.get(ray.get(self.model.get_model.remote()))
+        if not isinstance(model, torch.nn.Module):
+            return self._init_tensorflow(model)
         num_cpus = max(1, int(self.num_cpus))
         torch.set_num_interop_threads(num_cpus)
         torch.set_num_threads(num_cpus)
-        model = ray.get(ray.get(self.model.get_model.remote()))
         model.requires_grad_(False)
         model.eval()
         weights = ray.get(self.model.get_weights.remote(self.name))
@@ -109,6 +112,23 @@ class ModelWorker:
         if self.num_gpus:
             model = model.cuda()
         self.torch_model = model
+
+    def _init_tensorflow(self, model):
+        num_cpus = max(1, int(self.num_cpus))
+        import tensorflow as tf
+
+        tf.config.threading.set_inter_op_parallelism_threads(num_cpus)
+        tf.config.threading.set_intra_op_parallelism_threads(num_cpus)
+        weights = ray.get(self.model.get_weights.remote(self.name))
+        if self.num_gpus:
+            pass
+        else:
+            tf.config.set_visible_devices([], "GPU")
+        model = model()
+        model.set_weights(weights)
+        self.torch_model = self.tensorflow_model = model
+        self._forward_torch = self._forward_tensorflow
+        self.set_model_weights = lambda m, w: m.set_weights(w)
 
     def _forward_torch(self, batch_args, batch_kwargs):
         handler = (
@@ -127,7 +147,7 @@ class ModelWorker:
     def _forward_onnx(self, batch_args, batch_kwargs):
         sess = self.ort_session
         flatten_input = flatten_nested_array(
-            batch_args + (batch_kwargs,), sort_keys=True
+            batch_args + tuple(batch_kwargs.values()), sort_keys=True
         )
         if self.use_onnx == "train":
             flatten_input.extend(self.weights)
@@ -136,6 +156,25 @@ class ModelWorker:
         # print(handle_nested_array(inputs, lambda x: (x.shape, x.dtype)))
         outputs = sess.run(None, inputs)
         return unflatten_nested_array(self.forward_outputs, outputs)
+
+    def _forward_tensorflow(self, batch_args, batch_kwargs):
+        import tensorflow as tf
+
+        batch_args, batch_kwargs = handle_nested_array(
+            (batch_args, batch_kwargs), tf.identity
+        )
+
+        # @tf.function
+        # def forward(*input_args):
+        #     args, kwargs = unflatten_nested_array(
+        #         batch_args + (batch_kwargs,), input_args
+        #     )
+        #     return self.tensorflow_model(*args, **kwargs)
+
+        # inputs = flatten_nested_array(batch_args + (batch_kwargs,))
+        # outputs = forward(*inputs)
+        outputs = self.tensorflow_model(*batch_args, **batch_kwargs)
+        return handle_nested_array(outputs, lambda x: x.cpu().numpy())
 
     async def _forward(self, pending_forwards: list[tuple, dict]):
         beg = time.time()
@@ -151,14 +190,18 @@ class ModelWorker:
         forward_cond = asyncio.Condition()
         while True:
             pending_forwards = self.pending_forwards
+
             async with self.forward_cond:
                 await self.forward_cond.wait_for(lambda: pending_forwards)
+
             self.pending_forwards = []
             ready_forwards = self.ready_forwards
             self.ready_forwards = []
             forward_cond, self.forward_cond = self.forward_cond, forward_cond
+
             # set the ready_forwards to the previous pending_forwards
             ready_forwards[:] = await self._forward(pending_forwards)
+
             async with forward_cond:
                 forward_cond.notify_all()
 
@@ -197,7 +240,7 @@ class ModelWorker:
             return
         merge_time_ms("subscribe weights", beg, model=self.name)
         if not self.use_onnx:
-            set_torch_model_weights(self.torch_model, weights)
+            self.set_model_weights(self.torch_model, weights)
         elif self.use_onnx == "train":
             self.weights = [weights[n] for n in self.onnx_input_names if n in weights]
         else:
@@ -237,7 +280,7 @@ class Model:
     def __init__(
         self,
         name: str,
-        torch_model: torch.nn.Module = None,
+        torch_model: torch.nn.Module | object = None,
         forward_args: tuple[np.ndarray] = None,
         forward_kwargs: dict[str : np.ndarray] = None,
         checkpoint_interval: int = None,
@@ -279,7 +322,11 @@ class Model:
             ThreadPoolExecutor(max_workers=1)
         )
 
-        weights = get_torch_model_weights(torch_model)
+        if isinstance(torch_model, torch.nn.Module):
+            weights = get_torch_model_weights(torch_model)
+        else:
+            tensorflow_model = torch_model()
+            weights = tensorflow_model.get_weights()
         meta = ModelMeta(num_workers, use_onnx)
         self._initialize_model(self.name, weights, max_batch_size, meta)
 
@@ -646,7 +693,7 @@ class RemoteModel:
     def __new__(
         cls,
         name: str = None,
-        model: torch.nn.Module = None,
+        model: torch.nn.Module | object = None,
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
         checkpoint_interval: int = None,
@@ -710,7 +757,7 @@ class RemoteModel:
         """
         Args:
             name: 模型的名字，用于在Ray集群中标识模型
-            model: 目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
+            model: 目前支持PyTorch模型，和Tensorflow模型，如果为None，则默认已经存在的同名模型
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
             checkpoint_interval: 模型的checkpoint间隔，单位step，默认10分钟保存一次
@@ -847,7 +894,11 @@ class RemoteModel:
         """
         torch_model = ray.get(ray.get(self.model.get_model.remote()))
         weights = ray.get(self.model.get_weights.remote(self.name))
-        set_torch_model_weights(torch_model, weights)
+        if isinstance(torch_model, torch.nn.Module):
+            set_torch_model_weights(torch_model, weights)
+        else:
+            tensorflow_model = torch_model = torch_model()
+            tensorflow_model.set_weights(weights)
         return torch_model
 
     def clone(

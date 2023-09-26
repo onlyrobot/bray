@@ -59,6 +59,19 @@ class TorchTensorBuffer:
         return self
 
 
+class TensorFlowTensorBuffer:
+    def __init__(self, buffer: Iterator[NestedArray]):
+        self.buffer = buffer
+
+    def __next__(self) -> NestedArray:
+        import tensorflow as tf
+
+        return handle_nested_array(next(self.buffer), tf.identity)
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        return self
+
+
 class CallbackBuffer:
     def __init__(
         self,
