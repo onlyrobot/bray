@@ -360,6 +360,13 @@ class Model:
             ckpt_steps = [
                 int(ckpt.split(".")[0].split("-")[1]) for ckpt in os.listdir(ckpt_dir)
             ]
+            clone_steps = [
+                int(ckpt.split(".")[0].split("-")[2])
+                for ckpt in os.listdir(os.path.join(self.trial_path, f"{name}"))
+                if ckpt.startswith("clone-step")
+            ]
+            # union of ckpt_steps and clone_steps
+            ckpt_steps = list(set(ckpt_steps).union(clone_steps))
             ckpt_steps.sort()
             step = ckpt_steps[-1] if ckpt_steps else 0
             weights = self._load_checkpoint(name, step=step)
@@ -598,6 +605,9 @@ class Model:
         if step != 0:
             ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
             weights_path = os.path.join(ckpt_dir, f"step-{step}.pt")
+        if not os.path.exists(weights_path):
+            clone_dir = os.path.join(self.trial_path, f"{name}/clone-step-{step}")
+            weights_path = os.path.join(clone_dir, f"weights.pt")
         return handle_nested_array(
             torch.load(weights_path), lambda x: x.numpy(), type_check=False
         )
