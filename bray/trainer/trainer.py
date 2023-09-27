@@ -61,8 +61,9 @@ class RemoteTrainer:
         def init_tensorflow():
             import tensorflow as tf
 
-            tf.config.threading.set_inter_op_parallelism_threads(cpus_per_worker)
-            tf.config.threading.set_intra_op_parallelism_threads(cpus_per_worker)
+            threading = tf.config.threading
+            threading.set_inter_op_parallelism_threads(cpus_per_worker)
+            threading.set_intra_op_parallelism_threads(cpus_per_worker)
 
         init_framework = init_torch if framework == "torch" else init_tensorflow
         ray.get(self.executor.run_remote(init_framework))

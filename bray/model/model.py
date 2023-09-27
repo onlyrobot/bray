@@ -117,16 +117,20 @@ class ModelWorker:
         num_cpus = max(1, int(self.num_cpus))
         import tensorflow as tf
 
-        tf.config.threading.set_inter_op_parallelism_threads(num_cpus)
-        tf.config.threading.set_intra_op_parallelism_threads(num_cpus)
-        weights = ray.get(self.model.get_weights.remote(self.name))
+        try:
+            threading = tf.config.threading
+            threading.set_inter_op_parallelism_threads(num_cpus)
+            threading.set_intra_op_parallelism_threads(num_cpus)
+        except:
+            pass
         if self.num_gpus:
             pass
         else:
             tf.config.set_visible_devices([], "GPU")
-        model = model()
+        self.torch_model = model = model()
+        weights = ray.get(self.model.get_weights.remote(self.name))
         model.set_weights(weights)
-        self.torch_model = self.tensorflow_model = model
+        self.tensorflow_model = tf.function(model)
         self._forward_torch = self._forward_tensorflow
         self.set_model_weights = lambda m, w: m.set_weights(w)
 
@@ -163,16 +167,6 @@ class ModelWorker:
         batch_args, batch_kwargs = handle_nested_array(
             (batch_args, batch_kwargs), tf.identity
         )
-
-        # @tf.function
-        # def forward(*input_args):
-        #     args, kwargs = unflatten_nested_array(
-        #         batch_args + (batch_kwargs,), input_args
-        #     )
-        #     return self.tensorflow_model(*args, **kwargs)
-
-        # inputs = flatten_nested_array(batch_args + (batch_kwargs,))
-        # outputs = forward(*inputs)
         outputs = self.tensorflow_model(*batch_args, **batch_kwargs)
         return handle_nested_array(outputs, lambda x: x.cpu().numpy())
 
