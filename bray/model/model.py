@@ -103,8 +103,10 @@ class ModelWorker:
         if not isinstance(model, torch.nn.Module):
             return self._init_tensorflow(model)
         num_cpus = max(1, int(self.num_cpus))
-        torch.set_num_interop_threads(num_cpus)
-        torch.set_num_threads(num_cpus)
+        if torch.get_num_threads() != num_cpus:
+            torch.set_num_threads(num_cpus)
+        if torch.get_num_interop_threads() != num_cpus:
+            torch.set_num_interop_threads(num_cpus)
         model.requires_grad_(False)
         model.eval()
         weights = ray.get(self.model.get_weights.remote(self.name))
@@ -182,11 +184,14 @@ class ModelWorker:
 
     async def _forward_coro(self):
         forward_cond = asyncio.Condition()
-        while True:
-            pending_forwards = self.pending_forwards
-
-            async with self.forward_cond:
-                await self.forward_cond.wait_for(lambda: pending_forwards)
+        while pending_forwards := self.pending_forwards:
+            cond = self.forward_cond
+            try:
+                async with cond:
+                    await cond.wait_for(lambda: pending_forwards)
+            except GeneratorExit:
+                # maybe python's bug when canceling a task
+                return
 
             self.pending_forwards = []
             ready_forwards = self.ready_forwards
@@ -781,8 +786,8 @@ class RemoteModel:
         self.subscribe_task.cancel() if self.subscribe_task else None
         if not self.local_worker:
             return
-        self.local_worker.forward_task.cancel()
         self.local_worker.subscribe_task.cancel()
+        self.local_worker.forward_task.cancel()
 
     async def subscribe_workers(cls, model, name, workers):
         # 定义为类方法，避免引用self阻止RemoteModel被回收
@@ -792,19 +797,19 @@ class RemoteModel:
             )
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
-        loop = asyncio.get_running_loop()
-
         if not RemoteModel.set_executor:
+            loop = asyncio.get_running_loop()
             loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
             RemoteModel.set_executor = True
 
-        async def build_local_worker():
+        async def build_local_worker(loop):
             self.local_worker = await loop.run_in_executor(
                 None, ModelWorker, self.name, self.model, loop
             )
 
         if self.local_worker is None:
-            self.local_worker = loop.create_task(build_local_worker())
+            loop = asyncio.get_running_loop()
+            self.local_worker = loop.create_task(build_local_worker(loop))
 
         local_worker = self.local_worker
         if isinstance(local_worker, asyncio.Task):
