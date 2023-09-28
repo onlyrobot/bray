@@ -37,17 +37,18 @@ class ModelWorker:
         self.name, self.model = name, model if model else ray.get_actor(
             name.split("/")[0]
         )
-        self.current_step = ray.get(self.model.get_step.remote(name))
+        (
+            self.current_step,
+            self.max_batch_size,
+            self.use_onnx,
+            self.num_cpus,
+            self.num_gpus,
+        ) = ray.get(self.model.get_worker_initialize_info.remote(name))
 
-        self.max_batch_size = ray.get(self.model.get_max_batch_size.remote(name))
         self.pending_forwards: list[tuple, dict] = []
         self.ready_forwards: list[NestedArray] = []
         self.forward_cond = asyncio.Condition()
 
-        self.use_onnx = ray.get(self.model.get_use_onnx.remote(name))
-        self.num_cpus, self.num_gpus = ray.get(
-            self.model.get_cpus_gpus_per_worker.remote()
-        )
         self.set_model_weights = set_torch_model_weights
         self._init_onnx() if self.use_onnx else self._init_torch()
         self.__forward = self._forward_onnx if self.use_onnx else self._forward_torch
@@ -267,6 +268,7 @@ class ModelMeta:
         self.num_workers, self.workers = num_workers, []
         self.max_batch_size = 1
         self.weights, self.step, self.ckpt_step = None, 0, 0
+        self.cached_weights_refs = [None for _ in range(5)]
         self.use_onnx = use_onnx
         self.pending_create_workers = 0
         self.ckpt_steps = []
@@ -449,6 +451,9 @@ class Model:
 
     async def set_weights(self, name, weights: list[ray.ObjectRef]):
         meta: ModelMeta = self.models[name]
+        meta.cached_weights_refs[
+            meta.step % len(meta.cached_weights_refs)
+        ] = meta.weights  # 保存上一次的权重，避免权重发布过程中引用失效
         meta.weights = weights[0]
         meta.step += 1
         merge(
@@ -671,22 +676,24 @@ class Model:
             None, self._get_onnx_model, name, meta.use_onnx
         )
 
-    async def get_max_batch_size(self, name) -> int:
-        meta: ModelMeta = self.models[name]
-        return meta.max_batch_size
-
-    async def get_use_onnx(self, name) -> bool:
-        return self.models[name].use_onnx
-
-    async def get_cpus_gpus_per_worker(self) -> tuple[float, float]:
-        return self.cpus_per_worker, self.gpus_per_worker
-
     async def get_workers(self, name, node_id: str = None) -> list[ModelWorker]:
         model: ModelMeta = self.models[name]
         if not node_id:
             return model.workers
         workers = [w for w in model.workers if w.__node_id == node_id]
         return workers if workers else model.workers
+
+    async def get_worker_initialize_info(
+        self, name
+    ) -> tuple[int, int, str, float, float]:
+        meta: ModelMeta = self.models[name]
+        return (
+            meta.step,
+            meta.max_batch_size,
+            meta.use_onnx,
+            self.cpus_per_worker,
+            self.gpus_per_worker,
+        )
 
 
 class RemoteModel:
@@ -695,7 +702,7 @@ class RemoteModel:
     """
 
     remote_models: dict[str:"RemoteModel"] = {}
-    max_cached_model: int = 10
+    max_cached_model: int = 5
 
     set_executor: bool = False
 
@@ -948,11 +955,9 @@ class RemoteModel:
             weights: 模型的权重，为一个NestedArray数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
-        # self.model.set_weights.remote(self.name, [ray.put(weights)])
-        self.model.set_weights.remote(
-            self.name,
-            [ray.put(weights, _owner=self.model)],
-        )
+        # 保持权重引用，避免权重发布过程中引用失效
+        self.last_publish_weights = ray.put(weights, _owner=self.model)
+        self.model.set_weights.remote(self.name, [self.last_publish_weights])
 
     async def sync(self):
         self.workers[:] = await self.model.get_workers.remote(
