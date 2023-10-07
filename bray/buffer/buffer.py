@@ -207,8 +207,14 @@ class RemoteBuffer:
         return self
 
     async def _generate(self, source: Iterator[NestedArray]):
+        batch_data, max_batch_size = [], 16
         for data in source:
-            await self._push(False, data)
+            batch_data.append(data)
+            if len(batch_data) < max_batch_size:
+                continue
+            await self._push(False, *batch_data)
+            batch_data.clear()
+        await self._push(False, *batch_data)
 
     def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
         generate = lambda source: asyncio.run(self._generate(source))
