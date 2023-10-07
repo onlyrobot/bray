@@ -207,9 +207,9 @@ class RemoteBuffer:
     def __iter__(self) -> Iterator[NestedArray]:
         return self
 
-    async def _generate(self, source: Iterator[NestedArray]):
+    async def _generate(self, source: Iterator[NestedArray], batch_size):
         beg = time.time()
-        batch_data, max_batch_size = [], 16
+        batch_data, max_batch_size = [], batch_size
         for data in source:
             merge_time_ms("generate", beg, buffer=self.name)
             batch_data.append(data)
@@ -219,8 +219,10 @@ class RemoteBuffer:
             beg = time.time()
         await self._push(False, *batch_data)
 
-    def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
-        generate = lambda source: asyncio.run(self._generate(source))
+    def add_source(
+        self, *sources: Iterator[NestedArray], batch_size=16
+    ) -> ray.ObjectRef:
+        generate = lambda source: asyncio.run(self._generate(source, batch_size))
         generate = ray.remote(generate).options(
             num_cpus=0, scheduling_strategy="SPREAD"
         )
