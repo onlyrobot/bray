@@ -151,13 +151,14 @@ class RemoteBuffer:
             )
             for i in range(0, len(replays), step)
         ]
-        # beg = time.time()
+        beg = time.time()
         try:
             await asyncio.gather(*tasks)
         except ray.exceptions.RayActorError:
             print("Buffer worker is not health, try to sync buffer")
             await self.sync()
-        # merge_time_ms("push_", beg, buffer=self.name)
+        if not drop:
+            merge_time_ms("push_", beg, buffer=self.name)
         self.worker_index += len(tasks)
 
     def push(self, *replays: NestedArray) -> asyncio.Task:
@@ -207,13 +208,15 @@ class RemoteBuffer:
         return self
 
     async def _generate(self, source: Iterator[NestedArray]):
+        beg = time.time()
         batch_data, max_batch_size = [], 16
         for data in source:
+            merge_time_ms("generate", beg, buffer=self.name)
             batch_data.append(data)
-            if len(batch_data) < max_batch_size:
-                continue
-            await self._push(False, *batch_data)
-            batch_data.clear()
+            if len(batch_data) >= max_batch_size:
+                await self._push(False, *batch_data)
+                batch_data.clear()
+            beg = time.time()
         await self._push(False, *batch_data)
 
     def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
