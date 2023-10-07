@@ -212,5 +212,7 @@ class RemoteBuffer:
 
     def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
         generate = lambda source: asyncio.run(self._generate(source))
-        generate = ray.remote(generate).options(num_cpus=0)
+        generate = ray.remote(generate).options(
+            num_cpus=0, scheduling_strategy="SPREAD"
+        )
         return [generate.remote(source) for source in sources]
