@@ -131,6 +131,9 @@ class ModelWorker:
         else:
             tf.config.set_visible_devices([], "GPU")
         self.torch_model = model = model()
+        args, kwargs = ray.get(self.model.get_forward_inputs.remote())
+        args, kwargs = make_batch([(args, kwargs)])
+        self.torch_model(*args, **kwargs)
         weights = ray.get(self.model.get_weights.remote(self.name))
         model.set_weights(weights)
         self.tensorflow_model = tf.function(model)
@@ -327,6 +330,8 @@ class Model:
             weights = get_torch_model_weights(torch_model)
         else:
             tensorflow_model = torch_model()
+            args, kwargs = make_batch([(forward_args, forward_kwargs)])
+            tensorflow_model(*args, **kwargs)
             weights = tensorflow_model.get_weights()
         meta = ModelMeta(num_workers, use_onnx)
         self._initialize_model(self.name, weights, max_batch_size, meta)
@@ -667,6 +672,9 @@ class Model:
 
     async def get_model(self) -> ray.ObjectRef:
         return self.model
+    
+    async def get_forward_inputs(self) -> tuple[np.ndarray]:
+        return self.forward_args, self.forward_kwargs
 
     async def get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
         meta: ModelMeta = self.models[name]
@@ -914,6 +922,9 @@ class RemoteModel:
             set_torch_model_weights(torch_model, weights)
         else:
             tensorflow_model = torch_model = torch_model()
+            args, kwargs = ray.get(self.model.get_forward_inputs.remote())
+            args, kwargs = make_batch([(args, kwargs)])
+            tensorflow_model(*args, **kwargs)
             tensorflow_model.set_weights(weights)
         return torch_model
 

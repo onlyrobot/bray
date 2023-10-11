@@ -42,11 +42,12 @@ class AtariActor(bray.Actor):
         reward = data["reward"]
         # self.reward_metric.merge(reward)
         self.episode_reward += reward
-        value, logit, action = await self.remote_model.forward(obs)
+        state = {"image": obs}
+        value, logit, action = await self.remote_model.forward(state)
         # for l in logit:
         #     self.logit_metric.merge(l)
         # self.value_metric.merge(value)
-        self._append_to_trajectory(obs, action, reward, value, logit)
+        self._append_to_trajectory(state, action, reward, value, logit)
         return json.dumps({"action": action.tolist()}).encode()
 
     def end(self, data: bytes) -> bytes:
@@ -60,7 +61,7 @@ class AtariActor(bray.Actor):
 
     def _append_to_trajectory(
         self,
-        obs: NestedArray,
+        state: NestedArray,
         action: NestedArray,
         reward: float,
         value: NestedArray,
@@ -83,7 +84,7 @@ class AtariActor(bray.Actor):
         if end:
             return
         transition = {
-            "obs": obs,
+            "state": state,
             "action": action,
             "reward": np.array(0.0, dtype=np.float32),
             "value": value,

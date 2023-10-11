@@ -42,9 +42,9 @@ class AtariModel(torch.nn.Module):
             out_features=action_space,
         )
 
-    def forward(self, images):
+    def forward(self, state):
         # transpose [None, 42, 42, 4] into [None, 4, 42, 42]
-        images = torch.permute(images, (0, 3, 1, 2))
+        images = torch.permute(state["image"], (0, 3, 1, 2))
         logits = self.base_net(images)
         values = torch.squeeze(
             self.values_net(logits),

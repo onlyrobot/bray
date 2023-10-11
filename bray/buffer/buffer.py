@@ -6,7 +6,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import asyncio
 
-from bray.utils.nested_array import NestedArray
+from bray.utils.nested_array import NestedArray, make_batch
 from bray.metric.metric import merge, merge_time_ms
 
 
@@ -63,6 +63,7 @@ class Buffer:
 
     async def register(self, worker: BufferWorker):
         self.workers.append(worker)
+        await asyncio.sleep(1)
         async with self.worker_cond:
             self.worker_cond.notify_all()
 
@@ -208,20 +209,39 @@ class RemoteBuffer:
         return self
 
     async def _generate(self, source: Iterator[NestedArray], batch_size):
+        batch_data, max_batch_size = [], batch_size if batch_size else 1
+        last_push_task = asyncio.create_task(asyncio.sleep(0))
         beg = time.time()
-        batch_data, max_batch_size = [], batch_size
         for data in source:
             merge_time_ms("generate", beg, buffer=self.name)
             batch_data.append(data)
-            if len(batch_data) >= max_batch_size:
-                await self._push(False, *batch_data)
-                batch_data.clear()
-            beg = time.time()
-        await self._push(False, *batch_data)
+            if len(batch_data) < max_batch_size:
+                await asyncio.sleep(0)
+                beg = time.time()
+                continue
+            push_task = self._push(
+                False,
+                *batch_data if batch_size is None else make_batch(batch_data),
+            )
+            push_task = asyncio.create_task(push_task)
+            batch_data = []
+            await last_push_task
+            last_push_task, beg = push_task, time.time()
+        await last_push_task
+        await self._push(
+            False, *batch_data if batch_size is None else make_batch(batch_data)
+        )
 
     def add_source(
-        self, *sources: Iterator[NestedArray], batch_size=16
+        self, *sources: Iterator[NestedArray], batch_size=None
     ) -> ray.ObjectRef:
+        """
+        将一个或多个数据源添加到 Buffer 中，这些数据源会被异步的推送到 Buffer 中
+
+        Args:
+            sources: 数据源
+            batch_size: 如果为None，则不对数据进行分批，否则会对数据进行分批
+        """
         generate = lambda source: asyncio.run(self._generate(source, batch_size))
         generate = ray.remote(generate).options(
             num_cpus=0, scheduling_strategy="SPREAD"

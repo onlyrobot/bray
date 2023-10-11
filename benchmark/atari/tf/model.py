@@ -4,7 +4,7 @@ import tensorflow as tf
 class AtariModel(tf.keras.Model):
     def __init__(self, action_space=9):
         super().__init__()
-        base_net = tf.keras.Sequential(
+        self.base_net = tf.keras.Sequential(
             [
                 tf.keras.layers.Conv2D(
                     filters=16,
@@ -31,18 +31,15 @@ class AtariModel(tf.keras.Model):
                 tf.keras.layers.Flatten(),
             ]
         )
-        values_net = tf.keras.layers.Dense(1)
-        logits_net = tf.keras.layers.Dense(action_space)
-        self.net = tf.keras.Model(
-            inputs=base_net.inputs,
-            outputs=[values_net(base_net.output), logits_net(base_net.output)],
-        )
+        self.values_net = tf.keras.layers.Dense(1)
+        self.logits_net = tf.keras.layers.Dense(action_space)
 
-    def call(self, images):
+    def call(self, state):
         # transpose [None, 42, 42, 4] into [None, 4, 42, 42]
         # images = tf.transpose(images, perm=[0, 3, 1, 2])
-        values, logits = self.net(images)
-        values = tf.squeeze(values, axis=1)
+        hidden = self.base_net(state["image"])
+        values = tf.squeeze(self.values_net(hidden), axis=1)
+        logits = self.logits_net(hidden)
         probs = tf.nn.softmax(logits, axis=1)
         actions = tf.random.categorical(
             tf.math.log(probs),
@@ -54,6 +51,5 @@ class AtariModel(tf.keras.Model):
 
 if __name__ == "__main__":
     model = AtariModel()
-    model.build(input_shape=(None, 42, 42, 4))
+    print(model({"image": tf.random.normal((2, 42, 42, 4))}))
     model.summary()
-    print(model(tf.random.normal((2, 42, 42, 4))))

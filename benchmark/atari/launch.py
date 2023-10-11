@@ -10,7 +10,7 @@ bray.init(project="./atari-pengyao", trial="ppo-v0")
 remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
-    forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
+    forward_args=({"image": np.random.randn(42, 42, 4).astype(np.float32)},),
     num_workers=0,
     local_mode=True,
     use_onnx="train",

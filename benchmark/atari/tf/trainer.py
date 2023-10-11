@@ -18,7 +18,7 @@ def cal_kl(lhs_logits, rhs_logits):
 
 @tf.function
 def train_step_(
-    obs,
+    state,
     value,
     logit,
     action,
@@ -39,7 +39,7 @@ def train_step_(
     advantage = (advantage - advantage_mean) / tf.sqrt(advantages_variance + 1e-8)
 
     with tf.GradientTape() as tape:
-        t_value, t_logit, _ = model(obs, training=True)
+        t_value, t_logit, _ = model(state, training=True)
         target_neglogp = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=action, logits=t_logit
         )
@@ -83,15 +83,15 @@ def train_step(
     weights_publish_interval,
     step,
 ):
-    obs, value, logit, action, advantage = (
-        replay["obs"],
+    state, value, logit, action, advantage = (
+        replay["state"],
         replay["value"],
         replay["logit"],
         replay["action"],
         replay["advantage"],
     )
     policy_loss, value_loss, entropy_loss, kl_loss, loss = train_step_(
-        obs, value, logit, action, advantage, model, optimizer
+        state, value, logit, action, advantage, model, optimizer
     )
     if hvd.rank() != 0:
         return

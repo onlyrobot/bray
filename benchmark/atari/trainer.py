@@ -24,8 +24,8 @@ def train_step(
     weights_publish_interval,
     step,
 ):
-    obs, value, logit, action, advantage = (
-        replay["obs"],
+    state, value, logit, action, advantage = (
+        replay["state"],
         replay["value"],
         replay["logit"],
         replay["action"],
@@ -44,7 +44,7 @@ def train_step(
     advantage = (advantage - advantage_mean) / torch.sqrt(advantages_variance + 1e-8)
 
     optimizer.zero_grad()
-    t_value, t_logit, _ = model(obs)
+    t_value, t_logit, _ = model(state)
     target_neglogp = torch.nn.functional.cross_entropy(
         input=t_logit, target=action, reduction="none"
     )
