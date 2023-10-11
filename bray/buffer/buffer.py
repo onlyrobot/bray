@@ -177,9 +177,9 @@ class RemoteBuffer:
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
-        return BufferWorker.options(scheduling_strategy=scheduling_local).remote(
-            self.name, self.size
-        )
+        return BufferWorker.options(
+            scheduling_strategy=scheduling_local, max_concurrency=100000
+        ).remote(self.name, self.size)
 
     def __next__(self) -> NestedArray:
         if not self.buffer_workers:
