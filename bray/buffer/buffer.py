@@ -209,6 +209,7 @@ class RemoteBuffer:
         return self
 
     async def _generate(self, source: Iterator[NestedArray], batch_size):
+        self.worker_index = random.randint(0, 100)
         batch_data, max_batch_size = [], batch_size if batch_size else 1
         last_push_task = asyncio.create_task(asyncio.sleep(0))
         beg = time.time()
