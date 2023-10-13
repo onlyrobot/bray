@@ -222,7 +222,7 @@ class RemoteBuffer:
                 continue
             push_task = self._push(
                 False,
-                *batch_data if batch_size is None else make_batch(batch_data),
+                *batch_data if batch_size is None else [make_batch(batch_data)],
             )
             push_task = asyncio.create_task(push_task)
             batch_data = []
@@ -230,7 +230,7 @@ class RemoteBuffer:
             last_push_task, beg = push_task, time.time()
         await last_push_task
         await self._push(
-            False, *batch_data if batch_size is None else make_batch(batch_data)
+            False, *batch_data if batch_size is None else [make_batch(batch_data)]
         )
 
     def add_source(
