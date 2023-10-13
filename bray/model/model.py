@@ -301,10 +301,10 @@ class Model:
             os.makedirs(root_path, exist_ok=True)
 
         torch_path = os.path.join(root_path, f"{name}.pt")
-        if not os.path.exists(torch_path):
-            assert torch_model is not None, "Missing torch model"
+        if torch_model is not None:
             torch.save(torch_model, torch_path)
         else:
+            assert os.path.exists(torch_path), "Missing torch model"
             print("Loading model from", torch_path)
             torch_model = torch.load(torch_path)
         self.name, self.model = name, ray.put(torch_model)
@@ -672,7 +672,7 @@ class Model:
 
     async def get_model(self) -> ray.ObjectRef:
         return self.model
-    
+
     async def get_forward_inputs(self) -> tuple[np.ndarray]:
         return self.forward_args, self.forward_kwargs
 
