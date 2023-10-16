@@ -454,13 +454,13 @@ class Model:
         async with meta.worker_cond:
             meta.worker_cond.notify_all()
 
-    async def set_weights(self, name, weights: list[ray.ObjectRef]):
+    async def set_weights(self, name, weights: list[ray.ObjectRef], step):
         meta: ModelMeta = self.models[name]
         meta.cached_weights_refs[
             meta.step % len(meta.cached_weights_refs)
         ] = meta.weights  # 保存上一次的权重，避免权重发布过程中引用失效
         meta.weights = weights[0]
-        meta.step += 1
+        meta.step = meta.step + 1 if step == -1 else step
         merge(
             "step",
             meta.step,
@@ -959,7 +959,7 @@ class RemoteModel:
             self.cached_cloned_names[step] = cloned_name
         return RemoteModel(cloned_name, local_mode=local_mode)
 
-    def publish_weights(self, weights: NestedArray):
+    def publish_weights(self, weights: NestedArray, step=-1):
         """
         发布模型的权重，会通知所有的ModelWorker更新权重
         Args:
@@ -968,7 +968,7 @@ class RemoteModel:
         """
         # 保持权重引用，避免权重发布过程中引用失效
         self.last_publish_weights = ray.put(weights, _owner=self.model)
-        self.model.set_weights.remote(self.name, [self.last_publish_weights])
+        self.model.set_weights.remote(self.name, [self.last_publish_weights], step)
 
     async def sync(self):
         self.workers[:] = await self.model.get_workers.remote(
