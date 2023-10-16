@@ -190,15 +190,27 @@ class RemoteBuffer:
         self.pop_index += 1
         size = len(self.replays) - self.pop_index
 
-        # prefetch from buffer worker
+        # prefetch from buffer when workers num is 1
         if not self.next_replays and size <= self.last_size // 2:
-            self.last_size = 0
-            self.next_replays = [w.pop.remote() for w in self.buffer_workers]
+            for w in self.buffer_workers:
+                ref = w.__bray_ref = w.pop.remote()
+                self.next_replays.append(ref)
+
+            self.last_size, self.ready_replays = 0, []
 
         if size == 0:
-            ready_replays, self.next_replays = ray.wait(self.next_replays)
+            for w in self.buffer_workers:
+                if w.__bray_ref not in self.ready_replays:
+                    continue
+                ref = w.__bray_ref = w.pop.remote()
+                self.next_replays.append(ref)
+
+            self.ready_replays, self.next_replays = ray.wait(
+                self.next_replays, num_returns=1
+            )
+
             self.replays.clear()
-            for replays in ready_replays:
+            for replays in self.ready_replays:
                 self.replays.extend(ray.get(replays))
             self.pop_index = 0
             self.last_size += len(self.replays)
@@ -231,8 +243,9 @@ class RemoteBuffer:
         await last_push_task
         if not batch_data:
             return
-        data = batch_data if batch_size is None else [make_batch(batch_data)]
-        await self._push(False, *data)
+        await self._push(
+            False, *batch_data if batch_size is None else [make_batch(batch_data)]
+        )
 
     def add_source(
         self, *sources: Iterator[NestedArray], batch_size=None
