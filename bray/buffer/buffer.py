@@ -229,9 +229,10 @@ class RemoteBuffer:
             await last_push_task
             last_push_task, beg = push_task, time.time()
         await last_push_task
-        await self._push(
-            False, *batch_data if batch_size is None else [make_batch(batch_data)]
-        )
+        if not batch_data:
+            return
+        data = batch_data if batch_size is None else [make_batch(batch_data)]
+        await self._push(False, *data)
 
     def add_source(
         self, *sources: Iterator[NestedArray], batch_size=None
