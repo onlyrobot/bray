@@ -58,14 +58,14 @@ def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> list[NestedArr
 
 
 def unflatten_nested_array(
-    inputs: NestedArray, flatten_arrays: list[NestedArray], index=-1
+    inputs: NestedArray, flatten_arrays: list[NestedArray], index=-1, sort_keys=False
 ) -> NestedArray:
     def unflatten(_):
         nonlocal index
         index += 1
         return flatten_arrays[index]
 
-    return handle_nested_array(inputs, unflatten)
+    return handle_nested_array(inputs, unflatten, sort_keys=sort_keys)
 
 
 def make_batch(nested_arrays: list[NestedArray], concate=False) -> NestedArray:

@@ -60,7 +60,8 @@ def endless_rollout(gym_id: str, game_id: str):
         try:
             rollout(env, game_id)
         except Exception as e:
-            print(e)
+            import traceback
+            traceback.print_exc()
         time.sleep(5)
         game_id = "game_" + str(uuid.uuid4())
 
