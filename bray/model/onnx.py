@@ -28,6 +28,9 @@ def export_onnx(
         (forward_args, forward_kwargs), torch.from_numpy, sort_keys=True
     )
 
+    with torch.no_grad():
+        origin_outputs = model(*tensor_args, **tensor_kwargs)
+
     torch.onnx.export(
         model,
         tensor_args + (tensor_kwargs,),
@@ -36,7 +39,7 @@ def export_onnx(
         training=torch.onnx.TrainingMode.EVAL
         if export_params
         else torch.onnx.TrainingMode.TRAINING,
-        # opset_version=10,
+        # opset_version=13,
         export_params=export_params,
         do_constant_folding=False,
         # keep_initializers_as_inputs=True,
@@ -60,13 +63,15 @@ def export_onnx(
             if name in input_names:
                 continue
             print("Warning: unused parameter:", name)
-    assert len(input_names) == len(flatten_input), "Onnx model input length error."
+    if len(input_names) != len(flatten_input):
+        print(
+            f"Onnx model input length error, input_names: {input_names}, "
+            + f"flatten_input length: {len(flatten_input)}",
+        )
+        assert False, "Onnx model input length error."
 
     ort_inputs = dict(zip(input_names, flatten_input))
     ort_outputs = ort_session.run(None, ort_inputs)
-
-    with torch.no_grad():
-        origin_outputs = model(*tensor_args, **tensor_kwargs)
 
     def validate_model_output(output):
         assert isinstance(output, torch.Tensor)

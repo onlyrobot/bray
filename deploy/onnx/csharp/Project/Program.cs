@@ -117,9 +117,9 @@ OrtValue targetArray) where T : unmanaged
         sum += Math.Abs(originVal);
     }
     if (sum.Equals(zero))
-        return (diff, 0);
+        return (diff / origin.Length, 0);
 
-    return (diff, (float)diff / (float)sum);
+    return (diff / origin.Length, (float)diff / (float)sum);
 }
 
 // calculate abs and relative error of origin and target value
@@ -172,5 +172,5 @@ for (int i = 0; i < forwardOutputs.Count; i++)
     }
     else
         throw new Exception($"Unsupported data type {origin.ElementDataType}");
-    Console.WriteLine($"{i}th output is: {relative * 100}%, {absolute}");
+    Console.WriteLine($"{i}th output error: {relative * 100}%, {absolute}");
 }

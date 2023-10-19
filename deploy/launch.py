@@ -1,6 +1,7 @@
 import sys
 import os
 from os.path import join
+import time
 import shutil
 import torch
 import onnxruntime as ort
@@ -38,7 +39,21 @@ for i, output in enumerate(outputs):
     np.save(join(model_dir, f"forward_outputs/{i}.npy"), output)
 
 # Test onnx model in python
+print("-------- Test onnx model in python ----------")
+ort_outputs = ort_session.run(None, inputs)
+# test session run latency
+beg = time.time()
+for _ in range(100):
+    ort_session.run(None, inputs)
+print("Onnx session run latency:", (time.time() - beg) / 100 * 1000, "ms")
+print("Relative and absolute error of each output:")
+for i, (ort_output, output) in enumerate(zip(ort_outputs, outputs)):
+    diff = np.sum(np.abs(ort_output - output))
+    sum = np.sum(np.abs(output))
+    cnt = np.prod(output.shape)
+    print(f"{i}th output error: {diff / sum * 100 if sum > 0 else 0}%", diff / cnt)
 
 # Test onnx model in csharp
+print("-------- Test onnx model in csharp ----------")
 cur_dir = os.path.dirname(__file__)
 os.system(f"dotnet run --project {join(cur_dir, 'onnx/csharp/Project')} -- {model_dir}")
