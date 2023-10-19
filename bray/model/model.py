@@ -403,9 +403,9 @@ class Model:
         self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
 
     def _get_onnx_model(self, name, use_onnx):
-        onnx_path_postfix = f"{name}/{self.name}-infer.onnx"
+        onnx_infer_postfix = onnx_path_postfix = f"{name}/model.onnx"
         if use_onnx == "train":
-            onnx_path_postfix = f"{self.name}/{self.name}.onnx"
+            onnx_path_postfix = f"{self.name}/model-train.onnx"
         onnx_path = os.path.join(self.trial_path, onnx_path_postfix)
         outputs_path = os.path.join(
             self.trial_path,
@@ -435,6 +435,16 @@ class Model:
         torch.save(forward_outputs, outputs_path)
         with open(onnx_path, "rb") as f:
             onnx_model = f.read()
+
+        if use_onnx == "train":
+            # always export onnx model for infer
+            export_onnx(
+                torch_model,
+                os.path.join(self.trial_path, onnx_infer_postfix),
+                self.forward_args,
+                self.forward_kwargs,
+                export_params=True,
+            )
         return onnx_model, forward_outputs
 
     async def _create_worker(self, name):
