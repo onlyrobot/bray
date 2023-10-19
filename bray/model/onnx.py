@@ -29,6 +29,7 @@ def export_onnx(
     )
 
     with torch.no_grad():
+        model.eval()
         origin_outputs = model(*tensor_args, **tensor_kwargs)
 
     torch.onnx.export(
