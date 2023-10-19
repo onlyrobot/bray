@@ -22,6 +22,7 @@ class ActorGateway:
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.actors_per_worker = actors_per_worker
         self.actors = {}
+        self.auto_actor = None
         self.inactive_actors = [
             Actor(*args, **kwargs) for _ in range(actors_per_worker)
         ]
@@ -102,6 +103,18 @@ class ActorGateway:
         merge_time_ms("tick", actor.__bray_atime)
         return tick_ret
 
+    async def auto(self, data) -> bytes:
+        if self.auto_actor is None:
+            self.auto_actor = self._create_worker()
+        beg = time.time()
+        try:
+            tick_ret = await self.auto_actor.tick(data)
+        except:
+            self.auto_actor = None
+            raise
+        merge_time_ms("tick", beg)
+        return tick_ret
+
     async def __call__(self, headers: dict, body: bytes) -> bytes:
         if not self.is_initialized:
             self._initialize()
@@ -115,6 +128,9 @@ class ActorGateway:
 
         if step_kind == "start":
             return await self.start(game_id, body)
+
+        if step_kind == "auto":
+            return await self.auto(body)
 
         if step_kind != "end":
             raise Exception("Unknown step_kind:", step_kind)
