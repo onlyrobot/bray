@@ -13,6 +13,7 @@ from bray.utils.nested_array import (
 
 bray_model_dir = sys.argv[1]
 model_dir = f"./{os.path.basename(bray_model_dir)}"
+shutil.rmtree(model_dir)
 os.makedirs(model_dir, exist_ok=True)
 shutil.copy2(join(bray_model_dir, "model.onnx"), join(model_dir, "model.onnx"))
 
