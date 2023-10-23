@@ -119,6 +119,10 @@ class ActorGateway:
         if not self.is_initialized:
             self._initialize()
         step_kind = headers.get("step_kind")
+        
+        if step_kind == "auto":
+            return await self.auto(body)
+        
         game_id = headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
@@ -128,9 +132,6 @@ class ActorGateway:
 
         if step_kind == "start":
             return await self.start(game_id, body)
-
-        if step_kind == "auto":
-            return await self.auto(body)
 
         if step_kind != "end":
             raise Exception("Unknown step_kind:", step_kind)
