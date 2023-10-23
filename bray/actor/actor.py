@@ -119,10 +119,10 @@ class ActorGateway:
         if not self.is_initialized:
             self._initialize()
         step_kind = headers.get("step_kind")
-        
+
         if step_kind == "auto":
             return await self.auto(body)
-        
+
         game_id = headers.get("game_id")
         if game_id is None:
             raise Exception("game_id must be provided.")
@@ -189,7 +189,10 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             data = await reader.readexactly(
                 game_id_size + step_kind_size + key_size + token_size + body_size
             )
-        except ConnectionResetError:
+        except (
+            ConnectionResetError,
+            asyncio.exceptions.IncompleteReadError,
+        ):
             print("Client disconnected")
             writer.close()
             await writer.wait_closed()
