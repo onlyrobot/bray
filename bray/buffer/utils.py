@@ -87,6 +87,22 @@ class CallbackBuffer:
         return self
 
 
+class ReuseBuffer:
+    def __init__(self, buffer: Iterator[NestedArray]):
+        self.buffer = buffer
+
+    def __next__(self) -> NestedArray:
+        try:
+            return next(self.buffer)
+        except StopIteration:
+            self.buffer = iter(self.buffer)
+            return next(self.buffer)
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        self.buffer = iter(self.buffer)
+        return self
+
+
 class PrefetchBuffer:
     def __init__(self, buffer: Iterator[NestedArray], max_reuse=0, name="default"):
         """
