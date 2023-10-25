@@ -34,15 +34,18 @@ class RemoteMetrics:
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=1)
         )
+        self.launch_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self.writer = None
         asyncio.create_task(self.start_tensorboard())
 
-    async def start_tensorboard(self):
-        launch_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        await asyncio.sleep(self.time_window)
+    def _init_writer(self):
         trial_path = ray.get_runtime_context().namespace
-        self.writer = tensorboard.summary.Writer(
-            f"{trial_path}/{launch_time}",
-        )
+        self.writer = tensorboard.summary.Writer(f"{trial_path}/{self.launch_time}")
+
+    async def start_tensorboard(self):
+        await asyncio.sleep(self.time_window)
+        if self.writer is None:
+            self._init_writer()
         asyncio.create_task(self.dump_to_tensorboard())
 
     def _diff(self, current: Metric, last: Metric) -> Metric:
@@ -65,6 +68,12 @@ class RemoteMetrics:
         if not time_window:
             return self.metrics.get(name, Metric())
         return self.diff_metrics.get(name, Metric())
+
+    async def add_scalar(self, name, value, step):
+        if self.writer is None:
+            self._init_writer()
+        self.writer.add_scalar(name, value, step)
+        print(f"Add scalar: {name} {value} {step}")
 
     def _dump_by_desc(self, name, metric, diff):
         desc = self.descs.get(name, None)
@@ -195,6 +204,9 @@ class MetricsWorker:
         name = build_name(name, **kwargs)
         return ray.get(self.remote_metrics.query.remote(name, time_window))
 
+    def add_scalar(self, name, value, step):
+        self.remote_metrics.add_scalar.remote(name, value, step)
+
     def set_tensorboard_step(self, model: str, get_step: Callable):
         ray.get(self.remote_metrics.set_tensorboard_step.remote(model, get_step))
 
@@ -232,6 +244,19 @@ def merge(name: str, value: float, desc: dict[str:str] = None, **kwargs):
     """
     metrics_worker = get_metrics_worker()
     metrics_worker.merge(name, Metric(1, value), desc, **kwargs)
+
+
+def add_scalar(name: str, value: float, step: int):
+    """
+    输出指标到TensorBoard，支持在集群任何地方调用，
+    该方法就是直接调用TensorBoard的add_scalar方法
+    Args:
+        name: 指标的名字
+        value: 指标merge的值
+        step: 指标的横坐标
+    """
+    metrics_worker = get_metrics_worker()
+    metrics_worker.add_scalar(name, value, step)
 
 
 def query(

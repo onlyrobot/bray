@@ -20,6 +20,7 @@ from bray.utils.nested_array import NestedArray, handle_nested_array
 from bray.metric.metric import (
     merge,
     query,
+    add_scalar,
     get_metrics_worker,
     set_tensorboard_step,
 )
