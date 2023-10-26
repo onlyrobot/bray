@@ -257,8 +257,11 @@ class RemoteBuffer:
             sources: 数据源
             batch_size: 如果为None，则不对数据进行分批，否则会对数据进行分批
         """
-        generate = lambda source: asyncio.run(self._generate(source, batch_size))
-        generate = ray.remote(generate).options(
+
+        def SourceWorker(source):
+            return asyncio.run(self._generate(source, batch_size))
+
+        generate = ray.remote(SourceWorker).options(
             num_cpus=0, scheduling_strategy="SPREAD"
         )
         return [generate.remote(source) for source in sources]

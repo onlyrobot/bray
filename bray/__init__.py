@@ -16,7 +16,7 @@ from bray.model.onnx import export_onnx
 from bray.trainer.trainer import RemoteTrainer
 from bray.actor.actor import RemoteActor
 from bray.actor.base import Actor
-from bray.utils.nested_array import NestedArray, handle_nested_array
+from bray.utils.nested_array import NestedArray, handle_nested_array, make_batch
 from bray.metric.metric import (
     merge,
     query,
