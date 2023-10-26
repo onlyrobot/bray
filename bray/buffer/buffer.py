@@ -259,7 +259,11 @@ class RemoteBuffer:
         """
 
         def SourceWorker(source):
-            return asyncio.run(self._generate(source, batch_size))
+            try:
+                asyncio.run(self._generate(source, batch_size))
+            except Exception as e:
+                print(f"SourceWorker error: {e}")
+                raise e
 
         generate = ray.remote(SourceWorker).options(
             num_cpus=0, scheduling_strategy="SPREAD"
