@@ -272,7 +272,7 @@ class ModelMeta:
         self.max_batch_size = 1
         self.weights, self.step, self.ckpt_step = None, 0, 0
         self.cached_weights_refs = [None for _ in range(5)]
-        self.use_onnx = use_onnx
+        self.use_onnx, self.onnx_step = use_onnx, -1
         self.pending_create_workers = 0
         self.ckpt_steps = []
         self.step_cond = asyncio.Condition()
@@ -394,7 +394,7 @@ class Model:
             print(f"Model {name} load checkpoint at step {step}")
 
         if meta.use_onnx:
-            onnx_model, forward_outputs = self._get_onnx_model(name, meta.use_onnx)
+            onnx_model, forward_outputs = self._get_onnx_model(name)
             print(f"Using onnx model for {name} {meta.use_onnx}.")
         else:
             onnx_model, forward_outputs = None, None
@@ -402,49 +402,57 @@ class Model:
             return
         self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
 
-    def _get_onnx_model(self, name, use_onnx):
-        onnx_infer_postfix = onnx_path_postfix = f"{name}/model.onnx"
-        if use_onnx == "train":
-            onnx_path_postfix = f"{self.name}/model-train.onnx"
+    def _get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
+        onnx_path_postfix = f"{name}/model.onnx"
         onnx_path = os.path.join(self.trial_path, onnx_path_postfix)
+        os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+        from bray.model.onnx import export_onnx
+
+        torch_model = ray.get(self.model)
+        step, weights = self._get_target_step(name, -1)
+        meta: ModelMeta = self.models[name]
         outputs_path = os.path.join(
             self.trial_path,
             f"{self.name}/forward_outputs.pt",
         )
-        if os.path.exists(onnx_path) and os.path.exists(outputs_path):
-            with open(onnx_path, "rb") as f:
-                onnx_model = f.read()
-            forward_outputs = torch.load(outputs_path)
-            return onnx_model, forward_outputs
-
-        from bray.model.onnx import export_onnx
-
-        print("Exporting onnx model to", onnx_path)
-        os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-
-        torch_model = ray.get(self.model)
-        weights = self._load_checkpoint(name, step=0)
-        set_torch_model_weights(torch_model, weights)
-        forward_outputs = export_onnx(
-            torch_model,
-            onnx_path,
-            self.forward_args,
-            self.forward_kwargs,
-            export_params=False if use_onnx == "train" else True,
-        )
-        torch.save(forward_outputs, outputs_path)
-        with open(onnx_path, "rb") as f:
-            onnx_model = f.read()
-
-        if use_onnx == "train":
-            # always export onnx model for infer
-            export_onnx(
+        if (
+            meta.onnx_step < step
+            or not os.path.exists(onnx_path)
+            or not os.path.exists(outputs_path)
+        ):
+            weights = ray.get(weights) if weights else self._load_checkpoint(name, step)
+            set_torch_model_weights(torch_model, weights)
+            print(f"Exporting latest onnx model at step {step} to", onnx_path)
+            forward_outputs = export_onnx(
                 torch_model,
-                os.path.join(self.trial_path, onnx_infer_postfix),
+                onnx_path,
                 self.forward_args,
                 self.forward_kwargs,
                 export_params=True,
             )
+            meta.onnx_step = step
+            torch.save(forward_outputs, outputs_path)
+
+        onnx_train_path = os.path.join(self.trial_path, f"{self.name}/model-train.onnx")
+        if meta.use_onnx != "train" or (
+            os.path.exists(onnx_train_path) and os.path.exists(outputs_path)
+        ):
+            if meta.use_onnx == "train":
+                onnx_path = onnx_train_path
+            with open(onnx_path, "rb") as f:
+                onnx_model = f.read()
+            return onnx_model, torch.load(outputs_path)
+
+        print("Exporting onnx model to", onnx_train_path)
+        forward_outputs = export_onnx(
+            torch_model,
+            onnx_train_path,
+            self.forward_args,
+            self.forward_kwargs,
+            export_params=False,
+        )
+        with open(onnx_train_path, "rb") as f:
+            onnx_model = f.read()
         return onnx_model, forward_outputs
 
     async def _create_worker(self, name):
@@ -626,10 +634,11 @@ class Model:
         asyncio.create_task(self._health_check())
 
     def _load_checkpoint(self, name, step):
-        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-        if step != 0:
-            ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
-            weights_path = os.path.join(ckpt_dir, f"step-{step}.pt")
+        weights_path = os.path.join(
+            os.path.join(self.trial_path, f"{name}/checkpoint"), f"step-{step}.pt"
+        )
+        if not os.path.exists(weights_path) and step == 0:
+            weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
         if not os.path.exists(weights_path):
             clone_dir = os.path.join(self.trial_path, f"{name}/clone-step-{step}")
             weights_path = os.path.join(clone_dir, f"weights.pt")
@@ -691,7 +700,7 @@ class Model:
         if not meta.use_onnx:
             return None, None
         return await asyncio.get_running_loop().run_in_executor(
-            None, self._get_onnx_model, name, meta.use_onnx
+            None, self._get_onnx_model, name
         )
 
     async def get_workers(self, name, node_id: str = None) -> list[ModelWorker]:
