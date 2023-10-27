@@ -12,26 +12,39 @@ from bray.metric.metric import merge, merge_time_ms
 
 @ray.remote
 class BufferWorker:
-    def __init__(self, name: str, size: int):
+    def __init__(self, name: str):
         self.name, self.buffer = name, ray.get_actor(name)
-        self.replays, self.size = [], size
         self_handle = ray.get_runtime_context().current_actor
-        ray.get(self.buffer.register.remote(self_handle))
+        worker_info = ray.get(self.buffer.register.remote(self_handle))
+        self.size, self.batch_size = worker_info
+        if self.batch_size is not None:
+            self.size = self.size // self.batch_size
+        self.replays, self._replays = [], []
         self.pop_cond = asyncio.Condition()
 
     async def push(self, drop=True, *replays: NestedArray):
         if not replays:
             return
-        while not drop and len(self.replays) > self.size:
+        while not drop and len(self.replays) >= self.size:
             await asyncio.sleep(0.01)
         before_size = len(self.replays)
-        self.replays.extend(replays)
         merge(
             "push",
             len(replays),
             desc={"time_window_sum": "push per minute"},
             buffer=self.name,
         )
+        batch_size, _replays = self.batch_size, self._replays
+        if batch_size is None:
+            self.replays.extend(replays)
+        else:
+            _replays.extend(replays)
+
+        while batch_size and len(_replays) >= batch_size:
+            batch_data = make_batch(_replays[:batch_size])
+            del _replays[:batch_size]
+            self.replays.append(batch_data)
+
         if drop and len(self.replays) > self.size:
             # print(f"Buffer {self.name} is full")
             del self.replays[: -self.size]
@@ -44,9 +57,10 @@ class BufferWorker:
         async with self.pop_cond:
             await self.pop_cond.wait_for(lambda: len(self.replays) > 0)
         replays = self.replays.copy()
+        batch_size = 1 if self.batch_size is None else self.batch_size
         merge(
             "pop",
-            len(replays),
+            len(replays) * batch_size,
             desc={"time_window_sum": "pop per minute"},
             buffer=self.name,
         )
@@ -56,7 +70,8 @@ class BufferWorker:
 
 @ray.remote
 class Buffer:
-    async def __init__(self):
+    async def __init__(self, size, batch_size):
+        self.size, self.batch_size = size, batch_size
         self.worker_cond = asyncio.Condition()
         self.workers = []
         asyncio.create_task(self._health_check())
@@ -66,6 +81,7 @@ class Buffer:
         # await asyncio.sleep(1)
         async with self.worker_cond:
             self.worker_cond.notify_all()
+        return self.size, self.batch_size
 
     def get_workers(self) -> tuple[list[BufferWorker], int]:
         return self.workers
@@ -100,19 +116,33 @@ class Buffer:
 
 
 class RemoteBuffer:
-    def __init__(self, name: str, size: int = 128):
-        self.name, self.size = name, size
+    def __init__(
+        self, name: str, size: int = 128, batch_size: int = None, num_workers: int = 2
+    ):
+        """
+        创建一个 RemoteBuffer，RemoteBuffer 会在 Ray 集群中运行，用于存储数据
+        Args:
+            name: Buffer 的名称，用于标识不同的 Buffer
+            size: Buffer 的大小，用于限制 Buffer 中最多能存储多少条数据
+            batch_size: 从 Buffer 中读取数据时，每次读取的数据的批次大小，
+                如果为 None，则不对数据进行分批
+            num_workers: BufferWorker 的数量，用于控制从 Buffer 中读取数据的并发度
+        """
+        assert (
+            batch_size is None or size >= batch_size
+        ), f"RemoteBuffer size {size} must >= batch_size {batch_size}"
+        self.name, self.num_workers = name, num_workers
+        self.buffer_workers = None
+        self.subscribe_task = None
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, scheduling_strategy=scheduling_local
-        ).remote()
+        ).remote(size, batch_size)
         self.workers = ray.get(self.buffer.get_workers.remote())
         self.worker_index = random.randint(0, 100)
-        self.buffer_workers = None
-        self.subscribe_task = None
 
     def __del__(self):
         self.subscribe_task.cancel() if self.subscribe_task else None
@@ -141,7 +171,7 @@ class RemoteBuffer:
         await self.sync()
         await self._init_subscribe_task(drop)
 
-    async def _push(self, drop: bool, *replays: NestedArray) -> None:
+    async def _push(self, *replays: NestedArray, drop=True) -> None:
         if len(self.workers) == 0 or not self.subscribe_task:
             await self._init_subscribe_task(drop)
         workers_num = len(self.workers)
@@ -163,7 +193,14 @@ class RemoteBuffer:
         self.worker_index += len(tasks)
 
     def push(self, *replays: NestedArray) -> asyncio.Task:
-        return asyncio.create_task(self._push(True, *replays))
+        """
+        将一个或多个数据推送到 Buffer 中，这些数据会被异步的推送到 Buffer 中，
+        当存在多个 BufferWorker 时，会将数据均匀的分配到每个 BufferWorker 中，
+        这个方法只能在 asyncio 环境中调用
+        Args:
+            replays: 待推送的一个或多个数据
+        """
+        return asyncio.create_task(self._push(*replays, drop=True))
 
     async def sync(self):
         self.workers[:] = await self.buffer.get_workers.remote()
@@ -179,11 +216,17 @@ class RemoteBuffer:
         )
         return BufferWorker.options(
             scheduling_strategy=scheduling_local, max_concurrency=100000
-        ).remote(self.name, self.size)
+        ).remote(self.name)
 
     def __next__(self) -> NestedArray:
+        """
+        从 Buffer 中读取一条数据，数据的格式为 NestedArray，也就是 push 时的数据格式，
+        如果设置了 batch_size，则会将多条数据合并为一个 NestedArray
+        """
         if not self.buffer_workers:
-            self.buffer_workers = [self._new_local_worker() for _ in range(2)]
+            self.buffer_workers = [
+                self._new_local_worker() for _ in range(self.num_workers)
+            ]
             self.replays = []
             self.pop_index = -1
             self.last_size, self.next_replays = 0, []
@@ -195,72 +238,65 @@ class RemoteBuffer:
             for w in self.buffer_workers:
                 ref = w.__bray_ref = w.pop.remote()
                 self.next_replays.append(ref)
-
             self.last_size, self.ready_replays = 0, []
 
-        if size == 0:
-            for w in self.buffer_workers:
-                if w.__bray_ref not in self.ready_replays:
-                    continue
-                ref = w.__bray_ref = w.pop.remote()
-                self.next_replays.append(ref)
+        if size != 0:
+            return self.replays[self.pop_index]
 
-            self.ready_replays, self.next_replays = ray.wait(
-                self.next_replays, num_returns=1
-            )
+        for w in self.buffer_workers:
+            if w.__bray_ref not in self.ready_replays:
+                continue
+            ref = w.__bray_ref = w.pop.remote()
+            self.next_replays.append(ref)
 
-            self.replays.clear()
-            for replays in self.ready_replays:
-                self.replays.extend(ray.get(replays))
-            self.pop_index = 0
-            self.last_size += len(self.replays)
+        self.ready_replays, self.next_replays = ray.wait(
+            self.next_replays, num_returns=1
+        )
+
+        self.replays.clear()
+        for replays in self.ready_replays:
+            self.replays.extend(ray.get(replays))
+        self.pop_index = 0
+        self.last_size += len(self.replays)
 
         return self.replays[self.pop_index]
 
     def __iter__(self) -> Iterator[NestedArray]:
+        """RemoteBuffer 是一个可迭代对象，可以读取 Buffer 中的数据"""
         return self
 
-    async def _generate(self, source: Iterator[NestedArray], batch_size):
+    async def _generate(self, source: Iterator[NestedArray]):
         self.worker_index = random.randint(0, 100)
-        batch_data, max_batch_size = [], batch_size if batch_size else 1
+        batch_data, batch_size = [], 32
         last_push_task = asyncio.create_task(asyncio.sleep(0))
-        beg = time.time()
+        generate_beg = time.time()
         for data in source:
-            merge_time_ms("generate", beg, buffer=self.name)
+            merge_time_ms("generate", generate_beg, buffer=self.name)
             batch_data.append(data)
-            if len(batch_data) < max_batch_size:
+            if len(batch_data) < batch_size:
                 await asyncio.sleep(0)
-                beg = time.time()
+                generate_beg = time.time()
                 continue
-            push_task = self._push(
-                False,
-                *batch_data if batch_size is None else [make_batch(batch_data)],
+            push_task = asyncio.create_task(
+                self._push(*batch_data, drop=False),
             )
-            push_task = asyncio.create_task(push_task)
-            batch_data = []
+            batch_data.clear()
             await last_push_task
-            last_push_task, beg = push_task, time.time()
+            last_push_task, generate_beg = push_task, time.time()
         await last_push_task
-        if not batch_data:
-            return
-        await self._push(
-            False, *batch_data if batch_size is None else [make_batch(batch_data)]
-        )
+        await self._push(*batch_data, drop=False)
 
-    def add_source(
-        self, *sources: Iterator[NestedArray], batch_size=None
-    ) -> ray.ObjectRef:
+    def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
         """
         将一个或多个数据源添加到 Buffer 中，这些数据源会被异步的推送到 Buffer 中
 
         Args:
-            sources: 数据源
-            batch_size: 如果为None，则不对数据进行分批，否则会对数据进行分批
+            sources: 一个或多个数据源，数据源是一个可迭代对象
         """
 
         def SourceWorker(source):
             try:
-                asyncio.run(self._generate(source, batch_size))
+                asyncio.run(self._generate(source))
             except Exception as e:
                 print(f"SourceWorker error: {e}")
                 raise e

@@ -24,6 +24,7 @@ def train_step(
     weights_publish_interval,
     step,
 ):
+    return
     state, value, logit, action, advantage = (
         replay["state"],
         replay["value"],
@@ -98,7 +99,8 @@ def train_step(
 
 def train_atari(
     remote_model,
-    remote_buffer,
+    train_buffer,
+    eval_buffer,
     batch_size,
     weights_publish_interval,
     num_steps,
@@ -119,9 +121,9 @@ def train_atari(
     optimizer = hvd.DistributedOptimizer(optimizer, named_parameters)
     # initialize buffer
     # total batch size = buffer batch size * trainer batch size * horovod size
-    buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size, kind="concate")
+    buffer = bray.BatchBuffer(train_buffer, batch_size=batch_size, kind="concate")
     buffer = bray.TorchTensorBuffer(buffer, device)
-    buffer = bray.PrefetchBuffer(buffer, max_reuse=0, name=remote_buffer.name)
+    buffer = bray.PrefetchBuffer(buffer, max_reuse=0, name=train_buffer.name)
     for i in range(num_steps):
         beg = time.time()
         replay = next(buffer)

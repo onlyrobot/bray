@@ -22,7 +22,9 @@ remote_model = bray.RemoteModel(
     use_onnx="train",
 )
 
-remote_buffer = bray.RemoteBuffer("grid_shooting_buffer")
+remote_buffer = bray.RemoteBuffer(
+    "grid_shooting_buffer", size=128, batch_size=8, num_workers=2
+)
 
 remote_trainer = bray.RemoteTrainer(
     use_gpu=None,

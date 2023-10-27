@@ -17,7 +17,12 @@ remote_model = bray.RemoteModel(
 )
 bray.set_tensorboard_step(remote_model.name)
 
-remote_buffer = bray.RemoteBuffer("atari_buffer")
+remote_buffer = bray.RemoteBuffer(
+    "atari_buffer",
+    size=128,
+    batch_size=8,
+    num_workers=2,
+)
 
 remote_trainer = bray.RemoteTrainer(
     use_gpu=None,

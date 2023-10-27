@@ -120,7 +120,8 @@ def train_grid_shooting(
     optimizer = torch.optim.Adam(parameters, lr=5e-4)
     optimizer = hvd.DistributedOptimizer(optimizer)
     # initialize buffer
-    buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size)
+    # total batch size = buffer batch size * trainer batch size * horovod size
+    buffer = bray.BatchBuffer(remote_buffer, batch_size=batch_size, kind="concate")
     buffer = bray.TorchTensorBuffer(buffer, device)
     buffer = bray.PrefetchBuffer(buffer, max_reuse=0, name=remote_buffer.name)
     for i in range(num_steps):
