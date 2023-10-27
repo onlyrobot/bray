@@ -67,7 +67,7 @@ class ActorGateway:
         if interval < self.active_check_interval:
             asyncio.create_task(self._check_active(game_id))
             return
-        self.inactive_actors.append(actor)
+        # self.inactive_actors.append(actor)
         self.actors.pop(game_id)
         print(f"Actor with game_id={game_id} inactive.")
 
