@@ -63,7 +63,7 @@ class Buffer:
 
     async def register(self, worker: BufferWorker):
         self.workers.append(worker)
-        await asyncio.sleep(1)
+        # await asyncio.sleep(1)
         async with self.worker_cond:
             self.worker_cond.notify_all()
 
@@ -127,7 +127,7 @@ class RemoteBuffer:
             return
         while not drop and len(self.workers) == 0:
             await self.sync()
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(1)
 
         if self.subscribe_task:
             await asyncio.sleep(10)
