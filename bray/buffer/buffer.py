@@ -25,8 +25,12 @@ class BufferWorker:
     async def push(self, drop=True, *replays: NestedArray):
         if not replays:
             return
+        wait_time, wait_interval = 0, 0.01
         while not drop and len(self.replays) >= self.size:
-            await asyncio.sleep(0.01)
+            if wait_time > 1:
+                return False
+            wait_time += wait_interval
+            await asyncio.sleep(wait_interval)
         before_size = len(self.replays)
         merge(
             "push",
@@ -171,25 +175,31 @@ class RemoteBuffer:
         await self.sync()
         await self._init_subscribe_task(drop)
 
+    async def __push(self, replays, drop, index):
+        while await self.workers[index].push.remote(drop, *replays) is False:
+            await asyncio.sleep(1)
+            index = (index + 1) % len(self.workers)
+
     async def _push(self, *replays: NestedArray, drop=True) -> None:
         if len(self.workers) == 0 or not self.subscribe_task:
             await self._init_subscribe_task(drop)
+
         workers_num = len(self.workers)
         step = max(len(replays) // workers_num, 16)
         tasks = [
-            self.workers[(self.worker_index + i) % workers_num].push.remote(
-                drop, *replays[i : i + step]
+            self.__push(
+                replays[i : i + step],
+                drop,
+                (self.worker_index + i) % workers_num,
             )
             for i in range(0, len(replays), step)
         ]
-        beg = time.time()
         try:
             await asyncio.gather(*tasks)
         except ray.exceptions.RayActorError:
             print("Buffer worker is not health, try to sync buffer")
             await self.sync()
-        if not drop:
-            merge_time_ms("push_", beg, buffer=self.name)
+
         self.worker_index += len(tasks)
 
     def push(self, *replays: NestedArray) -> asyncio.Task:
