@@ -261,7 +261,7 @@ class RemoteBuffer:
 
         self.ready_replays, self.next_replays = ray.wait(
             self.next_replays,
-            num_returns=self.num_workers // 2,
+            num_returns=(1 + self.num_workers) // 2,
             timeout=0,
         )
         if not self.ready_replays:
