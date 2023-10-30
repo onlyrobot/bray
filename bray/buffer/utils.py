@@ -90,16 +90,19 @@ class CallbackBuffer:
 class ReuseBuffer:
     def __init__(self, buffer: Iterator[NestedArray]):
         self.buffer = buffer
+        self.iterator = None
 
-    def __next__(self) -> NestedArray:
+    def __next__(self, reuse=False) -> NestedArray:
         try:
-            return next(self.buffer)
+            return next(self.iterator)
         except StopIteration:
-            self.buffer = iter(self.buffer)
-            return next(self.buffer)
+            if reuse:
+                raise(f"Reuse buffer is not reusable {self.buffer}")
+            self.iterator = iter(self.buffer)
+            return self.__next__(True)
 
     def __iter__(self) -> Iterator[NestedArray]:
-        self.buffer = iter(self.buffer)
+        self.iterator = iter(self.buffer)
         return self
 
 

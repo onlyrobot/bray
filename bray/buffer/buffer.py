@@ -121,7 +121,7 @@ class Buffer:
 
 class RemoteBuffer:
     def __init__(
-        self, name: str, size: int = 128, batch_size: int = None, num_workers: int = 2
+        self, name: str, size: int = 512, batch_size: int = None, num_workers: int = 2
     ):
         """
         创建一个 RemoteBuffer，RemoteBuffer 会在 Ray 集群中运行，用于存储数据
@@ -159,6 +159,7 @@ class RemoteBuffer:
     async def _init_subscribe_task(self, drop):
         if len(self.workers) != 0 and self.subscribe_task:
             return
+        self.worker_index = random.randint(0, 100)
         while not drop and len(self.workers) == 0:
             await self.sync()
             await asyncio.sleep(1)
@@ -194,13 +195,12 @@ class RemoteBuffer:
             )
             for i in range(0, len(replays), step)
         ]
+        self.worker_index += len(tasks)
         try:
             await asyncio.gather(*tasks)
         except ray.exceptions.RayActorError:
             print("Buffer worker is not health, try to sync buffer")
             await self.sync()
-
-        self.worker_index += len(tasks)
 
     def push(self, *replays: NestedArray) -> asyncio.Task:
         """
@@ -260,9 +260,14 @@ class RemoteBuffer:
             self.next_replays.append(ref)
 
         self.ready_replays, self.next_replays = ray.wait(
-            self.next_replays, num_returns=1
+            self.next_replays,
+            num_returns=self.num_workers // 2,
+            timeout=0,
         )
-
+        if not self.ready_replays:
+            self.ready_replays, self.next_replays = ray.wait(
+                self.next_replays, num_returns=1
+            )
         self.replays.clear()
         for replays in self.ready_replays:
             self.replays.extend(ray.get(replays))
