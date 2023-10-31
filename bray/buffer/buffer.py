@@ -6,7 +6,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import asyncio
 
-from bray.utils.nested_array import NestedArray, make_batch
+from bray.utils.nested_array import NestedArray, make_batch, split_batch
 from bray.metric.metric import merge, merge_time_ms
 
 
@@ -22,7 +22,7 @@ class BufferWorker:
         self.replays, self._replays = [], []
         self.pop_cond = asyncio.Condition()
 
-    async def push(self, *replays: NestedArray, drop=True, batch=False):
+    async def push(self, *replays: NestedArray, drop=True, batch=None):
         if not replays:
             return
         wait_time, wait_interval = 0, 0.01
@@ -34,14 +34,15 @@ class BufferWorker:
         before_size = len(self.replays)
         merge(
             "push",
-            len(replays),
+            len(replays) * (batch or 1),
             desc={"time_window_sum": "push per minute"},
             buffer=self.name,
         )
         batch_size, _replays = self.batch_size, self._replays
-        if batch_size is None or batch:
+        if batch_size is None or (batch and batch == batch_size):
             self.replays.extend(replays)
         else:
+            replays = split_batch(replays[0]) if batch else replays
             _replays.extend(replays)
 
         while batch_size and len(_replays) >= batch_size:
@@ -178,7 +179,8 @@ class RemoteBuffer:
         await self._init_subscribe_task(drop)
 
     async def __push(self, replays, drop, index):
-        if batch := self.batch_size and self.batch_size == len(replays):
+        num = len(replays)
+        if batch := num if self.batch_size and num > 1 else None:
             replays = [make_batch(replays)]
         index = index % len(self.workers)
         while (
