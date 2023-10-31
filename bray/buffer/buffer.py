@@ -22,7 +22,7 @@ class BufferWorker:
         self.replays, self._replays = [], []
         self.pop_cond = asyncio.Condition()
 
-    async def push(self, drop=True, *replays: NestedArray):
+    async def push(self, *replays: NestedArray, drop=True, batch=False):
         if not replays:
             return
         wait_time, wait_interval = 0, 0.01
@@ -39,7 +39,7 @@ class BufferWorker:
             buffer=self.name,
         )
         batch_size, _replays = self.batch_size, self._replays
-        if batch_size is None:
+        if batch_size is None or batch:
             self.replays.extend(replays)
         else:
             _replays.extend(replays)
@@ -52,7 +52,7 @@ class BufferWorker:
         if drop and len(self.replays) > self.size:
             # print(f"Buffer {self.name} is full")
             del self.replays[: -self.size]
-        if before_size != 0:
+        if before_size != 0 or len(self.replays) == 0:
             return
         async with self.pop_cond:
             self.pop_cond.notify_all()
@@ -136,6 +136,7 @@ class RemoteBuffer:
             batch_size is None or size >= batch_size
         ), f"RemoteBuffer size {size} must >= batch_size {batch_size}"
         self.name, self.num_workers = name, num_workers
+        self.batch_size = batch_size
         self.buffer_workers = None
         self.subscribe_task = None
         scheduling_local = NodeAffinitySchedulingStrategy(
@@ -177,7 +178,13 @@ class RemoteBuffer:
         await self._init_subscribe_task(drop)
 
     async def __push(self, replays, drop, index):
-        while await self.workers[index].push.remote(drop, *replays) is False:
+        if batch := self.batch_size and self.batch_size == len(replays):
+            replays = [make_batch(replays)]
+        index = index % len(self.workers)
+        while (
+            await self.workers[index].push.remote(*replays, drop=drop, batch=batch)
+            is False
+        ):
             await asyncio.sleep(1)
             index = (index + 1) % len(self.workers)
 
@@ -186,7 +193,10 @@ class RemoteBuffer:
             await self._init_subscribe_task(drop)
 
         workers_num = len(self.workers)
-        step = max(len(replays) // workers_num, 16)
+        if self.batch_size is None:
+            step = max(len(replays) // workers_num, 16)
+        else:
+            step = self.batch_size
         tasks = [
             self.__push(
                 replays[i : i + step],
@@ -259,6 +269,7 @@ class RemoteBuffer:
             ref = w.__bray_ref = w.pop.remote()
             self.next_replays.append(ref)
 
+        pop_beg = time.time()
         self.ready_replays, self.next_replays = ray.wait(
             self.next_replays,
             num_returns=self.num_workers,
@@ -268,6 +279,7 @@ class RemoteBuffer:
             self.ready_replays, self.next_replays = ray.wait(
                 self.next_replays, num_returns=1
             )
+        merge_time_ms("pop_wait", pop_beg, buffer=self.name)
         self.replays.clear()
         for replays in self.ready_replays:
             self.replays.extend(ray.get(replays))
@@ -288,6 +300,7 @@ class RemoteBuffer:
         for data in source:
             merge_time_ms("generate", generate_beg, buffer=self.name)
             batch_data.append(data)
+
             if len(batch_data) < batch_size:
                 await asyncio.sleep(0)
                 generate_beg = time.time()
