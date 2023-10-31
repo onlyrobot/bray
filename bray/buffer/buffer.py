@@ -296,14 +296,14 @@ class RemoteBuffer:
 
     async def _generate(self, source: Iterator[NestedArray]):
         self.worker_index = random.randint(0, 100)
-        batch_data, batch_size = [], 32
+        batch_data, batch_size = [], self.batch_size
         last_push_task = asyncio.create_task(asyncio.sleep(0))
         generate_beg = time.time()
         for data in source:
             merge_time_ms("generate", generate_beg, buffer=self.name)
             batch_data.append(data)
 
-            if len(batch_data) < batch_size:
+            if batch_size and len(batch_data) < batch_size:
                 await asyncio.sleep(0)
                 generate_beg = time.time()
                 continue
