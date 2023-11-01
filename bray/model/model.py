@@ -333,6 +333,9 @@ class Model:
             args, kwargs = make_batch([(forward_args, forward_kwargs)])
             tensorflow_model(*args, **kwargs)
             weights = tensorflow_model.get_weights()
+        tensor_weights = handle_nested_array(weights, torch.from_numpy)
+        weights_path = os.path.join(root_path, "weights.pt")
+        torch.save(tensor_weights, weights_path)
         meta = ModelMeta(num_workers, use_onnx)
         self._initialize_model(self.name, weights, max_batch_size, meta)
 
@@ -380,8 +383,10 @@ class Model:
             # union of ckpt_steps and clone_steps
             ckpt_steps = list(set(ckpt_steps).union(clone_steps))
             ckpt_steps.sort()
-            step = ckpt_steps[-1] if ckpt_steps else 0
-            weights = self._load_checkpoint(name, step=step)
+            if ckpt_steps:
+                step = ckpt_steps[-1]
+                print(f"Model {name} load checkpoint at step {step}")
+                weights = self._load_checkpoint(name, step=step)
         except Exception as e:
             print(f"Load checkpoint failed: {e}")
 
@@ -390,8 +395,6 @@ class Model:
         if meta.step != 0:
             meta.weights = ray.put(weights)
         self.models[name] = meta
-        if meta.step > 0:
-            print(f"Model {name} load checkpoint at step {step}")
 
         if meta.use_onnx:
             onnx_model, forward_outputs = self._get_onnx_model(name)
