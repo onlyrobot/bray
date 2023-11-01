@@ -1,4 +1,4 @@
-﻿// See https://aka.ms/new-console-template for more information
+﻿﻿// See https://aka.ms/new-console-template for more information
 using System.Diagnostics;
 using System.Globalization;
 using Microsoft.ML.OnnxRuntime;
@@ -14,18 +14,22 @@ OrtValue ConvertNpArrayToOrtValue(NDArray npArray)
         return OrtValue.CreateTensorValueFromMemory(
             npArray.astype(np.float32).ToArray<float>(),
             Array.ConvertAll(npArray.shape, x => (long)x));
+
     if (npArray.dtype == np.float64)
         return OrtValue.CreateTensorValueFromMemory(
             npArray.astype(np.float64).ToArray<double>(),
             Array.ConvertAll(npArray.shape, x => (long)x));
+
     if (npArray.dtype == np.int32)
         return OrtValue.CreateTensorValueFromMemory(
             npArray.astype(np.int32).ToArray<int>(),
             Array.ConvertAll(npArray.shape, x => (long)x));
+
     if (npArray.dtype == np.int64)
         return OrtValue.CreateTensorValueFromMemory(
             npArray.astype(np.int64).ToArray<long>(),
             Array.ConvertAll(npArray.shape, x => (long)x));
+            
     throw new Exception($"Unsupported data type {npArray.dtype}");
 }
 
@@ -55,6 +59,8 @@ Dictionary<string, OrtValue> LoadNpyFiles(string dir)
     return npyFiles;
 }
 var forwardInputs = LoadNpyFiles(Path.Combine(onnxModelDir, "forward_inputs"));
+forwardInputs = Enumerable.Range(0, forwardInputs.Count).ToDictionary(
+    x => session.InputNames[x], x => forwardInputs[x.ToString()]);
 // print input information for debugging
 // foreach (var input in forwardInputs)
 // {

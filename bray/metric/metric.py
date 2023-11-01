@@ -73,7 +73,6 @@ class RemoteMetrics:
         if self.writer is None:
             self._init_writer()
         self.writer.add_scalar(name, value, step)
-        print(f"Add scalar: {name} {value} {step}")
 
     def _dump_by_desc(self, name, metric, diff):
         desc = self.descs.get(name, None)

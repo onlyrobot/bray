@@ -13,7 +13,7 @@ from bray.utils.nested_array import (
 
 bray_model_dir = sys.argv[1]
 model_dir = f"./{os.path.basename(bray_model_dir)}"
-shutil.rmtree(model_dir)
+shutil.rmtree(model_dir, ignore_errors=True)
 os.makedirs(model_dir, exist_ok=True)
 shutil.copy2(join(bray_model_dir, "model.onnx"), join(model_dir, "model.onnx"))
 
@@ -26,11 +26,11 @@ flatten_inputs = flatten_nested_array(
 ort_session = ort.InferenceSession(
     join(model_dir, "model.onnx"), providers=["CPUExecutionProvider"]
 )
-inputs = dict(zip([i.name for i in ort_session.get_inputs()], flatten_inputs))
 
+inputs = dict(zip([i.name for i in ort_session.get_inputs()], flatten_inputs))
 os.makedirs(join(model_dir, "forward_inputs"), exist_ok=True)
-for name, input in inputs.items():
-    np.save(join(model_dir, f"forward_inputs/{name}.npy"), input)
+for i, input in enumerate(flatten_inputs):
+    np.save(join(model_dir, f"forward_inputs/{i}.npy"), input)
 
 forward_outputs = torch.load(join(bray_model_dir, "forward_outputs.pt"))
 
