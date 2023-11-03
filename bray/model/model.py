@@ -406,7 +406,7 @@ class Model:
         self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
 
     def _get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
-        onnx_path_postfix = f"{name}/model.onnx"
+        onnx_path_postfix = f"{name}/{name}.onnx"
         onnx_path = os.path.join(self.trial_path, onnx_path_postfix)
         os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
         from bray.model.onnx import export_onnx
@@ -436,7 +436,7 @@ class Model:
             meta.onnx_step = step
             torch.save(forward_outputs, outputs_path)
 
-        onnx_train_path = os.path.join(self.trial_path, f"{self.name}/model-train.onnx")
+        onnx_train_path = os.path.join(self.trial_path, f"{self.name}/train.onnx")
         if meta.use_onnx != "train" or (
             os.path.exists(onnx_train_path) and os.path.exists(outputs_path)
         ):

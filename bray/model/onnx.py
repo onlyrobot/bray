@@ -20,6 +20,14 @@ def export_onnx(
 ) -> NestedArray:
     """
     将模型导出为onnx格式，并使用导出的onnx模型验证模型的输出是否正确。
+    Args:
+        model: 原始的torch模型，包含forward方法
+        path: 导出的onnx模型的路径
+        forward_args: 模型的输入的位置参数
+        forward_kwargs: 模型forward的关键字参数
+        export_params: 是否导出模型的参数
+        check_consistency: 是否验证模型的输出是否正确
+        relative_diff: 验证模型输出是否正确时的相对误差
     Returns:
         NestedArray: 模型的原始输出，用于恢复onnx模型输出的numpy数组的结构。
     """
