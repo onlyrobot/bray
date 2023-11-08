@@ -8,7 +8,7 @@ RUN sh cuda_11.8.0_520.61.05_linux.run --silent --toolkit && rm cuda_11.8.0_520.
 RUN apt update && apt upgrade -y && apt install -y python3-pip
 RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 RUN pip3 install ray[all]==2.8.0
-RUN apt install -y git && pip3 install git+https://github.com/thomas-bouvier/horovod.git@compile-cpp17
+RUN apt install -y git && HOROVOD_WITH_GLOO=1 pip3 install git+https://github.com/thomas-bouvier/horovod.git@compile-cpp17
 RUN pip3 install tensorboard==2.13.0
 RUN pip3 install onnx==1.14.0 onnxruntime==1.15.1 onnxruntime-gpu==1.15.1
 

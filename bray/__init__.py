@@ -23,6 +23,7 @@ from bray.metric.metric import (
     add_scalar,
     get_metrics_worker,
     set_tensorboard_step,
+    get_trial_launch_path,
 )
 from bray.metric.validate import Metric
 

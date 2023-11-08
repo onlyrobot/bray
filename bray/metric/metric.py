@@ -34,13 +34,17 @@ class RemoteMetrics:
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=1)
         )
-        self.launch_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self.launch_time = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         self.writer = None
         asyncio.create_task(self.start_tensorboard())
 
     def _init_writer(self):
         trial_path = ray.get_runtime_context().namespace
         self.writer = tensorboard.summary.Writer(f"{trial_path}/{self.launch_time}")
+
+    async def get_trial_launch_path(self):
+        trial_path = ray.get_runtime_context().namespace
+        return f"{trial_path}/{self.launch_time}"
 
     async def start_tensorboard(self):
         await asyncio.sleep(self.time_window)
@@ -308,3 +312,11 @@ def set_tensorboard_step(model: str = None, get_step: Callable = None):
     """
     metrics_worker = get_metrics_worker()
     metrics_worker.set_tensorboard_step(model, get_step)
+
+
+def get_trial_launch_path() -> str:
+    """
+    获取本次实验的TensorBoard的目录，该目录由 bray 自动创建，目录结构： {trial_path}/{launch_time}
+    """
+    metrics_worker = get_metrics_worker()
+    return ray.get(metrics_worker.remote_metrics.get_trial_launch_path.remote())
