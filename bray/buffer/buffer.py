@@ -295,37 +295,41 @@ class RemoteBuffer:
         return self
 
     async def _generate(self, source: Iterator[NestedArray]):
-        self.worker_index = random.randint(0, 100)
         batch_data, batch_size = [], self.batch_size
         last_push_task = asyncio.create_task(asyncio.sleep(0))
-        generate_beg = time.time()
+        gen_beg = time.time()
+        self.worker_index = random.randint(0, 100)
         for data in source:
-            merge_time_ms("generate", generate_beg, buffer=self.name)
+            merge_time_ms("generate", gen_beg, buffer=self.name)
             batch_data.append(data)
 
             if batch_size and len(batch_data) < batch_size:
                 await asyncio.sleep(0)
-                generate_beg = time.time()
+                gen_beg = time.time()
                 continue
             push_task = asyncio.create_task(
                 self._push(*batch_data, drop=False),
             )
             batch_data.clear()
             await last_push_task
-            last_push_task, generate_beg = push_task, time.time()
+            last_push_task, gen_beg = push_task, time.time()
         await last_push_task
         await self._push(*batch_data, drop=False)
 
-    def add_source(self, *sources: Iterator[NestedArray]) -> ray.ObjectRef:
+    def add_source(self, *sources: Iterator[NestedArray]):
         """
         将一个或多个数据源添加到 Buffer 中，这些数据源会被异步的推送到 Buffer 中
 
         Args:
             sources: 一个或多个数据源，数据源是一个可迭代对象
+
+        Returns:
+            一个 ray.ObjectRef 列表，列表中的每个元素都是一个任务
         """
 
-        def SourceWorker(source):
+        def SourceWorker(source, index):
             try:
+                time.sleep(index)
                 asyncio.run(self._generate(source))
             except Exception as e:
                 print(f"SourceWorker error: {e}")
@@ -334,4 +338,4 @@ class RemoteBuffer:
         generate = ray.remote(SourceWorker).options(
             num_cpus=0, scheduling_strategy="SPREAD"
         )
-        return [generate.remote(source) for source in sources]
+        return [generate.remote(s, i) for i, s in enumerate(sources)]
