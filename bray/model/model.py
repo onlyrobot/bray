@@ -695,7 +695,7 @@ class Model:
     async def get_model(self) -> ray.ObjectRef:
         return self.model
 
-    async def get_forward_inputs(self) -> tuple[np.ndarray]:
+    async def get_forward_inputs(self) -> tuple[NestedArray]:
         return self.forward_args, self.forward_kwargs
 
     async def get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
@@ -996,3 +996,13 @@ class RemoteModel:
         self.workers[:] = await self.model.get_workers.remote(
             self.name, ray.get_runtime_context().get_node_id()
         )
+
+    def get_torch_forward_args(self):
+        return self.get_torch_forward_inputs()[0]
+
+    def get_torch_forward_inputs(self):
+        args, kwargs = ray.get(self.model.get_forward_inputs.remote())
+        torch_args, torch_kwargs = handle_nested_array(
+            make_batch([(args, kwargs)]), torch.as_tensor
+        )
+        return torch_args, torch_kwargs

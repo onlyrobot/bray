@@ -7,14 +7,17 @@ from .trainer import train_atari
 
 bray.init(project="./atari-pengyao", trial="ppo-v0")
 
+model_inputs = {"image": np.random.randn(42, 42, 4).astype(np.float32)}
+
 remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
-    forward_args=({"image": np.random.randn(42, 42, 4).astype(np.float32)},),
+    forward_args=(model_inputs,),
     num_workers=0,
     local_mode=True,
     use_onnx="train",
 )
+bray.add_graph(remote_model.get_model(), remote_model.get_torch_forward_args())
 bray.set_tensorboard_step(remote_model.name)
 
 remote_buffer = bray.RemoteBuffer(

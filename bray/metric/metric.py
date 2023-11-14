@@ -1,6 +1,7 @@
 import asyncio
 import ray
-import tensorboard
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from torch.utils.tensorboard import SummaryWriter
 import time
 from datetime import datetime
 import copy
@@ -25,35 +26,38 @@ class Metric:
 
 @ray.remote(num_cpus=0)
 class RemoteMetrics:
-    def __init__(self, time_window=60):
+    def __init__(self, time_window):
         self.metrics, self.last_metrics = {}, {}
-        self.descs = {}
         self.diff_metrics = {}
-        self.step, self.get_step = 0, None
-        self.time_window = time_window
+        self.descs = {}
+        self.step, self.time_window = -1, time_window
+        self.step_model, self.get_step = None, None
+
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=1)
         )
-        self.launch_time = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+
+        trial_path = ray.get_runtime_context().namespace
+        launch_time = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        self.launch_path = f"{trial_path}/{launch_time}"
         self.writer = None
+
         asyncio.create_task(self.start_tensorboard())
 
     def _init_writer(self):
-        trial_path = ray.get_runtime_context().namespace
-        self.writer = tensorboard.summary.Writer(f"{trial_path}/{self.launch_time}")
+        self.writer = SummaryWriter(
+            self.launch_path,
+            flush_secs=self.time_window,
+        )
 
-    async def get_trial_launch_path(self):
-        trial_path = ray.get_runtime_context().namespace
-        return f"{trial_path}/{self.launch_time}"
+    def get_trial_launch_path(self) -> str:
+        return self.launch_path
 
     async def start_tensorboard(self):
         await asyncio.sleep(self.time_window)
         if self.writer is None:
             self._init_writer()
         asyncio.create_task(self.dump_to_tensorboard())
-
-    def _diff(self, current: Metric, last: Metric) -> Metric:
-        return Metric(current.cnt - last.cnt, current.sum - last.sum)
 
     async def merge(self, name, metric, desc: dict[str:str]):
         if desc is not None:
@@ -68,18 +72,36 @@ class RemoteMetrics:
         for name, metric in metrics.items():
             await self.merge(name, metric, None)
 
+    async def add_scalar(self, name, value, step):
+        if self.writer is None:
+            self._init_writer()
+        step = await self._get_step() if step is None else step
+        self.writer.add_scalar(name, value, step)
+
+    async def add_image(self, name, image, step, dataformats):
+        if self.writer is None:
+            self._init_writer()
+        step = await self._get_step() if step is None else step
+        self.writer.add_image(
+            tag=name,
+            img_tensor=image,
+            global_step=step,
+            dataformats=dataformats,
+        )
+
+    async def add_graph(self, model, input_to_model):
+        if self.writer is None:
+            self._init_writer()
+        self.writer.add_graph(model, input_to_model)
+
     async def query(self, name, time_window: bool) -> Metric:
         if not time_window:
             return self.metrics.get(name, Metric())
         return self.diff_metrics.get(name, Metric())
 
-    async def add_scalar(self, name, value, step):
-        if self.writer is None:
-            self._init_writer()
-        self.writer.add_scalar(name, value, step)
-
     def _dump_by_desc(self, name, metric, diff):
         desc = self.descs.get(name, None)
+
         if desc is None:
             if diff.cnt != 0:
                 self.writer.add_scalar(name, diff.avg, self.step)
@@ -123,43 +145,53 @@ class RemoteMetrics:
 
     async def dump_to_tensorboard(self):
         current_metrics = copy.deepcopy(self.metrics)
-        if self.get_step:
-            try:
-                self.step = await asyncio._get_running_loop().run_in_executor(
-                    None, self.get_step
-                )
-            except Exception as e:
-                print(f"Get step error: {e}")
+        self.step = await self._get_step()
+
         for name, current in current_metrics.items():
             last = self.last_metrics.get(name, Metric())
-            diff = self._diff(current, last)
+            diff = Metric(
+                current.cnt - last.cnt,
+                current.sum - last.sum,
+            )
             # diff metrics used for time window query
             self.diff_metrics[name] = diff
+
             self._dump_by_desc(name, current, diff)
+
         self.last_metrics = current_metrics
-        self.step += 1
+
         await asyncio.sleep(self.time_window)
         asyncio.create_task(self.dump_to_tensorboard())
 
+    async def _get_step(self) -> int:
+        if self.step_model:
+            return await self.step_model.get_step.remote(self.model_name)
+        if not self.get_step:
+            return self.step + 1
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                None,
+                self.get_step,
+            )
+        except Exception as e:
+            print(f"Get step error: {e}")
+            return self.step + 1
+
     async def set_tensorboard_step(self, model: str, get_step: Callable):
+        if model:
+            self.step_model = ray.get_actor(model.split("/")[0])
+            self.model_name = model
         self.get_step = get_step
-        if self.get_step:
-            return
-        step_model = ray.get_actor(model.split("/")[0])
-        self.get_step = lambda: ray.get(step_model.get_step.remote(model))
 
 
 def build_name(name, **kwargs) -> str:
-    if not kwargs:
-        return name
     attributes = [f"{k}={v}" for k, v in kwargs.items()]
     return f"{name} {{{', '.join(attributes)}}}"
 
 
 class MetricsWorker:
-    def __init__(self):
-        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-
+    def __init__(self, time_window):
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
@@ -168,23 +200,30 @@ class MetricsWorker:
             name="RemoteMetrics",
             get_if_exists=True,
             scheduling_strategy=scheduling_local,
-            # lifetime="detached",
-        ).remote()
+        ).remote(time_window)
+
         self.cached_metrics = {}
-        self.last_merge_remote_time = 0
-        self.merge_remote_interval = 1
+        self.last_merge_time = 0
+        self.merge_remote_interval, self.merge_count = 1, 0
+
+    def flush_and_reset_merge_interval(self):
+        merge_time = time.time()
+        merge_time_interval = merge_time - self.last_merge_time
+
+        self.merge_remote_interval = 2 + min(
+            self.merge_count + self.merge_count // 2,
+            int((self.merge_count - 1) * 60 / merge_time_interval),
+        )
         self.merge_count = 0
+        self.last_merge_time = merge_time
 
-    def merge_to_remote(self, flush=True):
-        cached_metrics = self.cached_metrics
-        self.cached_metrics = {}
-        task = self.remote_metrics.batch_merge.remote(cached_metrics)
-        if flush:
-            ray.wait([task])
+        metrics, self.cached_metrics = self.cached_metrics, {}
+        return self.remote_metrics.batch_merge.remote(metrics)
 
-    def merge(self, name: str, metric: Metric, desc: dict[str:str], **kwargs):
+    def merge(self, name, metric, desc, **kwargs):
         self.merge_count += 1
-        name = build_name(name, **kwargs)
+        if kwargs:
+            name = build_name(name, **kwargs)
         m = self.cached_metrics.get(name, None)
         if not m:
             self.remote_metrics.merge.remote(name, metric, desc)
@@ -193,42 +232,17 @@ class MetricsWorker:
             m.merge(metric)
         if self.merge_count < self.merge_remote_interval:
             return
-        self.merge_to_remote(flush=False)
-        merge_remote_time = time.time()
-        merge_time_interval = merge_remote_time - self.last_merge_remote_time
-        self.merge_remote_interval = 2 + min(
-            self.merge_count + self.merge_count // 2,
-            int((self.merge_count - 1) * 60 / merge_time_interval),
-        )
-        self.last_merge_remote_time = merge_remote_time
-        self.merge_count = 0
-
-    def query(self, name, time_window, **kwargs) -> Metric:
-        name = build_name(name, **kwargs)
-        return ray.get(self.remote_metrics.query.remote(name, time_window))
-
-    def add_scalar(self, name, value, step):
-        self.remote_metrics.add_scalar.remote(name, value, step)
-
-    def set_tensorboard_step(self, model: str, get_step: Callable):
-        ray.get(self.remote_metrics.set_tensorboard_step.remote(model, get_step))
+        self.flush_and_reset_merge_interval()
 
 
-metrics_worker = None
+METRICS_WORKER = None
 
 
-def get_metrics_worker() -> MetricsWorker:
-    global metrics_worker
-    if metrics_worker is None:
-        metrics_worker = MetricsWorker()
-    return metrics_worker
-
-
-def flush_metrics_to_remote():
-    global metrics_worker
-    if not metrics_worker:
-        return
-    metrics_worker.merge_to_remote()
+def get_metrics_worker(time_window=60) -> MetricsWorker:
+    global METRICS_WORKER
+    if METRICS_WORKER is None:
+        METRICS_WORKER = MetricsWorker(time_window)
+    return METRICS_WORKER
 
 
 def merge(name: str, value: float, desc: dict[str:str] = None, **kwargs):
@@ -245,28 +259,52 @@ def merge(name: str, value: float, desc: dict[str:str] = None, **kwargs):
             - time_window_cnt: 最近一分钟的次数
             - time_window_avg: 最近一分钟的平均值
     """
-    metrics_worker = get_metrics_worker()
-    metrics_worker.merge(name, Metric(1, value), desc, **kwargs)
+    get_metrics_worker().merge(name, Metric(1, value), desc, **kwargs)
 
 
-def add_scalar(name: str, value: float, step: int):
+def add_scalar(name: str, value: float, step: int = None):
     """
     输出指标到TensorBoard，支持在集群任何地方调用，
     该方法就是直接调用TensorBoard的add_scalar方法
     Args:
         name: 指标的名字
         value: 指标merge的值
-        step: 指标的横坐标
+        step: 指标的横坐标，默认使用全局的step
     """
-    metrics_worker = get_metrics_worker()
-    metrics_worker.add_scalar(name, value, step)
+    get_metrics_worker().remote_metrics.add_scalar.remote(name, value, step)
+
+
+def add_image(name: str, image: object, step: int = None, dataformats="CHW"):
+    """
+    输出图片到TensorBoard，支持在集群任何地方调用，
+    该方法就是直接调用TensorBoard的add_image方法
+    Args:
+        name: 图片的名字
+        image: 图片的数据，可以为numpy数组或者torch tensor
+        step: 图片的横坐标，默认使用全局的step
+        dataformats: 图片的格式，默认为CHW
+    """
+    remote_metrics = get_metrics_worker().remote_metrics
+    remote_metrics.add_image.remote(name, image, step, dataformats)
+
+
+def add_graph(model, input_to_model):
+    """
+    输出模型到TensorBoard，支持在集群任何地方调用，
+    该方法就是直接调用TensorBoard的add_graph方法
+    Args:
+        model: torch.nn.Module模型
+        input_to_model: 模型的输入torch.Tensor或list of torch.Tensor
+    """
+    remote_metrics = get_metrics_worker().remote_metrics
+    remote_metrics.add_graph.remote(model, input_to_model)
 
 
 def query(
     name: str, kind: str = "avg", time_window: bool = True, **kwargs
 ) -> float | int:
     """
-    查询指标，支持在集群任何地方调用
+    查询指标，支持在集群任何地方调用，由于是堵塞调用，所以不要太频繁
     Args:
         name: 指标的名字，配合 **kwargs 可以组成一个唯一的指标
         kind: 指标查询的类型，可以为：
@@ -275,16 +313,17 @@ def query(
             - avg: 所有merge value的平均值，等于sum/cnt
         time_window: 是否启用时间窗口，如果启用，那么查询的是最近一分钟的指标
     """
-    metrics_worker = get_metrics_worker()
-    metric = metrics_worker.query(name, time_window, **kwargs)
+    remote_metrics = get_metrics_worker().remote_metrics
+    if kwargs:
+        name = build_name(name, **kwargs)
+    metric = ray.get(remote_metrics.query.remote(name, time_window))
     if kind == "avg":
-        return float("nan") if metric.cnt == 0 else metric.avg
-    elif kind == "sum":
+        return metric.avg if metric.cnt else float("nan")
+    if kind == "sum":
         return metric.sum
-    elif kind == "cnt":
+    if kind == "cnt":
         return metric.cnt
-    else:
-        raise ValueError(f"Unsupported kind: {kind}")
+    raise ValueError(f"Unsupported kind: {kind}")
 
 
 def merge_time_ms(name, beg, **kwargs):
@@ -305,18 +344,63 @@ def set_tensorboard_step(model: str = None, get_step: Callable = None):
     Args:
         model: RemoteModel的名称，Tensorboard的横坐标将被设置为该模型的step
         get_step: 一个函数，用于获取当前的TensorBoard的横坐标，比如：
+
             将TensorBoard的横坐标设置为tick数：
         ` get_step = lambda: bray.query("tick", kind="cnt", time_window=False) `
+
             将Tensorboard的横坐标设为指定buffer的pop数：
-        ` get_step = lambda: bray.query("pop", kind="sum", time_window=False, buffer="my_buffer") `
+        ` get_step = lambda: bray.query(
+            "pop", kind="sum", time_window=False, buffer="my_buffer") `
     """
-    metrics_worker = get_metrics_worker()
-    metrics_worker.set_tensorboard_step(model, get_step)
+    remote_metrics = get_metrics_worker().remote_metrics
+    ray.get(remote_metrics.set_tensorboard_step.remote(model, get_step))
 
 
 def get_trial_launch_path() -> str:
     """
-    获取本次实验的TensorBoard的目录，该目录由 bray 自动创建，目录结构： {trial_path}/{launch_time}
+    获取本次实验的TensorBoard的目录，目录结构： {trial_path}/{launch_time}
     """
-    metrics_worker = get_metrics_worker()
-    return ray.get(metrics_worker.remote_metrics.get_trial_launch_path.remote())
+    remote_metrics = get_metrics_worker().remote_metrics
+    return ray.get(remote_metrics.get_trial_launch_path.remote())
+
+
+if __name__ == "__main__":
+    import time
+    import numpy as np
+    import ray
+
+    ray.init(namespace="test/metrics")
+    get_metrics_worker(time_window=1)
+    print(get_trial_launch_path())
+    for i in range(100):
+        merge("test", i)
+        add_scalar("test_scalar", i)
+        add_image("test_image", np.random.rand(3, 32, 32), step=i)
+        time.sleep(0.1)
+    ray.get(get_metrics_worker().flush_and_reset_merge_interval())
+    assert query("test", kind="sum", time_window=False) == 4950
+    assert query("test", kind="avg", time_window=False) == 49.5
+    assert query("test", kind="cnt", time_window=False) == 100
+
+    import torch
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(1, 1)
+
+        def forward(self, x):
+            return self.linear(x)
+
+    model = Model()
+    add_graph(model, torch.rand(1, 1))
+
+    get_step = lambda: query("test1", kind="cnt", time_window=False)
+    set_tensorboard_step(get_step=get_step)
+    for i in range(100):
+        merge("test1", i)
+        merge("test2", i)
+        add_scalar("test_scalar2", i)
+        add_image("test_image2", np.random.rand(3, 32, 32))
+        time.sleep(0.1)
+    ray.get(get_metrics_worker().flush_and_reset_merge_interval())

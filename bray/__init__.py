@@ -21,6 +21,7 @@ from bray.metric.metric import (
     merge,
     query,
     add_scalar,
+    add_graph,
     get_metrics_worker,
     set_tensorboard_step,
     get_trial_launch_path,
