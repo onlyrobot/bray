@@ -6,6 +6,7 @@ from bray.buffer.utils import (
     PrefetchBuffer,
     CallbackBuffer,
     TensorFlowTensorBuffer,
+    SampleBuffer,
 )
 from bray.model.model import (
     RemoteModel,
