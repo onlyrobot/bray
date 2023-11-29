@@ -1,5 +1,6 @@
 from typing import Iterator, Callable
 import torch
+import numpy as np
 from threading import Thread, Condition
 
 from bray.utils.nested_array import (
@@ -97,7 +98,7 @@ class ReuseBuffer:
             return next(self.iterator)
         except StopIteration:
             if reuse:
-                raise(f"Reuse buffer is not reusable {self.buffer}")
+                raise (f"Reuse buffer is not reusable {self.buffer}")
             self.iterator = iter(self.buffer)
             return self.__next__(True)
 
@@ -107,14 +108,15 @@ class ReuseBuffer:
 
 
 class PrefetchBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], max_reuse=0, name="default"):
+    def __init__(self, buffer: Iterator[NestedArray], size=1, max_reuse=0, name=""):
         """
         Args:
             buffer: 迭代器
+            size: 缓冲区大小，即预取的样本数量
             max_reuse: 样本的最大重用次数，设为0关闭重用
             name: buffer名称，用于reuse指标的统计
         """
-        self.buffer, self.name = buffer, name
+        self.buffer, self.size, self.name = buffer, size, name
         self.max_reuse, self.remain_reuse = max_reuse, max_reuse
         self.last_reuse = 0
         self.replays, self.last_replay = [], None
@@ -124,10 +126,11 @@ class PrefetchBuffer:
 
     def _prefetch(self):
         with self.cond:
-            self.cond.wait_for(lambda: len(self.replays) < 1)
+            self.cond.wait_for(lambda: len(self.replays) < self.size)
             self.replays.append(next(self.buffer))
             self.cond.notify()
-        merge("reuse", self.last_reuse, buffer=self.name)
+        if self.max_reuse > 0 and self.name:
+            merge("reuse", self.last_reuse, buffer=self.name)
 
     def _thread(self):
         while True:
@@ -148,6 +151,25 @@ class PrefetchBuffer:
             self.remain_reuse = self.max_reuse
             self.cond.notify()
         return self.last_replay
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        return self
+
+
+class SampleBuffer:
+    def __init__(self, buffers: list[Iterator], weights=None):
+        """
+        Args:
+            buffers: 迭代器列表
+            weights: 每个迭代器的权重，如果为None则默认为均匀分布
+        """
+        self.buffers = buffers
+        if not weights:
+            weights = np.array([1.0] * len(buffers))
+        self.weights = np.array(weights) / np.sum(weights)
+
+    def __next__(self):
+        return next(np.random.choice(self.buffers, p=self.weights))
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self

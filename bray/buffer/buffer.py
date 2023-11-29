@@ -75,7 +75,7 @@ class BufferWorker:
 
 @ray.remote
 class Buffer:
-    async def __init__(self, size, batch_size):
+    def __init__(self, size, batch_size):
         self.size, self.batch_size = size, batch_size
         self.worker_cond = asyncio.Condition()
         self.workers = []
@@ -88,8 +88,9 @@ class Buffer:
             self.worker_cond.notify_all()
         return self.size, self.batch_size
 
-    def get_workers(self) -> tuple[list[BufferWorker], int]:
-        return self.workers
+    def get_workers(self, max_num: int) -> list:
+        num = min(max_num, len(self.workers))
+        return random.sample(self.workers, num)
 
     async def _is_health(self, worker):
         try:
@@ -114,15 +115,16 @@ class Buffer:
         await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
 
-    async def subscribe_workers(self):
+    async def subscribe_workers(self, max_num: int) -> list:
         async with self.worker_cond:
             await self.worker_cond.wait()
-        return self.workers
+        num = min(max_num, len(self.workers))
+        return random.sample(self.workers, num)
 
 
 class RemoteBuffer:
     def __init__(
-        self, name: str, size: int = 512, batch_size: int = None, num_workers: int = 2
+        self, name: str, size=512, batch_size=None, num_workers=2, sparsity=100
     ):
         """
         创建一个 RemoteBuffer，RemoteBuffer 会在 Ray 集群中运行，用于存储数据
@@ -132,12 +134,14 @@ class RemoteBuffer:
             batch_size: 从 Buffer 中读取数据时，每次读取的数据的批次大小，
                 如果为 None，则不对数据进行分批
             num_workers: BufferWorker 的数量，用于控制从 Buffer 中读取数据的并发度
+            sparsity: 开启后Buffer的生产端和消费端不再是全连接，从而减少系统资源占用
         """
         assert (
             batch_size is None or size >= batch_size
         ), f"RemoteBuffer size {size} must >= batch_size {batch_size}"
         self.name, self.num_workers = name, num_workers
         self.batch_size = batch_size
+        self.sparsity = sparsity
         self.buffer_workers = None
         self.subscribe_task = None
         scheduling_local = NodeAffinitySchedulingStrategy(
@@ -147,16 +151,16 @@ class RemoteBuffer:
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, scheduling_strategy=scheduling_local
         ).remote(size, batch_size)
-        self.workers = ray.get(self.buffer.get_workers.remote())
+        self.workers = ray.get(self.buffer.get_workers.remote(self.sparsity))
         self.worker_index = random.randint(0, 100)
 
     def __del__(self):
         self.subscribe_task.cancel() if self.subscribe_task else None
 
-    async def subscribe_workers(cls, buffer, workers):
+    async def subscribe_workers(cls, buffer, workers, sparsity):
         # 定义为类方法，避免引用self阻止RemoteBuffer被回收
         while True:
-            workers[:] = await buffer.subscribe_workers.remote()
+            workers[:] = await buffer.subscribe_workers.remote(sparsity)
 
     async def _init_subscribe_task(self, drop):
         if len(self.workers) != 0 and self.subscribe_task:
@@ -170,7 +174,9 @@ class RemoteBuffer:
             await asyncio.sleep(10)
             assert self.workers, f"No buffer worker for {self.name}"
         self.subscribe_task = asyncio.create_task(
-            RemoteBuffer.subscribe_workers(RemoteBuffer, self.buffer, self.workers)
+            RemoteBuffer.subscribe_workers(
+                RemoteBuffer, self.buffer, self.workers, self.sparsity
+            )
         )
         self.subscribe_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
@@ -225,7 +231,7 @@ class RemoteBuffer:
         return asyncio.create_task(self._push(*replays, drop=True))
 
     async def sync(self):
-        self.workers[:] = await self.buffer.get_workers.remote()
+        self.workers[:] = await self.buffer.get_workers.remote(self.sparsity)
 
     def _new_local_worker(self) -> BufferWorker:
         """
