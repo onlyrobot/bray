@@ -22,12 +22,10 @@ class GridShootingActor(bray.Actor):
         self,
         remote_model: bray.RemoteModel,
         remote_buffer: bray.RemoteBuffer = None,
-        target_step_interval=1000,
         target_model_max_reuse=100,
     ):
         self.remote_model = remote_model
         self.remote_buffer = remote_buffer
-        self.target_step_interval = target_step_interval
         self.target_model = None
         self.target_model_reuse = 0
         self.target_model_max_reuse = target_model_max_reuse
@@ -40,12 +38,9 @@ class GridShootingActor(bray.Actor):
             not self.target_model
             or self.target_model_reuse > self.target_model_max_reuse
         ):
-            target_step = (
-                random.randint(0, self.remote_model.step)
-                // self.target_step_interval
-                * self.target_step_interval
+            self.target_model = self.remote_model.clone(
+                step=random.randint(0, self.remote_model.step)
             )
-            self.target_model = self.remote_model.clone(target_step)
             self.target_model_reuse = 0
         else:
             self.target_model_reuse += 1

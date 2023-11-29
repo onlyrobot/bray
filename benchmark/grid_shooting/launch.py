@@ -46,7 +46,6 @@ remote_actor.serve(
     Actor=GridShootingActor,
     remote_model=remote_model,
     remote_buffer=remote_buffer,
-    target_step_interval=1000,
 )
 
 bray.run_until_asked_to_stop()
