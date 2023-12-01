@@ -98,7 +98,7 @@ class ReuseBuffer:
             return next(self.iterator)
         except StopIteration:
             if reuse:
-                raise (f"Reuse buffer is not reusable {self.buffer}")
+                raise f"Reuse buffer is not reusable {self.buffer}"
             self.iterator = iter(self.buffer)
             return self.__next__(True)
 

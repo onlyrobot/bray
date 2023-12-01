@@ -118,7 +118,7 @@ class ActorGateway:
     async def __call__(self, headers: dict, body: bytes) -> bytes:
         if not self.is_initialized:
             self._initialize()
-        step_kind = headers.get("step_kind")
+        step_kind = headers.get("step_kind", "auto")
 
         if step_kind == "auto":
             return await self.auto(body)

@@ -31,9 +31,7 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
 class ModelWorker:
     ort_session_and_forward_outputs: dict[str, tuple] = {}
 
-    def __init__(
-        self, name: str, model: "Model" = None, loop: asyncio.AbstractEventLoop = None
-    ):
+    def __init__(self, name: str, model: "Model" = None):
         self.name, self.model = name, model if model else ray.get_actor(
             name.split("/")[0]
         )
@@ -53,15 +51,19 @@ class ModelWorker:
         self._init_onnx() if self.use_onnx else self._init_torch()
         self.__forward = self._forward_onnx if self.use_onnx else self._forward_torch
 
-        loop = loop if loop else asyncio.get_running_loop()
-        self.forward_task = loop.create_task(self._forward_coro())
+        self.forward_task, self.subscribe_task = None, None
+        self.is_initialized = False
+
+    async def _initialize_async_context(self):
+        self.forward_task = asyncio.create_task(self._forward_coro())
         self.forward_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
         )
-        self.subscribe_task = loop.create_task(self._subscribe_weights())
+        self.subscribe_task = asyncio.create_task(self._subscribe_weights())
         self.subscribe_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
         )
+        self.is_initialized = True
 
     def _build_ort_session(self, onnx_model):
         provider = "CUDAExecutionProvider" if self.num_gpus else "CPUExecutionProvider"
@@ -185,30 +187,35 @@ class ModelWorker:
         ready_forwards = split_batch(outputs)
         merge_time_ms("forward", beg, model=self.name)
         return ready_forwards
+    
+    async def __forward_coro(self, forward_cond):
+        pending_forwards = self.pending_forwards
+        cond = self.forward_cond
+        try:
+            async with cond:
+                await cond.wait_for(lambda: pending_forwards)
+        except GeneratorExit:
+            # maybe python's bug when canceling a task
+            return
+        self.pending_forwards = []
+        ready_forwards = self.ready_forwards
+        self.ready_forwards = []
+        forward_cond, self.forward_cond = self.forward_cond, forward_cond
+
+        # set the ready_forwards to the previous pending_forwards
+        ready_forwards[:] = await self._forward(pending_forwards)
+
+        async with forward_cond:
+            forward_cond.notify_all()
 
     async def _forward_coro(self):
         forward_cond = asyncio.Condition()
-        while pending_forwards := self.pending_forwards:
-            cond = self.forward_cond
-            try:
-                async with cond:
-                    await cond.wait_for(lambda: pending_forwards)
-            except GeneratorExit:
-                # maybe python's bug when canceling a task
-                return
-
-            self.pending_forwards = []
-            ready_forwards = self.ready_forwards
-            self.ready_forwards = []
-            forward_cond, self.forward_cond = self.forward_cond, forward_cond
-
-            # set the ready_forwards to the previous pending_forwards
-            ready_forwards[:] = await self._forward(pending_forwards)
-
-            async with forward_cond:
-                forward_cond.notify_all()
+        while True:
+            await self.__forward_coro(forward_cond)
 
     async def forward(self, *args, **kwargs) -> NestedArray:
+        if not self.is_initialized:
+            await self._initialize_async_context()
         if self.max_batch_size == 1:
             return (await self._forward([(args, kwargs)]))[0]
         while len(self.pending_forwards) >= self.max_batch_size:
@@ -253,10 +260,7 @@ class ModelWorker:
         if len(self.name.split("/")) != 1:
             return
         while True:
-            try:
-                await self.__subscribe_weights()
-            except Exception as e:
-                print(f"Fail to subscribe weights from {self.name}.", e)
+            await self.__subscribe_weights()
 
     def get_model_step(self) -> int:
         """Get the current step of the model from worker to reduce Model overhead."""
@@ -360,6 +364,25 @@ class Model:
         if self.checkpoint_interval is None:
             asyncio.create_task(self._save_checkpoint())
 
+    def _build_ckpt_steps(self, name, ckpt_dir):
+        clone_steps = [
+            int(ckpt.split(".")[0].split("-")[2])
+            for ckpt in os.listdir(os.path.join(self.trial_path, f"{name}"))
+            if ckpt.startswith("clone-step")
+        ]
+        ckpt_steps = [
+            int(ckpt.split(".")[0].split("-")[1]) for ckpt in os.listdir(ckpt_dir)
+        ]
+        # union of ckpt_steps and clone_steps
+        ckpt_steps = list(set(ckpt_steps).union(clone_steps))
+        ckpt_steps.sort()
+        if not ckpt_steps:
+            return ckpt_steps, 0, None
+        step = ckpt_steps[-1]
+        print(f"Model {name} load checkpoint at step {step}")
+        weights = self._load_checkpoint(name, step=step)
+        return ckpt_steps, step, weights
+
     def _initialize_model(self, name, weights, max_batch_size, meta: ModelMeta):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
         if not os.path.exists(ckpt_dir):
@@ -372,21 +395,9 @@ class Model:
 
         ckpt_steps, step = [], 0
         try:
-            ckpt_steps = [
-                int(ckpt.split(".")[0].split("-")[1]) for ckpt in os.listdir(ckpt_dir)
-            ]
-            clone_steps = [
-                int(ckpt.split(".")[0].split("-")[2])
-                for ckpt in os.listdir(os.path.join(self.trial_path, f"{name}"))
-                if ckpt.startswith("clone-step")
-            ]
-            # union of ckpt_steps and clone_steps
-            ckpt_steps = list(set(ckpt_steps).union(clone_steps))
-            ckpt_steps.sort()
-            if ckpt_steps:
-                step = ckpt_steps[-1]
-                print(f"Model {name} load checkpoint at step {step}")
-                weights = self._load_checkpoint(name, step=step)
+            ckpt_steps, step, w = self._build_ckpt_steps(name, ckpt_dir)
+            if w:
+                weights = w
         except Exception as e:
             print(f"Load checkpoint failed: {e}")
 
@@ -765,8 +776,6 @@ class RemoteModel:
             soft=False,
         )
         self.subscribe_task = None
-        self.local = local_mode
-        self.local_worker = None
         self.cached_cloned_names = {}
         model_ = None
         if m := cls.remote_models.get(base_name, None):
@@ -793,6 +802,8 @@ class RemoteModel:
             self.model.get_workers.remote(name, ray.get_runtime_context().get_node_id())
         )
         self.worker_index = random.randint(0, len(self.workers))
+        self.local_worker = None
+        self._forward = self._local_forward if local_mode else self._remote_forward
         cls.remote_models[name] = self
         names = list(cls.remote_models.keys())
         if len(names) > cls.max_cached_model:
@@ -820,48 +831,25 @@ class RemoteModel:
         ), f"RemoteModel {name} is not initialized"
 
     def __del__(self):
+        if worker := self.local_worker and self.local_worker.is_initialized:
+            worker.subscribe_task.cancel()
+            worker.forward_task.cancel()
         self.subscribe_task.cancel() if self.subscribe_task else None
-        if not self.local_worker:
-            return
-        self.local_worker.subscribe_task.cancel()
-        self.local_worker.forward_task.cancel()
 
     async def subscribe_workers(cls, model, name, workers):
         # 定义为类方法，避免引用self阻止RemoteModel被回收
+        node_id = ray.get_runtime_context().get_node_id()
         while True:
-            workers[:] = await model.subscribe_workers.remote(
-                name, ray.get_runtime_context().get_node_id()
-            )
+            workers[:] = await model.subscribe_workers.remote(name, node_id)
 
     async def _local_forward(self, *args, **kwargs) -> NestedArray:
         if not RemoteModel.set_executor:
-            loop = asyncio.get_running_loop()
-            loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-            RemoteModel.set_executor = True
-
-        async def build_local_worker(loop):
-            self.local_worker = await loop.run_in_executor(
-                None, ModelWorker, self.name, self.model, loop
+            asyncio.get_running_loop().set_default_executor(
+                ThreadPoolExecutor(max_workers=1)
             )
-
-        if self.local_worker is None:
-            loop = asyncio.get_running_loop()
-            self.local_worker = loop.create_task(build_local_worker(loop))
-
-        local_worker = self.local_worker
-        if isinstance(local_worker, asyncio.Task):
-            try:
-                pass
-                # return await self._remote_forward(*args, **kwargs)
-            except:
-                pass
-            try:
-                await local_worker
-            except:
-                self.local_worker = None
-                raise
-            assert isinstance(self.local_worker, ModelWorker)
-
+            RemoteModel.set_executor = True
+        if not self.local_worker:
+            self.local_worker = ModelWorker(self.name, self.model)
         beg = time.time()
         outputs = await self.local_worker.forward(*args, **kwargs)
         forward_time_ms = (time.time() - beg) * 1000
@@ -874,11 +862,10 @@ class RemoteModel:
         if self.subscribe_task:
             await asyncio.sleep(1)
             assert self.workers, f"No model worker for {self.name}"
-        self.subscribe_task = asyncio.create_task(
-            RemoteModel.subscribe_workers(
-                RemoteModel, self.model, self.name, self.workers
-            )
+        coro = RemoteModel.subscribe_workers(
+            RemoteModel, self.model, self.name, self.workers
         )
+        self.subscribe_task = asyncio.create_task(coro)
         self.subscribe_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
         )
@@ -888,13 +875,13 @@ class RemoteModel:
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
         if len(self.workers) == 0 or not self.subscribe_task:
             await self._init_subscribe_task()
-        index = self.worker_index % len(self.workers)
-        self.worker_index += 1
-        if tick_id := get_tick_id():
-            index = tick_id % len(self.workers)
-        worker = self.workers[index]
-        beg = time.time()
         try:
+            index = self.worker_index % len(self.workers)
+            self.worker_index += 1
+            if tick_id := get_tick_id():
+                index = tick_id % len(self.workers)
+            worker = self.workers[index]
+            beg = time.time()
             outputs = await worker.forward.remote(*args, **kwargs)
         except ray.exceptions.RayActorError:
             print("Ray actor exception from model forward")
@@ -914,9 +901,7 @@ class RemoteModel:
         Returns:
             模型的输出，是一个或多个 np.ndarray
         """
-        if self.local:
-            return await self._local_forward(*args, **kwargs)
-        return await self._remote_forward(*args, **kwargs)
+        return await self._forward(*args, **kwargs)
 
     @property
     def step(self) -> int:
@@ -925,7 +910,7 @@ class RemoteModel:
         Returns:
             模型的版本号
         """
-        if isinstance(self.local_worker, ModelWorker):
+        if self.local_worker and self.local_worker.is_initialized:
             return self.local_worker.get_model_step()
         if not self.workers:
             return ray.get(self.model.get_step.remote(self.name))
@@ -970,7 +955,8 @@ class RemoteModel:
             克隆的RemoteModel
         """
         RemoteModel.remote_models[self.name] = self
-        local_mode = local_mode if local_mode is not None else self.local
+        if local_mode is None:
+            local_mode = self._forward == self._local_forward
         if cloned_name := self.cached_cloned_names.get(step, None):
             return RemoteModel(cloned_name, local_mode=local_mode)
         cloned_name = self.model.clone.remote(
@@ -989,13 +975,21 @@ class RemoteModel:
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
         # 保持权重引用，避免权重发布过程中引用失效
-        self.last_publish_weights = ray.put(weights, _owner=self.model)
-        self.model.set_weights.remote(self.name, [self.last_publish_weights], step)
+        self.last_publish_weights = [ray.put(weights, _owner=self.model)]
+        self.model.set_weights.remote(self.name, self.last_publish_weights, step)
 
     async def sync(self):
         self.workers[:] = await self.model.get_workers.remote(
             self.name, ray.get_runtime_context().get_node_id()
         )
+
+    def warmup(self):
+        """
+        预热模型，避免第一次forward的时候耗时过长
+        """
+        if self._forward != self._local_forward or self.local_worker:
+            return
+        self.local_worker = ModelWorker(self.name, self.model)
 
     def get_torch_forward_args(self):
         return self.get_torch_forward_inputs()[0]
