@@ -17,7 +17,6 @@ from bray.utils.nested_array import (
     split_batch,
 )
 from bray.metric.metric import merge, query, merge_time_ms
-from bray.actor.actor import get_tick_id
 
 
 def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
@@ -30,6 +29,7 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
 
 class ModelWorker:
     ort_session_and_forward_outputs: dict[str, tuple] = {}
+    cached_tf_model = None
 
     def __init__(self, name: str, model: "Model" = None):
         self.name, self.model = name, model if model else ray.get_actor(
@@ -64,6 +64,14 @@ class ModelWorker:
             lambda t: None if t.cancelled() else t.result()
         )
         self.is_initialized = True
+
+    def finalize_async_context(self):
+        if self._forward_torch == self._forward_tensorflow:
+            ModelWorker.cached_tf_model = self.tensorflow_model
+        if not self.is_initialized:
+            return
+        self.forward_task.cancel()
+        self.subscribe_task.cancel()
 
     def _build_ort_session(self, onnx_model):
         provider = "CUDAExecutionProvider" if self.num_gpus else "CPUExecutionProvider"
@@ -138,9 +146,16 @@ class ModelWorker:
         self.torch_model(*args, **kwargs)
         weights = ray.get(self.model.get_weights.remote(self.name))
         model.set_weights(weights)
-        self.tensorflow_model = tf.function(model)
-        self._forward_torch = self._forward_tensorflow
         self.set_model_weights = lambda m, w: m.set_weights(w)
+        ModelWorker.cached_tf_model, self.tensorflow_model = (
+            None,
+            ModelWorker.cached_tf_model,
+        )
+        if self.tensorflow_model is None:
+            self.tensorflow_model = tf.function(model)
+        else:
+            self.set_model_weights(self.tensorflow_model, weights)
+        self._forward_torch = self._forward_tensorflow
 
     def _forward_torch(self, batch_args, batch_kwargs):
         handler = (
@@ -187,7 +202,7 @@ class ModelWorker:
         ready_forwards = split_batch(outputs)
         merge_time_ms("forward", beg, model=self.name)
         return ready_forwards
-    
+
     async def __forward_coro(self, forward_cond):
         pending_forwards = self.pending_forwards
         cond = self.forward_cond
@@ -831,10 +846,9 @@ class RemoteModel:
         ), f"RemoteModel {name} is not initialized"
 
     def __del__(self):
-        if worker := self.local_worker and self.local_worker.is_initialized:
-            worker.subscribe_task.cancel()
-            worker.forward_task.cancel()
         self.subscribe_task.cancel() if self.subscribe_task else None
+        if self.local_worker:
+            self.local_worker.finalize_async_context()
 
     async def subscribe_workers(cls, model, name, workers):
         # 定义为类方法，避免引用self阻止RemoteModel被回收
@@ -875,13 +889,11 @@ class RemoteModel:
     async def _remote_forward(self, *args, **kwargs) -> NestedArray:
         if len(self.workers) == 0 or not self.subscribe_task:
             await self._init_subscribe_task()
+        beg = time.time()
+        index = self.worker_index % len(self.workers)
+        self.worker_index += 1
+        worker = self.workers[index]
         try:
-            index = self.worker_index % len(self.workers)
-            self.worker_index += 1
-            if tick_id := get_tick_id():
-                index = tick_id % len(self.workers)
-            worker = self.workers[index]
-            beg = time.time()
             outputs = await worker.forward.remote(*args, **kwargs)
         except ray.exceptions.RayActorError:
             print("Ray actor exception from model forward")

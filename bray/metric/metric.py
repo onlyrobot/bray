@@ -1,7 +1,6 @@
 import asyncio
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from torch.utils.tensorboard import SummaryWriter
 import time
 from datetime import datetime
 import copy
@@ -45,6 +44,7 @@ class RemoteMetrics:
         asyncio.create_task(self.start_tensorboard())
 
     def _init_writer(self):
+        from torch.utils.tensorboard import SummaryWriter
         self.writer = SummaryWriter(
             self.launch_path,
             flush_secs=self.time_window,

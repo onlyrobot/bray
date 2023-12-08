@@ -13,10 +13,6 @@ from bray.metric.metric import (
 )
 
 
-def get_tick_id():
-    return 0
-
-
 class ActorGateway:
     def __init__(self, Actor, args, kwargs, actors_per_worker):
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
