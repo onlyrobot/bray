@@ -458,6 +458,7 @@ class Model:
                 self.forward_args,
                 self.forward_kwargs,
                 export_params=True,
+                quantize=meta.use_onnx == "quantize",
             )
             meta.onnx_step = step
             torch.save(forward_outputs, outputs_path)

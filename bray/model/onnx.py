@@ -17,6 +17,7 @@ def export_onnx(
     export_params: bool = False,
     check_consistency: bool = True,
     relative_diff: float = 1e-5,
+    quantize: bool = False,
 ) -> NestedArray:
     """
     将模型导出为onnx格式，并使用导出的onnx模型验证模型的输出是否正确。
@@ -28,6 +29,7 @@ def export_onnx(
         export_params: 是否导出模型的参数
         check_consistency: 是否验证模型的输出是否正确
         relative_diff: 验证模型输出是否正确时的相对误差
+        quantize: 是否量化模型
     Returns:
         NestedArray: 模型的原始输出，用于恢复onnx模型输出的numpy数组的结构。
     """
@@ -53,6 +55,17 @@ def export_onnx(
         do_constant_folding=False,
         # keep_initializers_as_inputs=True,
     )
+
+    if quantize:
+        from onnxruntime.quantization import QuantType, quantize_dynamic
+
+        print("Quantizing model...")
+        quantize_dynamic(
+            model_input=path,
+            model_output=path,
+            weight_type=QuantType.QUInt8,
+            optimize_model=True,
+        )
 
     ort_session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
 
