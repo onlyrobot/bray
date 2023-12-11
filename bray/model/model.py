@@ -27,6 +27,16 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
     model.load_state_dict(handle_nested_array(weights, torch.from_numpy))
 
 
+def build_tensorflow_model(model, forward_args, forward_kwargs):
+    tensorflow_model = model()
+    args, kwargs = make_batch([(forward_args, forward_kwargs)])
+    import tensorflow as tf
+
+    args, kwargs = handle_nested_array((args, kwargs), tf.identity)
+    tensorflow_model(*args, **kwargs)
+    return tensorflow_model
+
+
 class ModelWorker:
     ort_session_and_forward_outputs: dict[str, tuple] = {}
     cached_tf_model = None
@@ -348,9 +358,9 @@ class Model:
         if isinstance(torch_model, torch.nn.Module):
             weights = get_torch_model_weights(torch_model)
         else:
-            tensorflow_model = torch_model()
-            args, kwargs = make_batch([(forward_args, forward_kwargs)])
-            tensorflow_model(*args, **kwargs)
+            tensorflow_model = build_tensorflow_model(
+                torch_model, forward_args, forward_kwargs
+            )
             weights = tensorflow_model.get_weights()
         tensor_weights = handle_nested_array(weights, torch.from_numpy)
         weights_path = os.path.join(root_path, "weights.pt")
@@ -775,7 +785,7 @@ class RemoteModel:
         cpus_per_worker: float = 0.5,
         gpus_per_worker: float = 0.0,
         memory_per_worker: int = 1024,
-        use_onnx: ["train", "infer"] = None,
+        use_onnx: ["train", "infer", "quantize"] = None,
         local_mode: bool = False,
     ):
         if name in cls.remote_models and (
@@ -940,20 +950,20 @@ class RemoteModel:
         weights = ray.get(self.model.get_weights.remote(self.name))
         if isinstance(torch_model, torch.nn.Module):
             set_torch_model_weights(torch_model, weights)
-        else:
-            tensorflow_model = torch_model = torch_model()
-            args, kwargs = ray.get(self.model.get_forward_inputs.remote())
-            args, kwargs = make_batch([(args, kwargs)])
-            tensorflow_model(*args, **kwargs)
-            tensorflow_model.set_weights(weights)
-        return torch_model
+            return torch_model
+        forward_args, forward_kwargs = ray.get(self.model.get_forward_inputs.remote())
+        tensorflow_model = build_tensorflow_model(
+            torch_model, forward_args, forward_kwargs
+        )
+        tensorflow_model.set_weights(weights)
+        return tensorflow_model
 
     def clone(
         self,
         step: int = -1,
         max_batch_size: int = None,
         num_workers: int = -1,
-        use_onnx: ["train", "infer"] = "",
+        use_onnx: ["train", "infer", "quantize"] = "",
         local_mode: bool = None,
     ) -> "RemoteModel":
         """
@@ -1008,8 +1018,8 @@ class RemoteModel:
         return self.get_torch_forward_inputs()[0]
 
     def get_torch_forward_inputs(self):
-        args, kwargs = ray.get(self.model.get_forward_inputs.remote())
+        forward_args, forward_kwargs = ray.get(self.model.get_forward_inputs.remote())
         torch_args, torch_kwargs = handle_nested_array(
-            make_batch([(args, kwargs)]), torch.as_tensor
+            make_batch([(forward_args, forward_kwargs)]), torch.as_tensor
         )
         return torch_args, torch_kwargs

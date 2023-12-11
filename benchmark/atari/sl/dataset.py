@@ -3,7 +3,7 @@ import bray
 
 
 class AtariDataset:
-    def __init__(self, fake_data: bray.NestedArray, size=1000):
+    def __init__(self, fake_data: bray.NestedArray, size=10):
         self.fake_data = fake_data
         self.size = size
 

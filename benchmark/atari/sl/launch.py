@@ -23,13 +23,13 @@ train_buffer = bray.RemoteBuffer(
     "train_buffer",
     size=128,
     batch_size=8,
-    num_workers=2,
+    num_workers=1,
 )
 eval_buffer = bray.RemoteBuffer(
     "eval_buffer",
     size=128,
     batch_size=8,
-    num_workers=2,
+    num_workers=1,
 )
 
 remote_trainer = bray.RemoteTrainer(
@@ -47,24 +47,19 @@ remote_trainer.train(
     num_steps=1000000,
 )
 
-cpu_num = int(sum([node["Resources"].get("CPU", 0) for node in ray.nodes()]))
-
 fake_data = {
     "image": np.random.randn(42, 42, 4).astype(np.float32),
     "label": np.array(0.0, dtype=np.float32),
 }
-eval_source = [AtariDataset(fake_data) for _ in range(cpu_num * 2)]
-train_source = [AtariDataset(fake_data) for _ in range(cpu_num * 2)]
+eval_source = [AtariDataset(fake_data) for _ in range(30)]
+train_source = [AtariDataset(fake_data) for _ in range(30)]
 
 EPOCH = 8
-eval_buffer.add_source(*eval_source)
+ret = train_buffer.add_source(*train_source, epoch=8)
+eval_buffer.add_source(*eval_source, epoch=100000, num_workers=4)
 
-for i in range(EPOCH):
-    print(f"Epoch {i} start")
-    ret = train_buffer.add_source(*train_source)
-    ray.get(ret)
-    print(f"Epoch {i} done")
+print(ray.get(ret))
 
-time.sleep(60)  # wait for all data to be consumed
+time.sleep(10)  # wait for all data to be consumed
 
 print(f"Train all {EPOCH} epoch done!")

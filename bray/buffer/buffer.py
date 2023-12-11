@@ -301,17 +301,16 @@ class RemoteBuffer:
         return self
 
     async def _generate(self, source: Iterator[NestedArray]):
-        batch_data, batch_size = [], self.batch_size
+        batch_data, batch_size = [], self.batch_size or 1
         last_push_task = asyncio.create_task(asyncio.sleep(0))
         gen_beg = time.time()
         self.worker_index = random.randint(0, 100)
         for data in source:
             merge_time_ms("generate", gen_beg, buffer=self.name)
             batch_data.append(data)
-
-            if batch_size and len(batch_data) < batch_size:
-                await asyncio.sleep(0)
-                gen_beg = time.time()
+            await asyncio.sleep(0)
+            gen_beg = time.time()
+            if len(batch_data) < batch_size:
                 continue
             push_task = asyncio.create_task(
                 self._push(*batch_data, drop=False),
@@ -322,26 +321,49 @@ class RemoteBuffer:
         await last_push_task
         await self._push(*batch_data, drop=False)
 
-    def add_source(self, *sources: Iterator[NestedArray]):
+    def _generate_epoch(self, sources, num_workers, epoch):
+        num_workers = min(len(sources), num_workers)
+        index, workers = num_workers - 1, []
+
+        @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
+        def SourceWorker(source):
+            asyncio.run(self._generate(source))
+
+        for i in range(num_workers):
+            workers.append(SourceWorker.remote(sources[i]))
+            time.sleep(0.5)
+
+        while (index := index + 1) < len(sources):
+            rets, workers = ray.wait(workers)
+            workers.append(SourceWorker.remote(sources[index]))
+            if ret := ray.get(rets[0]) is None:
+                continue
+            print("SourceWorker is error: ", ret)
+
+        if (epoch := epoch - 1) < 1:
+            return
+        print(f"Buffer {self.name} remain {epoch} epoch")
+        merge("epoch", 1, desc={"cnt": "num epoch"}, buffer=self.name)
+        return self._generate_epoch(sources, num_workers, epoch)
+
+    def add_source(self, *sources: Iterator[NestedArray], num_workers=None, epoch=1):
         """
         将一个或多个数据源添加到 Buffer 中，这些数据源会被异步的推送到 Buffer 中
 
         Args:
             sources: 一个或多个数据源，数据源是一个可迭代对象
+            num_workers: 从数据源中读取数据的并发度，默认为 CPU 的核数
+            epoch: 从数据源中读取数据的轮数，可以理解为数据源的数据会被重复的读取 epoch 轮
 
         Returns:
-            一个 ray.ObjectRef 列表，列表中的每个元素都是一个任务
+            一个 ray.ObjectRef，可以通过 ray.cancel() 取消数据源的读取
         """
+        if num_workers is None:
+            cpu_num = sum([node["Resources"]["CPU"] for node in ray.nodes()])
+            num_workers = max(1, int(cpu_num))
 
-        def SourceWorker(source, index):
-            try:
-                time.sleep(index)
-                asyncio.run(self._generate(source))
-            except Exception as e:
-                print(f"SourceWorker error: {e}")
-                raise e
+        @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
+        def RemoteSource(sources, num_workers, epoch):
+            self._generate_epoch(sources, num_workers, epoch)
 
-        generate = ray.remote(SourceWorker).options(
-            num_cpus=0, scheduling_strategy="SPREAD"
-        )
-        return [generate.remote(s, i) for i, s in enumerate(sources)]
+        return RemoteSource.remote(sources, num_workers, epoch)

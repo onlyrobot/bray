@@ -23,6 +23,7 @@ class Gateway:
 
     async def handle(self, reader: StreamReader, writer: StreamWriter):
         if not self.server_addrs:
+            print("No Actor server available")
             writer.close()
             return await writer.wait_closed()
 
