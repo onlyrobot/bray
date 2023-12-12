@@ -19,6 +19,8 @@ class Gateway:
             await gateway.serve_forever()
 
     async def register(self, ip: str, port: int):
+        if (ip, port) in self.server_addrs:
+            return
         self.server_addrs.append((ip, port))
 
     async def handle(self, reader: StreamReader, writer: StreamWriter):

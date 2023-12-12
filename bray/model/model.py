@@ -36,6 +36,10 @@ def build_tensorflow_model(model, forward_args, forward_kwargs):
     tensorflow_model(*args, **kwargs)
     return tensorflow_model
 
+def save_weights(weights: NestedArray, path: str):
+    tensor_weights = handle_nested_array(weights, torch.from_numpy)
+    torch.save(tensor_weights, path)
+
 
 class ModelWorker:
     ort_session_and_forward_outputs: dict[str, tuple] = {}
@@ -300,7 +304,7 @@ class ModelMeta:
         self.num_workers, self.workers = num_workers, []
         self.max_batch_size = 1
         self.weights, self.step, self.ckpt_step = None, 0, 0
-        self.cached_weights_refs = [None for _ in range(5)]
+        self.cached_weights_refs = [None for _ in range(1)]
         self.use_onnx, self.onnx_step = use_onnx, -1
         self.pending_create_workers = 0
         self.ckpt_steps = []
@@ -323,20 +327,20 @@ class Model:
         gpus_per_worker: float = 0.0,
         memory_per_worker: int = 1024,
         use_onnx: str = None,
+        override_model: bool = True,
     ):
         self.trial_path = ray.get_runtime_context().namespace
         root_path = os.path.join(self.trial_path, f"{name}")
         if not os.path.exists(root_path):
             os.makedirs(root_path, exist_ok=True)
 
-        torch_path = os.path.join(root_path, f"{name}.pt")
+        self.torch_path = os.path.join(root_path, f"{name}.pt")
         if torch_model is not None:
-            torch.save(torch_model, torch_path)
+            torch.save(torch_model, self.torch_path)
         else:
-            assert os.path.exists(torch_path), "Missing torch model"
-            print("Loading model from", torch_path)
-            torch_model = torch.load(torch_path)
-        self.name, self.model = name, ray.put(torch_model)
+            assert os.path.exists(self.torch_path), "Missing torch model"
+        self.name, self.model = name, None
+        self.override_model = torch_model is not None and override_model
 
         args_path = os.path.join(root_path, "forward_inputs.pt")
         if forward_args or forward_kwargs:
@@ -355,18 +359,19 @@ class Model:
             ThreadPoolExecutor(max_workers=1)
         )
 
+        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
         if isinstance(torch_model, torch.nn.Module):
             weights = get_torch_model_weights(torch_model)
-        else:
+            save_weights(weights, weights_path)
+        elif torch_model:
             tensorflow_model = build_tensorflow_model(
                 torch_model, forward_args, forward_kwargs
             )
             weights = tensorflow_model.get_weights()
-        tensor_weights = handle_nested_array(weights, torch.from_numpy)
-        weights_path = os.path.join(root_path, "weights.pt")
-        torch.save(tensor_weights, weights_path)
+            save_weights(weights, weights_path)
+
         meta = ModelMeta(num_workers, use_onnx)
-        self._initialize_model(self.name, weights, max_batch_size, meta)
+        self._initialize_model(self.name, max_batch_size, meta)
 
         self.cpus_per_worker = cpus_per_worker
         self.gpus_per_worker = gpus_per_worker
@@ -400,36 +405,19 @@ class Model:
         ]
         # union of ckpt_steps and clone_steps
         ckpt_steps = list(set(ckpt_steps).union(clone_steps))
-        ckpt_steps.sort()
-        if not ckpt_steps:
-            return ckpt_steps, 0, None
-        step = ckpt_steps[-1]
-        print(f"Model {name} load checkpoint at step {step}")
-        weights = self._load_checkpoint(name, step=step)
-        return ckpt_steps, step, weights
+        return sorted(ckpt_steps)
 
-    def _initialize_model(self, name, weights, max_batch_size, meta: ModelMeta):
+    def _initialize_model(self, name, max_batch_size, meta: ModelMeta):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
-        if not os.path.exists(ckpt_dir):
-            os.makedirs(ckpt_dir, exist_ok=True)
-
-        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-        if not os.path.exists(weights_path):
-            tensor_weights = handle_nested_array(weights, torch.from_numpy)
-            torch.save(tensor_weights, weights_path)
-
-        ckpt_steps, step = [], 0
         try:
-            ckpt_steps, step, w = self._build_ckpt_steps(name, ckpt_dir)
-            if w:
-                weights = w
+            ckpt_steps = self._build_ckpt_steps(name, ckpt_dir)
+            step = ckpt_steps[-1] if ckpt_steps else 0
         except Exception as e:
-            print(f"Load checkpoint failed: {e}")
+            print(f"Build checkpoint steps failed: {e}")
+        print(f"Model {name} latest checkpoint step is {step}")
 
         meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
         meta.max_batch_size = max_batch_size
-        if meta.step != 0:
-            meta.weights = ray.put(weights)
         self.models[name] = meta
 
         if meta.use_onnx:
@@ -445,21 +433,22 @@ class Model:
         onnx_path_postfix = f"{name}/{name}.onnx"
         onnx_path = os.path.join(self.trial_path, onnx_path_postfix)
         os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-        from bray.model.onnx import export_onnx
-
-        torch_model = ray.get(self.model)
-        step, weights = self._get_target_step(name, -1)
-        meta: ModelMeta = self.models[name]
         outputs_path = os.path.join(
             self.trial_path,
             f"{self.name}/forward_outputs.pt",
         )
+        from bray.model.onnx import export_onnx
+
+        meta: ModelMeta = self.models[name]
+        step, weights = self._get_target_step(name, -1)
         if (
-            meta.onnx_step < step
+            self.override_model and meta.onnx_step == -1
+            or meta.onnx_step != -1 and meta.onnx_step < step
             or not os.path.exists(onnx_path)
             or not os.path.exists(outputs_path)
         ):
             weights = ray.get(weights) if weights else self._load_checkpoint(name, step)
+            torch_model = torch.load(self.torch_path)
             set_torch_model_weights(torch_model, weights)
             print(f"Exporting latest onnx model at step {step} to", onnx_path)
             forward_outputs = export_onnx(
@@ -475,7 +464,8 @@ class Model:
 
         onnx_train_path = os.path.join(self.trial_path, f"{self.name}/train.onnx")
         if meta.use_onnx != "train" or (
-            os.path.exists(onnx_train_path) and os.path.exists(outputs_path)
+            not self.override_model and os.path.exists(onnx_train_path) 
+            and os.path.exists(outputs_path)
         ):
             if meta.use_onnx == "train":
                 onnx_path = onnx_train_path
@@ -484,6 +474,7 @@ class Model:
             return onnx_model, torch.load(outputs_path)
 
         print("Exporting onnx model to", onnx_train_path)
+        torch_model = torch.load(self.torch_path)
         forward_outputs = export_onnx(
             torch_model,
             onnx_train_path,
@@ -556,9 +547,22 @@ class Model:
         def initialize_model_if_needed():
             if cloned_name in self.models:
                 return
+            ckpt_dir = os.path.join(
+                self.trial_path, 
+                f"{cloned_name}/checkpoint",
+            )
+            if not os.path.exists(ckpt_dir):
+                os.makedirs(ckpt_dir, exist_ok=True)
+
+            weights_path = os.path.join(
+                self.trial_path, 
+                f"{cloned_name}/weights.pt",
+            )
+            if not os.path.exists(weights_path):
+                save_weights(weights, weights_path)
+
             self._initialize_model(
                 cloned_name,
-                weights,
                 max_batch_size,
                 cloned_meta,
             )
@@ -583,7 +587,15 @@ class Model:
                 )
             except asyncio.TimeoutError:
                 return None, meta.step
-        return meta.weights, meta.step
+        if meta.weights:
+            return meta.weights, meta.step
+        step, weights = self._get_target_step(name, -1)
+        if weights:
+            return weights, step
+        weights = await asyncio.get_running_loop().run_in_executor(
+            None, self._load_checkpoint, name, step
+        )
+        return ray.put(weights), step
 
     async def subscribe_workers(self, name, node_id: str = None):
         meta: ModelMeta = self.models[name]
@@ -712,7 +724,7 @@ class Model:
 
     def _get_target_step(self, name, step) -> tuple[int, object]:
         meta: ModelMeta = self.models[name]
-        if step == -1:
+        if step == -1 and meta.weights:
             return meta.step, meta.weights
         ckpt_steps = [0] + meta.ckpt_steps
         index = np.searchsorted(ckpt_steps, step, side="right")
@@ -730,6 +742,8 @@ class Model:
         return self.models[name].step
 
     async def get_model(self) -> ray.ObjectRef:
+        if not self.model:
+            self.model = ray.put(torch.load(self.torch_path))
         return self.model
 
     async def get_forward_inputs(self) -> tuple[NestedArray]:
@@ -787,6 +801,7 @@ class RemoteModel:
         memory_per_worker: int = 1024,
         use_onnx: ["train", "infer", "quantize"] = None,
         local_mode: bool = False,
+        override_model: bool = True,
     ):
         if name in cls.remote_models and (
             (self := cls.remote_models[name]) is not None
@@ -803,6 +818,7 @@ class RemoteModel:
         )
         self.subscribe_task = None
         self.cached_cloned_names = {}
+        self.local_worker = None
         model_ = None
         if m := cls.remote_models.get(base_name, None):
             model_ = m.model
@@ -823,12 +839,12 @@ class RemoteModel:
             gpus_per_worker,
             memory_per_worker,
             use_onnx,
+            override_model,
         )
         self.workers = ray.get(
             self.model.get_workers.remote(name, ray.get_runtime_context().get_node_id())
         )
         self.worker_index = random.randint(0, len(self.workers))
-        self.local_worker = None
         self._forward = self._local_forward if local_mode else self._remote_forward
         cls.remote_models[name] = self
         names = list(cls.remote_models.keys())
