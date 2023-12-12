@@ -359,15 +359,18 @@ class Model:
             ThreadPoolExecutor(max_workers=1)
         )
 
-        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
+        if not self.override_model or torch_model is None:
+            weights = None
         if isinstance(torch_model, torch.nn.Module):
             weights = get_torch_model_weights(torch_model)
-            save_weights(weights, weights_path)
-        elif torch_model:
+        else:
             tensorflow_model = build_tensorflow_model(
                 torch_model, forward_args, forward_kwargs
             )
             weights = tensorflow_model.get_weights()
+            
+        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
+        if weights:
             save_weights(weights, weights_path)
 
         meta = ModelMeta(num_workers, use_onnx)
@@ -867,6 +870,7 @@ class RemoteModel:
             memory_per_worker: 每个worker的内存大小，单位MB
             use_onnx: 默认不适用onnx优化，可选值为["train", "infer"]，分别表示训练和部署模式
             local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
+            override_model: 如果为True，则会覆盖已经存在的模型，设为False可以加速启动过程
         """
         assert (
             name in RemoteModel.remote_models

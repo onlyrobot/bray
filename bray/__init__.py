@@ -33,6 +33,11 @@ from bray.metric.metric import (
     get_trial_launch_path,
 )
 from bray.metric.validate import Metric
+from bray.master.master import (
+    push,
+    get,
+    register,
+)
 
 import ray, logging, os
 
