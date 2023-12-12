@@ -6,13 +6,13 @@ class Master:
     def __init__(self):
         self.registery, self.data = {}, {}
 
-    def push(self, key: str, value: object):
+    async def push(self, key: str, value: object):
         self.data[key] = value
 
-    def get(self, key: str) -> object:
+    async def get(self, key: str) -> object:
         return self.data[key]
 
-    def register(self, key: str) -> int:
+    async def register(self, key: str) -> int:
         id = self.registery.get(key, 0)
         self.registery[key] = id + 1
         return id
@@ -31,7 +31,7 @@ def get_master() -> Master:
 
 def push(key: str, value: object):
     """将数据推送到全局的 Master 对象，支持任意可序列化的数据，比如config"""
-    get_master().push.remote(key, value)
+    return get_master().push.remote(key, value)
 
 
 def get(key: str) -> object:
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     ray.init()
     
     config = {"a": 1, "b": 2}
-    push("config", config)
+    ray.get(push("config", config))
     assert get("config") == config
 
     assert register("actor") == 0
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     def test():
         assert get("config") == config
         assert register("actor") == 2
-        push("config", "hello")
+        ray.get(push("config", "hello"))
 
     config2 = {"a": 2, "b": 3}
     ray.get(test.remote())
