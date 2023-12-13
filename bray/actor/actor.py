@@ -19,6 +19,7 @@ class ActorGateway:
         self.actors_per_worker = actors_per_worker
         self.actors = {}
         self.auto_actor = None
+        self.concurrency = 0
         self.inactive_actors = [
             Actor(*args, **kwargs) for _ in range(actors_per_worker)
         ]
@@ -102,9 +103,13 @@ class ActorGateway:
     async def auto(self, data) -> bytes:
         if self.auto_actor is None:
             self.auto_actor = self._create_worker()
+        while self.concurrency >= self.actors_per_worker:
+            await asyncio.sleep(0.001)
         beg = time.time()
         try:
+            self.concurrency += 1
             tick_ret = await self.auto_actor.tick(data)
+            self.concurrency -= 1
         except:
             self.auto_actor = None
             raise
@@ -215,7 +220,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         asyncio.create_task(handle(headers, body))
 
 
-@ray.remote
+@ray.remote(max_retries=-1)
 def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
     gateway.register.remote("localhost", port) if gateway else None
 
