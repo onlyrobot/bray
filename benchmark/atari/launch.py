@@ -13,8 +13,8 @@ remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
     forward_args=(model_inputs,),
-    num_workers=2,
-    local_mode=False,
+    num_workers=0,
+    local_mode=True,
     use_onnx="train",
 )
 bray.add_graph(remote_model.get_model(), remote_model.get_torch_forward_args())
