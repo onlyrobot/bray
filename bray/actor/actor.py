@@ -344,4 +344,5 @@ class RemoteActor:
             for node_id, gateway in zip(self.node_ids, self.gateways)
             for i in range(self.num_workers)
         ]
+        ray.get([gateway.serve.remote() for gateway in self.gateways])
         print("ActorGateway started.")

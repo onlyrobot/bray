@@ -9,7 +9,6 @@ class Gateway:
     def __init__(self, port: int):
         self.port = port
         self.server_addrs, self.server_index = [], 0
-        asyncio.create_task(self.start())
 
     async def start(self):
         gateway = await asyncio.start_server(
@@ -17,6 +16,9 @@ class Gateway:
         )
         async with gateway:
             await gateway.serve_forever()
+
+    async def serve(self):
+        asyncio.create_task(self.start())
 
     async def register(self, ip: str, port: int):
         if (ip, port) in self.server_addrs:

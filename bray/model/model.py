@@ -36,6 +36,7 @@ def build_tensorflow_model(model, forward_args, forward_kwargs):
     tensorflow_model(*args, **kwargs)
     return tensorflow_model
 
+
 def save_weights(weights: NestedArray, path: str):
     tensor_weights = handle_nested_array(weights, torch.from_numpy)
     torch.save(tensor_weights, path)
@@ -242,12 +243,14 @@ class ModelWorker:
         while True:
             await self.__forward_coro(forward_cond)
 
-    async def forward(self, *args, **kwargs) -> NestedArray:
+    async def forward(self, args, kwargs, pending=True) -> NestedArray:
         if not self.is_initialized:
             await self._initialize_async_context()
-        if self.max_batch_size == 1:
-            return (await self._forward([(args, kwargs)]))[0]
+        # if self.max_batch_size == 1:
+        #     return (await self._forward([(args, kwargs)]))[0]
         while len(self.pending_forwards) >= self.max_batch_size:
+            if not pending:
+                raise RuntimeError("Too many requests.")
             await asyncio.sleep(0.001)
         forward_index = len(self.pending_forwards)
         self.pending_forwards.append((args, kwargs))
@@ -368,7 +371,7 @@ class Model:
                 torch_model, forward_args, forward_kwargs
             )
             weights = tensorflow_model.get_weights()
-            
+
         weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
         if weights:
             save_weights(weights, weights_path)
@@ -445,8 +448,8 @@ class Model:
         meta: ModelMeta = self.models[name]
         step, weights = self._get_target_step(name, -1)
         if (
-            self.override_model and meta.onnx_step == -1
-            or meta.onnx_step != -1 and meta.onnx_step < step
+            (self.override_model and meta.onnx_step == -1)
+            or (meta.onnx_step != -1 and meta.onnx_step < step)
             or not os.path.exists(onnx_path)
             or not os.path.exists(outputs_path)
         ):
@@ -467,7 +470,8 @@ class Model:
 
         onnx_train_path = os.path.join(self.trial_path, f"{self.name}/train.onnx")
         if meta.use_onnx != "train" or (
-            not self.override_model and os.path.exists(onnx_train_path) 
+            not self.override_model
+            and os.path.exists(onnx_train_path)
             and os.path.exists(outputs_path)
         ):
             if meta.use_onnx == "train":
@@ -551,14 +555,14 @@ class Model:
             if cloned_name in self.models:
                 return
             ckpt_dir = os.path.join(
-                self.trial_path, 
+                self.trial_path,
                 f"{cloned_name}/checkpoint",
             )
             if not os.path.exists(ckpt_dir):
                 os.makedirs(ckpt_dir, exist_ok=True)
 
             weights_path = os.path.join(
-                self.trial_path, 
+                self.trial_path,
                 f"{cloned_name}/weights.pt",
             )
             if not os.path.exists(weights_path):
@@ -652,7 +656,7 @@ class Model:
 
     async def _is_health(self, worker):
         try:
-            await worker.forward.remote(*self.forward_args, **self.forward_kwargs)
+            await worker.forward.remote(self.forward_args, self.forward_kwargs)
             return True
         except ray.exceptions.RayActorError:
             return False
@@ -887,7 +891,7 @@ class RemoteModel:
         while True:
             workers[:] = await model.subscribe_workers.remote(name, node_id)
 
-    async def _local_forward(self, *args, **kwargs) -> NestedArray:
+    async def _local_forward(self, args, kwargs) -> NestedArray:
         if not RemoteModel.set_executor:
             asyncio.get_running_loop().set_default_executor(
                 ThreadPoolExecutor(max_workers=1)
@@ -896,7 +900,7 @@ class RemoteModel:
         if not self.local_worker:
             self.local_worker = ModelWorker(self.name, self.model)
         beg = time.time()
-        outputs = await self.local_worker.forward(*args, **kwargs)
+        outputs = await self.local_worker.forward(args, kwargs)
         forward_time_ms = (time.time() - beg) * 1000
         merge("forward", forward_time_ms, model=self.name, desc={}, mode="local")
         return outputs
@@ -917,25 +921,29 @@ class RemoteModel:
         await self.sync()
         await self._init_subscribe_task()
 
-    async def _remote_forward(self, *args, **kwargs) -> NestedArray:
+    async def _remote_forward(self, args, kwargs, retry=2) -> NestedArray:
         if len(self.workers) == 0 or not self.subscribe_task:
             await self._init_subscribe_task()
-        beg = time.time()
-        index = self.worker_index % len(self.workers)
+        worker = self.workers[self.worker_index % len(self.workers)]
         self.worker_index += 1
-        worker = self.workers[index]
         try:
-            outputs = await worker.forward.remote(*args, **kwargs)
+            pending = len(self.workers) < 2 or retry < 1
+            beg = time.time()
+            outputs = await worker.forward.remote(args, kwargs, pending)
         except ray.exceptions.RayActorError:
             print("Ray actor exception from model forward")
             await self.sync()
-            return await self._remote_forward(*args, **kwargs)
+            return await self._remote_forward(args, kwargs)
+        except ray.exceptions.RayTaskError:
+            if (retry := retry - 1) < 0:
+                raise
+            return await self._remote_forward(args, kwargs, retry)
         merge_time_ms("forward", beg, model=self.name, mode="remote")
         return outputs
 
     async def forward(
-        self, *args: tuple[np.ndarray], **kwargs: dict[str : np.ndarray]
-    ) -> tuple[np.ndarray] | np.ndarray | dict[str : np.ndarray]:
+        self, *args: tuple[NestedArray], **kwargs: dict[str:NestedArray]
+    ) -> NestedArray:
         """
         执行模型的前向计算，返回模型的输出
         Args:
@@ -944,7 +952,7 @@ class RemoteModel:
         Returns:
             模型的输出，是一个或多个 np.ndarray
         """
-        return await self._forward(*args, **kwargs)
+        return await self._forward(args, kwargs)
 
     @property
     def step(self) -> int:
