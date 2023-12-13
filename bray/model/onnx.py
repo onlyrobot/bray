@@ -111,7 +111,11 @@ def export_onnx(
     ):
         if np.allclose(ort_output, origin_output, rtol=relative_diff):
             continue
+        diff = np.abs(ort_output - origin_output) / np.maximum(
+            np.abs(ort_output), np.abs(origin_output)
+        )
         print("Onnx model output is not equal to origin Torch model output.")
+        print("Average relative error is:", np.average(diff))
         print("Onnx model output:", ort_output)
         print("Origin Torch model output:", origin_output)
         print(
