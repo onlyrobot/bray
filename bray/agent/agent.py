@@ -1,7 +1,5 @@
 import asyncio
 from bray.actor.base import Actor
-from bray.model.model import RemoteModel
-from bray.buffer.buffer import RemoteBuffer
 from types import ModuleType
 from typing import Any, Type
 from google.protobuf.message import Message
@@ -81,16 +79,12 @@ class AgentActor(Actor):
         TickInputProto: Type[Message],
         TickOutputProto: Type[Message],
         agents: dict[str:ModuleType],
-        models: dict[str:RemoteModel] = {},
-        buffers: dict[str:RemoteBuffer] = {},
         episode_length: int = 128,
     ):
         """ """
         self.TickInputProto = TickInputProto
         self.TickOutputProto = TickOutputProto
         self.agents = agents
-        self.models = models
-        self.buffers = buffers
         self.episode_length = episode_length
 
     async def start(self, game_id, data: bytes) -> bytes:
@@ -116,7 +110,6 @@ class AgentActor(Actor):
         await asyncio.gather(
             *[
                 a.on_tick(
-                    self.models,
                     self.global_state,
                     input,
                     output,
@@ -130,7 +123,6 @@ class AgentActor(Actor):
         asyncio.gather(
             *[
                 a.on_episode(
-                    self.buffers,
                     self.global_state,
                     self.episode,
                 )
@@ -156,9 +148,8 @@ class AgentActor(Actor):
 if __name__ == "__main__":
     import importlib
 
-    agent_module = importlib.import_module("test_agent")
-    agent_module.hello()
-    agent_module2 = importlib.import_module("test_agent2")
+    agent_module = importlib.import_module("bray.agent.base")
+    agent_module2 = importlib.import_module("bray.agent.base")
 
     class FakeProto:
         def SerializeToString(self):
@@ -167,20 +158,10 @@ if __name__ == "__main__":
         def ParseFromString(self, data):
             pass
 
-    class FakeModel:
-        async def forward(self, input):
-            return []
-
-    class FakeBuffer:
-        async def push(self, data):
-            pass
-
     agent_actor = AgentActor(
         FakeProto,
         FakeProto,
         [agent_module, agent_module2],
-        [FakeModel()],
-        [FakeBuffer()],
     )
 
     async def test():

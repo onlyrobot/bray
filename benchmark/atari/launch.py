@@ -17,7 +17,7 @@ remote_model = bray.RemoteModel(
     local_mode=True,
     use_onnx="train",
 )
-bray.add_graph(remote_model.get_model(), remote_model.get_torch_forward_args())
+bray.add_graph(remote_model.get_model().eval(), remote_model.get_torch_forward_args())
 bray.set_tensorboard_step(remote_model.name)
 
 remote_buffer = bray.RemoteBuffer(

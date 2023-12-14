@@ -75,8 +75,9 @@ class BufferWorker:
 
 @ray.remote
 class Buffer:
-    def __init__(self, size, batch_size):
+    def __init__(self, size, batch_size, num_workers, sparsity):
         self.size, self.batch_size = size, batch_size
+        self.num_workers, self.sparsity = num_workers, sparsity
         self.worker_cond = asyncio.Condition()
         self.workers = []
         asyncio.create_task(self._health_check())
@@ -121,6 +122,9 @@ class Buffer:
         num = min(max_num, len(self.workers))
         return random.sample(self.workers, num)
 
+    async def get_worker_initialize_info(self):
+        return self.batch_size, self.num_workers, self.sparsity
+
 
 class RemoteBuffer:
     def __init__(
@@ -139,9 +143,7 @@ class RemoteBuffer:
         assert (
             batch_size is None or size >= batch_size
         ), f"RemoteBuffer size {size} must >= batch_size {batch_size}"
-        self.name, self.num_workers = name, num_workers
-        self.batch_size = batch_size
-        self.sparsity = sparsity
+        self.name = name
         self.buffer_workers = None
         self.subscribe_task = None
         scheduling_local = NodeAffinitySchedulingStrategy(
@@ -150,7 +152,10 @@ class RemoteBuffer:
         )
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, scheduling_strategy=scheduling_local
-        ).remote(size, batch_size)
+        ).remote(size, batch_size, num_workers, sparsity)
+        self.batch_size, self.num_workers, self.sparsity = ray.get(
+            self.buffer.get_worker_initialize_info.remote()
+        )
         self.workers = ray.get(self.buffer.get_workers.remote(self.sparsity))
         self.worker_index = random.randint(0, 100)
 
@@ -308,9 +313,9 @@ class RemoteBuffer:
         for data in source:
             merge_time_ms("generate", gen_beg, buffer=self.name)
             batch_data.append(data)
-            await asyncio.sleep(0)
             gen_beg = time.time()
             if len(batch_data) < batch_size:
+                await asyncio.sleep(0)
                 continue
             push_task = asyncio.create_task(
                 self._push(*batch_data, drop=False),
@@ -322,12 +327,12 @@ class RemoteBuffer:
         await self._push(*batch_data, drop=False)
 
     def _generate_epoch(self, sources, num_workers, epoch):
-        num_workers = min(len(sources), num_workers)
-        index, workers = num_workers - 1, []
-
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
         def SourceWorker(source):
             asyncio.run(self._generate(source))
+
+        num_workers = min(len(sources), num_workers)
+        index, workers = num_workers - 1, []
 
         for i in range(num_workers):
             workers.append(SourceWorker.remote(sources[i]))
@@ -336,9 +341,9 @@ class RemoteBuffer:
         while (index := index + 1) < len(sources):
             rets, workers = ray.wait(workers)
             workers.append(SourceWorker.remote(sources[index]))
-            if ret := ray.get(rets[0]) is None:
+            if (ret := ray.get(rets[0])) is None:
                 continue
-            print("SourceWorker is error: ", ret)
+            print("SourceWorker error: ", ret)
 
         if (epoch := epoch - 1) < 1:
             return
@@ -363,7 +368,7 @@ class RemoteBuffer:
             num_workers = max(1, int(cpu_num))
 
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
-        def RemoteSource(sources, num_workers, epoch):
+        def Source(sources, num_workers, epoch):
             self._generate_epoch(sources, num_workers, epoch)
 
-        return RemoteSource.remote(sources, num_workers, epoch)
+        return Source.remote(sources, num_workers, epoch)

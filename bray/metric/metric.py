@@ -24,7 +24,7 @@ class Metric:
 
 
 @ray.remote(num_cpus=0)
-class RemoteMetrics:
+class Metrics:
     def __init__(self, time_window):
         self.metrics, self.last_metrics = {}, {}
         self.diff_metrics = {}
@@ -196,8 +196,8 @@ class MetricsWorker:
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
-        self.remote_metrics = RemoteMetrics.options(
-            name="RemoteMetrics",
+        self.remote_metrics = Metrics.options(
+            name="Metrics",
             get_if_exists=True,
             scheduling_strategy=scheduling_local,
         ).remote(time_window)
