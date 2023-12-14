@@ -30,7 +30,7 @@ class GridShootingActor(bray.Actor):
         self.target_model_reuse = 0
         self.target_model_max_reuse = target_model_max_reuse
 
-    def start(self, game_id, data: bytes) -> bytes:
+    async def start(self, game_id, data: bytes) -> bytes:
         self.game_id = game_id
         self.trajectory = []
         self.episode_reward = 0.0
@@ -72,7 +72,7 @@ class GridShootingActor(bray.Actor):
         )
         return json.dumps({"action": [int(action), int(action_1)]}).encode()
 
-    def end(self, data: bytes) -> bytes:
+    async def end(self, data: bytes) -> bytes:
         data = json.loads(data)
         reward_0, _ = data["rewards"]
         self.episode_reward += reward_0

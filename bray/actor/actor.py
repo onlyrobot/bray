@@ -79,7 +79,7 @@ class ActorGateway:
         self.actors[game_id] = actor
         try:
             actor.__bray_atime = time.time()
-            start_ret = actor.start(game_id, data)
+            start_ret = await actor.start(game_id, data)
         except:
             self.actors.pop(game_id, None)
             raise
@@ -101,11 +101,15 @@ class ActorGateway:
         return tick_ret
 
     async def auto(self, data) -> bytes:
-        if self.auto_actor is None:
-            self.auto_actor = self._create_worker()
         while self.concurrency >= self.actors_per_worker:
             await asyncio.sleep(0.001)
         beg = time.time()
+        if self.auto_actor is None:
+            try:
+                actor = self.inactive_actors.pop()
+            except IndexError:
+                actor = self._create_worker()
+            self.auto_actor = actor
         try:
             self.concurrency += 1
             tick_ret = await self.auto_actor.tick(data)
@@ -141,7 +145,7 @@ class ActorGateway:
         if not actor:
             raise Exception(f"Game {game_id} not started.")
 
-        end_ret = actor.end(body)
+        end_ret = await actor.end(body)
         self.inactive_actors.append(actor)
         return end_ret
 
@@ -164,6 +168,8 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             writer.close()
             await writer.wait_closed()
             return
+        if not isinstance(data, bytes):
+            raise Exception("Actor return must be bytes")
         game_id_size = len(headers["game_id"])
         body_size = len(data)
         time = headers["time"]

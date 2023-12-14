@@ -13,7 +13,7 @@ class Actor:
         """
         raise NotImplementedError
 
-    def start(self, game_id, data: bytes) -> bytes:
+    async def start(self, game_id, data: bytes) -> bytes:
         """
         开始一局新的游戏，由Gamecore调用，请在这里初始化游戏状态
         Args:
@@ -38,7 +38,7 @@ class Actor:
         """
         raise NotImplementedError
 
-    def end(self, data: bytes) -> bytes:
+    async def end(self, data: bytes) -> bytes:
         """
         游戏结束时调用，由Gamecore调用，在这里需要执行以下操作：
         1. 从data中解析出游戏状态（通常是最后一帧的reward）

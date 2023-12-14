@@ -17,6 +17,7 @@ from bray.model.onnx import export_onnx
 from bray.trainer.trainer import RemoteTrainer
 from bray.actor.actor import RemoteActor
 from bray.actor.base import Actor
+from bray.actor.agent import State, AgentActor
 from bray.utils.nested_array import (
     NestedArray,
     handle_nested_array,
@@ -34,7 +35,7 @@ from bray.metric.metric import (
 )
 from bray.metric.validate import Metric
 from bray.master.master import (
-    push,
+    set,
     get,
     register,
 )

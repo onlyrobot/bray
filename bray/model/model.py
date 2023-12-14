@@ -89,14 +89,14 @@ class ModelWorker:
         self.subscribe_task.cancel()
 
     def _build_ort_session(self, onnx_model):
-        provider = "CUDAExecutionProvider" if self.num_gpus else "CPUExecutionProvider"
+        provider = ["CUDAExecutionProvider"] if self.num_gpus else []
         num_cpus = max(1, int(self.num_cpus))
         import onnxruntime as ort
 
         options = ort.SessionOptions()
         options.intra_op_num_threads = num_cpus
         options.inter_op_num_threads = num_cpus
-        return ort.InferenceSession(onnx_model, options, [provider])
+        return ort.InferenceSession(onnx_model, options, provider)
 
     def _init_onnx(self):
         self.ort_session, self.forward_outputs = None, None

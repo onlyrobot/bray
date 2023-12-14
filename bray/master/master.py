@@ -18,7 +18,7 @@ class Master:
         return id
 
 
-GLOBAL_MASTER = None
+GLOBAL_MASTER: Master = None
 
 
 def get_master() -> Master:
@@ -29,18 +29,18 @@ def get_master() -> Master:
     return GLOBAL_MASTER
 
 
-def push(key: str, value: object):
-    """将数据推送到全局的 Master 对象，支持任意可序列化的数据，比如config"""
+def set(key: str, value: object):
+    """将数据推送到全局的 Master 对象，比如config"""
     return get_master().push.remote(key, value)
 
 
 def get(key: str) -> object:
-    """从全局的 Master 对象获取数据，本调用为堵塞调用，所以不要频繁调用"""
+    """从全局的 Master 对象获取数据"""
     return ray.get(get_master().get.remote(key))
 
 
 def register(key: str) -> int:
-    """注册一个全局的计数器，用于在多个节点之间同步计数，比如 Actor 的 ID"""
+    """注册一个全局的计数器，同步计数，比如 Actor 的 ID"""
     return ray.get(get_master().register.remote(key))
 
 
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     ray.init()
     
     config = {"a": 1, "b": 2}
-    ray.get(push("config", config))
+    ray.get(set("config", config))
     assert get("config") == config
 
     assert register("actor") == 0
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     def test():
         assert get("config") == config
         assert register("actor") == 2
-        ray.get(push("config", "hello"))
+        ray.get(set("config", "hello"))
 
     config2 = {"a": 2, "b": 3}
     ray.get(test.remote())
