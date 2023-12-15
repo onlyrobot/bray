@@ -101,9 +101,9 @@ class ActorGateway:
         return tick_ret
 
     async def auto(self, data) -> bytes:
+        beg = time.time()
         while self.concurrency >= self.actors_per_worker:
             await asyncio.sleep(0.001)
-        beg = time.time()
         if self.auto_actor is None:
             try:
                 actor = self.inactive_actors.pop()
@@ -275,6 +275,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
 class RemoteActor:
     def __init__(
         self,
+        name: str = "",
         port: int = 8000,
         num_workers: int = 2,
         cpus_per_worker: float = 1,
@@ -293,7 +294,7 @@ class RemoteActor:
             use_tcp: 是否使用 TCP 作为通信协议
             gateway: ActorGateway 的位置，可以是 "node" 或 "head" 或 None
         """
-        self.port = port
+        self.name, self.port = name, port
         self.num_workers = num_workers
         self.cpus_per_worker = cpus_per_worker
         self.memory_per_worker = memory_per_worker
@@ -308,7 +309,7 @@ class RemoteActor:
             *args: Actor 的位置参数
             **kwargs: Actor 的关键字参数
         """
-        print("Starting ActorGateway.")
+        print(f"Starting Actor {self.name}...")
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
         self.node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
@@ -351,4 +352,4 @@ class RemoteActor:
             for i in range(self.num_workers)
         ]
         ray.get([gateway.serve.remote() for gateway in self.gateways])
-        print("ActorGateway started.")
+        print(f"Actor {self.name} started at {self.port}.")

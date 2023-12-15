@@ -303,12 +303,13 @@ class ModelWorker:
 
 
 class ModelMeta:
-    def __init__(self, num_workers: int = None, use_onnx: str = None):
+    def __init__(self, num_workers=None, use_onnx=None, local_mode=False):
         self.num_workers, self.workers = num_workers, []
         self.max_batch_size = 1
         self.weights, self.step, self.ckpt_step = None, 0, 0
         self.cached_weights_refs = [None for _ in range(1)]
         self.use_onnx, self.onnx_step = use_onnx, -1
+        self.local_mode = local_mode
         self.pending_create_workers = 0
         self.ckpt_steps = []
         self.step_cond = asyncio.Condition()
@@ -330,6 +331,7 @@ class Model:
         gpus_per_worker: float = 0.0,
         memory_per_worker: int = 1024,
         use_onnx: str = None,
+        local_mode: bool = False,
         override_model: bool = True,
     ):
         self.trial_path = ray.get_runtime_context().namespace
@@ -376,7 +378,7 @@ class Model:
         if weights:
             save_weights(weights, weights_path)
 
-        meta = ModelMeta(num_workers, use_onnx)
+        meta = ModelMeta(num_workers, use_onnx, local_mode)
         self._initialize_model(self.name, max_batch_size, meta)
 
         self.cpus_per_worker = cpus_per_worker
@@ -415,14 +417,16 @@ class Model:
 
     def _initialize_model(self, name, max_batch_size, meta: ModelMeta):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
+        if not os.path.exists(ckpt_dir):
+            os.makedirs(ckpt_dir, exist_ok=True)
         try:
             ckpt_steps = self._build_ckpt_steps(name, ckpt_dir)
             step = ckpt_steps[-1] if ckpt_steps else 0
+            meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
+            print(f"Model {name} latest checkpoint step is {step}")
         except Exception as e:
-            print(f"Build checkpoint steps failed: {e}")
-        print(f"Model {name} latest checkpoint step is {step}")
+            print(f"Build checkpoint steps for {name} failed: {e}")
 
-        meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
         meta.max_batch_size = max_batch_size
         self.models[name] = meta
 
@@ -534,7 +538,9 @@ class Model:
         ):
             await self.__save_checkpoint(name)
 
-    async def clone(self, name, step, max_batch_size, num_workers, use_onnx) -> str:
+    async def clone(
+        self, name, step, max_batch_size, num_workers, use_onnx, local_mode
+    ) -> str:
         step, weights = self._get_target_step(name, step)
 
         if (cloned_name := f"{name}/clone-step-{step}") in self.models:
@@ -549,17 +555,11 @@ class Model:
         num_workers = num_workers if num_workers != -1 else meta.num_workers
 
         loop = asyncio.get_running_loop()
-        cloned_meta = ModelMeta(num_workers, use_onnx)
+        cloned_meta = ModelMeta(num_workers, use_onnx, local_mode)
 
         def initialize_model_if_needed():
             if cloned_name in self.models:
                 return
-            ckpt_dir = os.path.join(
-                self.trial_path,
-                f"{cloned_name}/checkpoint",
-            )
-            if not os.path.exists(ckpt_dir):
-                os.makedirs(ckpt_dir, exist_ok=True)
 
             weights_path = os.path.join(
                 self.trial_path,
@@ -771,6 +771,9 @@ class Model:
         workers = [w for w in model.workers if w.__node_id == node_id]
         return workers if workers else model.workers
 
+    async def is_local_mode(self, name) -> bool:
+        return self.models[name].local_mode
+
     async def get_worker_initialize_info(
         self, name
     ) -> tuple[int, int, str, float, float]:
@@ -807,7 +810,7 @@ class RemoteModel:
         gpus_per_worker: float = 0.0,
         memory_per_worker: int = 1024,
         use_onnx: ["train", "infer", "quantize"] = None,
-        local_mode: bool = False,
+        local_mode: bool = None,
         override_model: bool = True,
     ):
         if name in cls.remote_models and (
@@ -846,12 +849,15 @@ class RemoteModel:
             gpus_per_worker,
             memory_per_worker,
             use_onnx,
+            local_mode,
             override_model,
         )
         self.workers = ray.get(
             self.model.get_workers.remote(name, ray.get_runtime_context().get_node_id())
         )
         self.worker_index = random.randint(0, len(self.workers))
+        if local_mode is None:
+            local_mode = ray.get(self.model.is_local_mode.remote(name))
         self._forward = self._local_forward if local_mode else self._remote_forward
         cls.remote_models[name] = self
         names = list(cls.remote_models.keys())
@@ -861,6 +867,7 @@ class RemoteModel:
 
     def __init__(self, name: str, *args, **kwargs):
         """
+        创建或者获取一个RemoteModel，如果已经存在同名的RemoteModel，则直接返回
         Args:
             name: 模型的名字，用于在Ray集群中标识模型
             model: 目前支持PyTorch模型，和Tensorflow模型，如果为None，则默认已经存在的同名模型
@@ -1011,7 +1018,7 @@ class RemoteModel:
         if cloned_name := self.cached_cloned_names.get(step, None):
             return RemoteModel(cloned_name, local_mode=local_mode)
         cloned_name = self.model.clone.remote(
-            self.name, step, max_batch_size, num_workers, use_onnx
+            self.name, step, max_batch_size, num_workers, use_onnx, local_mode
         )
         cloned_name = ray.get(cloned_name)
         if step != -1:

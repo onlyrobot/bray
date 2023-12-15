@@ -96,6 +96,7 @@ class AgentActor(Actor):
                     self.global_state,
                 )
                 for a in self.agents
+                if hasattr(a, "on_start")
             ]
         )
         self.episode = []
@@ -127,6 +128,7 @@ class AgentActor(Actor):
                     self.episode,
                 )
                 for a in self.agents
+                if hasattr(a, "on_episode")
             ]
         )
         self.episode = []
@@ -139,6 +141,7 @@ class AgentActor(Actor):
                     self.global_state,
                 )
                 for a in self.agents
+                if hasattr(a, "on_end")
             ]
         )
         del self.global_state, self.episode

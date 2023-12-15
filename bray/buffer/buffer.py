@@ -8,6 +8,7 @@ import asyncio
 
 from bray.utils.nested_array import NestedArray, make_batch, split_batch
 from bray.metric.metric import merge, merge_time_ms
+from bray.buffer.utils import BatchBuffer, PrefetchBuffer
 
 
 @ray.remote
@@ -17,8 +18,6 @@ class BufferWorker:
         self_handle = ray.get_runtime_context().current_actor
         worker_info = ray.get(self.buffer.register.remote(self_handle))
         self.size, self.batch_size = worker_info
-        if self.batch_size is not None:
-            self.size = self.size // self.batch_size
         self.replays, self._replays = [], []
         self.pop_cond = asyncio.Condition()
 
@@ -75,9 +74,9 @@ class BufferWorker:
 
 @ray.remote
 class Buffer:
-    def __init__(self, size, batch_size, num_workers, sparsity):
+    def __init__(self, size, batch_size, num_workers, density):
         self.size, self.batch_size = size, batch_size
-        self.num_workers, self.sparsity = num_workers, sparsity
+        self.num_workers, self.density = num_workers, density
         self.worker_cond = asyncio.Condition()
         self.workers = []
         asyncio.create_task(self._health_check())
@@ -89,8 +88,8 @@ class Buffer:
             self.worker_cond.notify_all()
         return self.size, self.batch_size
 
-    def get_workers(self, max_num: int) -> list:
-        num = min(max_num, len(self.workers))
+    async def get_workers(self, max_num: int = None) -> list:
+        num = min(max_num or self.density, len(self.workers))
         return random.sample(self.workers, num)
 
     async def _is_health(self, worker):
@@ -116,33 +115,28 @@ class Buffer:
         await asyncio.sleep(60)
         asyncio.create_task(self._health_check())
 
-    async def subscribe_workers(self, max_num: int) -> list:
+    async def subscribe_workers(self, max_num: int = None) -> list:
         async with self.worker_cond:
             await self.worker_cond.wait()
-        num = min(max_num, len(self.workers))
-        return random.sample(self.workers, num)
+        return await self.get_workers(max_num)
 
-    async def get_worker_initialize_info(self):
-        return self.batch_size, self.num_workers, self.sparsity
+    async def get_buffer_info(self):
+        return self.batch_size, self.num_workers
 
 
 class RemoteBuffer:
-    def __init__(
-        self, name: str, size=512, batch_size=None, num_workers=2, sparsity=100
+    remote_buffers: dict[str, "RemoteBuffer"] = {}
+
+    def __new__(
+        cls, name: str = None, size=512, batch_size=None, num_workers=2, density=100
     ):
-        """
-        创建一个 RemoteBuffer，RemoteBuffer 会在 Ray 集群中运行，用于存储数据
-        Args:
-            name: Buffer 的名称，用于标识不同的 Buffer
-            size: Buffer 的大小，用于限制 Buffer 中最多能存储多少条数据
-            batch_size: 从 Buffer 中读取数据时，每次读取的数据的批次大小，
-                如果为 None，则不对数据进行分批
-            num_workers: BufferWorker 的数量，用于控制从 Buffer 中读取数据的并发度
-            sparsity: 开启后Buffer的生产端和消费端不再是全连接，从而减少系统资源占用
-        """
-        assert (
-            batch_size is None or size >= batch_size
-        ), f"RemoteBuffer size {size} must >= batch_size {batch_size}"
+        if name in cls.remote_buffers and (
+            (self := cls.remote_buffers[name]) is not None
+        ):
+            return self
+        self = super().__new__(cls)
+        if name is None:  # 适配对象反序列化时调用__new__方法
+            return self
         self.name = name
         self.buffer_workers = None
         self.subscribe_task = None
@@ -152,20 +146,38 @@ class RemoteBuffer:
         )
         self.buffer = Buffer.options(
             name=name, get_if_exists=True, scheduling_strategy=scheduling_local
-        ).remote(size, batch_size, num_workers, sparsity)
-        self.batch_size, self.num_workers, self.sparsity = ray.get(
-            self.buffer.get_worker_initialize_info.remote()
+        ).remote(size, batch_size, num_workers, density)
+        self.batch_size, self.num_workers = ray.get(
+            self.buffer.get_buffer_info.remote()
         )
-        self.workers = ray.get(self.buffer.get_workers.remote(self.sparsity))
+        self.workers = ray.get(self.buffer.get_workers.remote())
         self.worker_index = random.randint(0, 100)
+        cls.remote_buffers[name] = self
+        return self
+
+    def __init__(self, name: str, *args, **kwargs):
+        """
+        创建一个 RemoteBuffer，RemoteBuffer 会在 Ray 集群中运行，用于存储数据
+        Args:
+            name: Buffer 的名称，用于标识不同的 Buffer
+            size: Buffer 的大小，用于限制 Buffer 中最多能存储多少条数据，
+                计算方法为 size * batch_size * num_workers
+            batch_size: 从 Buffer 中读取数据时，每次读取的数据的批次大小，
+                如果为 None，则不对数据进行分批
+            num_workers: BufferWorker 的数量，用于控制从 Buffer 中读取数据的并发度
+            density: 调小后Buffer的生产端和消费端不再是全连接，从而减少系统资源占用
+        """
+        assert (
+            name in RemoteBuffer.remote_buffers
+        ), f"RemoteBuffer {name} is not initialized"
 
     def __del__(self):
         self.subscribe_task.cancel() if self.subscribe_task else None
 
-    async def subscribe_workers(cls, buffer, workers, sparsity):
+    async def subscribe_workers(cls, buffer, workers):
         # 定义为类方法，避免引用self阻止RemoteBuffer被回收
         while True:
-            workers[:] = await buffer.subscribe_workers.remote(sparsity)
+            workers[:] = await buffer.subscribe_workers.remote()
 
     async def _init_subscribe_task(self, drop):
         if len(self.workers) != 0 and self.subscribe_task:
@@ -179,9 +191,7 @@ class RemoteBuffer:
             await asyncio.sleep(10)
             assert self.workers, f"No buffer worker for {self.name}"
         self.subscribe_task = asyncio.create_task(
-            RemoteBuffer.subscribe_workers(
-                RemoteBuffer, self.buffer, self.workers, self.sparsity
-            )
+            RemoteBuffer.subscribe_workers(RemoteBuffer, self.buffer, self.workers)
         )
         self.subscribe_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
@@ -236,7 +246,7 @@ class RemoteBuffer:
         return asyncio.create_task(self._push(*replays, drop=True))
 
     async def sync(self):
-        self.workers[:] = await self.buffer.get_workers.remote(self.sparsity)
+        self.workers[:] = await self.buffer.get_workers.remote()
 
     def _new_local_worker(self) -> BufferWorker:
         """
@@ -304,6 +314,29 @@ class RemoteBuffer:
     def __iter__(self) -> Iterator[NestedArray]:
         """RemoteBuffer 是一个可迭代对象，可以读取 Buffer 中的数据"""
         return self
+
+    def iter_batches(
+        self, batch_size: int = 256, prefetch_size: int = 1, max_reuse: int = 0
+    ) -> Iterator[NestedArray]:
+        """
+        在RemoteBuffer基础上，返回一个可迭代对象，每次迭代返回一个batch的数据
+        Args:
+            batch_size: batch的大小，是在原有RemoteBuffer的batch_size基础上进行batch
+            prefetch_size: 预取的batch的数量，如果为0，则不预取
+            max_reuse: 最大重用的batch的数量，如果为0，则不重用，必须和prefetch_size配合使用
+        """
+        buffer = BatchBuffer(self, batch_size=batch_size, kind="concate")
+        if prefetch_size < 1 and max_reuse < 1:
+            return buffer
+        prefetch_size = max(prefetch_size, 1)
+        return PrefetchBuffer(buffer, prefetch_size, max_reuse, self.name)
+
+    def pop(self) -> NestedArray:
+        """
+        从 Buffer 中读取一条数据，数据的格式为 NestedArray，也就是 push 时的数据格式，
+        如果设置了 batch_size，则会将多条数据合并为一个 NestedArray
+        """
+        return next(self)
 
     async def _generate(self, source: Iterator[NestedArray]):
         batch_data, batch_size = [], self.batch_size or 1

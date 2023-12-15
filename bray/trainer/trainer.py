@@ -6,6 +6,7 @@ class RemoteTrainer:
 
     def __init__(
         self,
+        name: str = "",
         use_gpu: bool = None,
         num_workers: int = None,
         cpus_per_worker: int = None,
@@ -39,7 +40,7 @@ class RemoteTrainer:
             num_workers = num_workers if num_workers else total_gpus
 
         print(
-            f"Trainer start with {num_workers} {'GPU' if use_gpu else 'CPU'} workers, "
+            f"Trainer {name} start with {num_workers} {'GPU' if use_gpu else 'CPU'} workers, "
             + f"{cpus_per_worker} cpus per worker"
         )
 
@@ -72,7 +73,7 @@ class RemoteTrainer:
         init_framework = init_torch if framework == "torch" else init_tensorflow
         ray.get(self.executor.run_remote(init_framework))
 
-    def train(self, train: callable, *args, **kwargs) -> list[any]:
+    def train(self, train: callable, *args, **kwargs) -> list:
         """
         在多个节点上执行训练函数
         Args:

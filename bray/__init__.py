@@ -68,7 +68,10 @@ def init(project: str, trial: str, **kwargs):
     print("bray init success with path: ", trial_path)
 
 
-CACHED_REMOTE_MODELS: dict[str:RemoteModel] = {}
+def run_until_asked_to_stop():
+    import signal
+
+    signal.sigwait([signal.SIGTERM, signal.SIGINT])
 
 
 async def forward(name: str, *args, **kwargs) -> NestedArray:
@@ -81,32 +84,27 @@ async def forward(name: str, *args, **kwargs) -> NestedArray:
     Returns:
         forward 的结果，类型为 NestedArray
     """
-    global CACHED_REMOTE_MODELS
-    if name not in CACHED_REMOTE_MODELS:
-        CACHED_REMOTE_MODELS[name] = RemoteModel(name)
-    remote_model = CACHED_REMOTE_MODELS[name]
-    return await remote_model.forward(*args, **kwargs)
+    return await RemoteModel(name).forward(*args, **kwargs)
 
 
-Buffer = RemoteBuffer
-CACHED_REMOTE_BUFFERS: dict[str:RemoteBuffer] = {}
-
-
-def push(name, *args: NestedArray):
+def push(name: str, *args: NestedArray, drop=True):
     """
-    调用指定Buffer的 push 方法，将数据推送到缓冲区
+    调用指定Buffer的 push 方法，将一个或多个数据推送到缓冲区
     Args:
         name: Buffer名称，如果不存在会抛出异常
-        *args: 位置参数，类型为 NestedArray
+        *args: 位置参数，类型为 NestedArray，其中的每个元素都会被推送到缓冲区
+        drop: 是否丢弃数据，如果为True，当缓冲区满时，会丢弃最早的数据，
+            否则当缓冲区满时，会阻塞直到缓冲区有空间
     """
-    global CACHED_REMOTE_BUFFERS
-    if name not in CACHED_REMOTE_BUFFERS:
-        CACHED_REMOTE_BUFFERS[name] = RemoteBuffer(name)
-    remote_buffer = CACHED_REMOTE_BUFFERS[name]
-    return remote_buffer.push(*args)
+    return RemoteBuffer(name).push(*args)
 
 
-def run_until_asked_to_stop():
-    import signal
-
-    signal.sigwait([signal.SIGTERM, signal.SIGINT])
+def pop(name: str) -> NestedArray:
+    """
+    从指定Buffer中弹出一个数据，如果缓冲区为空，会阻塞直到缓冲区有数据
+    Args:
+        name: Buffer名称，如果不存在会抛出异常
+    Returns:
+        从缓冲区中弹出的数据，类型为 NestedArray
+    """
+    return next(RemoteBuffer(name))

@@ -1,0 +1,81 @@
+project: new_proj
+trial: train_ppo_v0
+
+model1:
+  kind: model
+  module: new_proj.models.model1
+  checkpoint_interval: null
+  max_batch_size: 1
+  num_workers: 0
+  cpus_per_worker: 0.5
+  gpus_per_worker: 0.0
+  memory_per_worker: 1024
+  use_onnx: null
+  local_mode: true
+  override_model: true
+  # tensorboard_graph: true
+  tensorboard_step: true
+
+source1:
+  kind: source
+  module: new_proj.sources.source1
+  num_workers: null
+  epoch: 1
+
+buffer1:
+  kind: buffer
+  size: 512
+  batch_size: 128
+  num_workers: 2
+  density: 100
+
+buffer2:
+  kind: buffer
+  sources:
+    - source1
+  size: 512
+  batch_size: null
+  num_workers: 2
+  density: 100
+
+agent1:
+  kind: agent
+  module: new_proj.agents.agent1
+
+actor1:
+  kind: agent_actor
+  port: 9000
+  num_workers: 2
+  actors_per_worker: 10
+  cpus_per_worker: 1.0
+  memory_per_worker: 512
+  use_tcp: false
+  use_gateway: node
+  agents:
+    - agent1
+  tick_input_proto:
+    module: new_proj.tick_pb2
+    message: TickInput
+  tick_output_proto:
+    module: new_proj.tick_pb2
+    message: TickOutput
+  episode_length: null
+
+actor2:
+  kind: actor
+  module: new_proj.actors.actor1
+  class: Actor
+  port: 8000
+  num_workers: 2
+  actors_per_worker: 10
+  cpus_per_worker: 1.0
+  memory_per_worker: 512
+  use_tcp: false
+  use_gateway: node
+
+trainer1:
+  kind: trainer
+  module: new_proj.trainers.trainer1
+  use_gpu: null
+  num_workers: null
+  cpus_per_worker: null
