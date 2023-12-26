@@ -22,7 +22,11 @@ class AtariDataset(Iterable[bray.NestedArray]):
             yield self.fake_data
 
 
-def build_source() -> list[Iterator[bray.NestedArray]]:
+def build_source() -> list[Iterable[bray.NestedArray]]:
+    """
+    构建数据源，返回一个列表，列表中的每个元素都是一个可迭代数据集，
+    返回数据集数量越多，生成数据的并行度越高
+    """
     return [AtariDataset() for _ in range(2)]
 
 
