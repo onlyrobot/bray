@@ -33,7 +33,6 @@ class MetricsAgent(bray.Agent):
         MetricsAgent.reward_metric.merge(reward)
         MetricsAgent.value_metric.merge(value)
         MetricsAgent.logit_metric.merge(logit)
-        bray.add_histogram(f"logit/{self.name}", logit)
 
     async def on_episode(self, episode: list[State], done: bool):
         if not done or not self.trajectory:
@@ -42,4 +41,6 @@ class MetricsAgent(bray.Agent):
         bray.add_histogram(f"reward/{self.name}", rewards)
         values = np.array([t["value"] for t in self.trajectory])
         bray.add_histogram(f"value/{self.name}", values)
+        logits = np.array([t["logit"] for t in self.trajectory])
+        bray.add_histogram(f"logit/{self.name}", logits)
         bray.merge(f"episode_reward/{self.name}", self.episode_reward)

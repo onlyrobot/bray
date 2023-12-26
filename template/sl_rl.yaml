@@ -1,9 +1,9 @@
-project: rl_template
-trial: train_ppo_v0
+project: template
+trial: train_sl_rl_v0
 
 model1:
   kind: model
-  module: rl_template.models.model1
+  module: template.models.model1
   checkpoint_interval: null
   max_batch_size: 1
   num_workers: 0
@@ -16,6 +16,42 @@ model1:
   tensorboard_graph: true
   tensorboard_step: true
 
+eval_source:
+  kind: source
+  enable: train
+  module: template.sources.source1
+  func: build_eval_source
+  num_workers: null
+  epoch: 10000
+
+train_source:
+  kind: source
+  enable: train
+  module: template.sources.source1
+  func: build_source
+  num_workers: null
+  epoch: 100
+
+eval_buffer:
+  kind: buffer
+  enable: train
+  sources:
+    - eval_source
+  size: 8
+  batch_size: 128
+  num_workers: 1
+  density: 100
+
+train_buffer:
+  kind: buffer
+  enable: train
+  sources:
+    - train_source
+  size: 8
+  batch_size: 128
+  num_workers: 1
+  density: 100
+
 buffer1:
   kind: buffer
   enable: train
@@ -26,22 +62,22 @@ buffer1:
 
 agent1:
   kind: agent
-  module: rl_template.agents.agent1
+  module: template.agents.agent1
   class: Agent1
 
 serialize_agent:
   kind: agent
-  module: rl_template.agents.serialize_agent
+  module: template.agents.serialize_agent
   class: SerializeAgent
 
 render_agent:
   kind: agent
-  module: rl_template.agents.render_agent
+  module: template.agents.render_agent
   class: RenderAgent
 
 metrics_agent:
   kind: agent
-  module: rl_template.agents.metrics_agent
+  module: template.agents.metrics_agent
   class: MetricsAgent
 
 actor1:
@@ -61,22 +97,28 @@ actor1:
   episode_length: null
   use_proto: false
   tick_input_proto:
-    module: rl_template.tick_pb2
+    module: template.tick_pb2
     message: TickInput
   tick_output_proto:
-    module: rl_template.tick_pb2
+    module: template.tick_pb2
     message: TickOutput
 
 trainer1:
   kind: trainer
   enable: train
-  module: rl_template.trainers.trainer1
+  module: template.trainers.sl_rl_trainer
   class: Trainer1
   model: model1
   buffers:
+    - train_buffer
     - buffer1
   buffer_weights:
-    - 1.0
+    - 0.5
+    - 0.5
+  eval:
+    buffer: eval_buffer
+    interval: 1000
+    steps: 10
   use_gpu: null
   num_workers: null
   cpus_per_worker: null

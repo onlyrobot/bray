@@ -1,9 +1,9 @@
-project: sl_rl_template
-trial: train_sl_rl_v0
+project: template
+trial: train_sl_v0
 
 model1:
   kind: model
-  module: rl_template.models.model1
+  module: template.models.model1
   checkpoint_interval: null
   max_batch_size: 1
   num_workers: 0
@@ -19,7 +19,7 @@ model1:
 eval_source:
   kind: source
   enable: train
-  module: sl_template.sources.source1
+  module: template.sources.source1
   func: build_eval_source
   num_workers: null
   epoch: 10000
@@ -27,7 +27,7 @@ eval_source:
 train_source:
   kind: source
   enable: train
-  module: sl_template.sources.source1
+  module: template.sources.source1
   func: build_source
   num_workers: null
   epoch: 100
@@ -52,36 +52,11 @@ train_buffer:
   num_workers: 1
   density: 100
 
-buffer1:
-  kind: buffer
-  enable: train
-  size: 8
-  batch_size: 128
-  num_workers: 2
-  density: 100
-
-agent1:
-  kind: agent
-  module: rl_template.agents.agent1
-  class: Agent1
-
-serialize_agent:
-  kind: agent
-  module: rl_template.agents.serialize_agent
-  class: SerializeAgent
-
-render_agent:
-  kind: agent
-  module: rl_template.agents.render_agent
-  class: RenderAgent
-
-metrics_agent:
-  kind: agent
-  module: rl_template.agents.metrics_agent
-  class: MetricsAgent
-
 actor1:
   kind: actor
+  enable: deploy
+  module: template.actors.actor1
+  class: Actor
   port: 8000
   num_workers: 2
   actors_per_worker: 10
@@ -89,32 +64,17 @@ actor1:
   memory_per_worker: 512
   use_tcp: false
   use_gateway: node
-  agents:
-    - agent1
-    - serialize_agent
-    - render_agent
-    - metrics_agent
-  episode_length: null
-  use_proto: false
-  tick_input_proto:
-    module: rl_template.tick_pb2
-    message: TickInput
-  tick_output_proto:
-    module: rl_template.tick_pb2
-    message: TickOutput
 
 trainer1:
   kind: trainer
   enable: train
-  module: sl_rl_template.trainers.trainer1
+  module: template.trainers.sl_trainer
   class: Trainer1
   model: model1
   buffers:
     - train_buffer
-    - buffer1
   buffer_weights:
-    - 0.5
-    - 0.5
+    - 1.0
   eval:
     buffer: eval_buffer
     interval: 1000
