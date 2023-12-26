@@ -23,7 +23,7 @@ RUN pip3 install torch torchvision torchaudio --index-url https://download.pytor
 RUN pip3 install ray[all]==2.8.0
 RUN pip3 install tensorflow==2.14.0
 RUN HOROVOD_WITH_GLOO=1 HOROVOD_GPU_OPERATIONS=NCCL pip3 install git+https://github.com/onlyrobot/horovod.git
-RUN pip3 install tensorboard==2.13.0
+RUN pip3 install tensorboard==2.13.0 moviepy==1.0.3
 RUN pip3 install onnx==1.14.0 onnxruntime==1.15.1 onnxruntime-gpu==1.15.1
 
 RUN ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa && cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys && \

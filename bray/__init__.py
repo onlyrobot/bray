@@ -14,10 +14,11 @@ from bray.model.model import (
     set_torch_model_weights,
 )
 from bray.model.onnx import export_onnx
-from bray.trainer.trainer import RemoteTrainer
+from bray.trainer.trainer import RemoteTrainer, train
+from bray.trainer.base import Trainer
 from bray.actor.actor import RemoteActor
 from bray.actor.base import Actor
-from bray.agent.agent import State, AgentActor
+from bray.actor.agent import State, Agent, AgentActor
 from bray.utils.nested_array import (
     NestedArray,
     handle_nested_array,
@@ -28,6 +29,8 @@ from bray.metric.metric import (
     query,
     add_scalar,
     add_image,
+    add_video,
+    add_histogram,
     add_graph,
     get_metrics_worker,
     set_tensorboard_step,

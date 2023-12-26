@@ -45,6 +45,7 @@ class Metrics:
 
     def _init_writer(self):
         from torch.utils.tensorboard import SummaryWriter
+
         self.writer = SummaryWriter(
             self.launch_path,
             flush_secs=self.time_window,
@@ -72,27 +73,32 @@ class Metrics:
         for name, metric in metrics.items():
             await self.merge(name, metric, None)
 
-    async def add_scalar(self, name, value, step):
+    async def _get_writer_and_step(self, step):
         if self.writer is None:
             self._init_writer()
         step = await self._get_step() if step is None else step
-        self.writer.add_scalar(name, value, step)
+        return self.writer, step
+
+    async def add_scalar(self, name, value, step):
+        writer, step = await self._get_writer_and_step(step)
+        writer.add_scalar(name, value, step)
 
     async def add_image(self, name, image, step, dataformats):
-        if self.writer is None:
-            self._init_writer()
-        step = await self._get_step() if step is None else step
-        self.writer.add_image(
-            tag=name,
-            img_tensor=image,
-            global_step=step,
-            dataformats=dataformats,
-        )
+        writer, step = await self._get_writer_and_step(step)
+        writer.add_image(name, image, step, dataformats=dataformats)
+
+    async def add_video(self, name, video, step, fps):
+        writer, step = await self._get_writer_and_step(step)
+        writer.add_video(name, video, step, fps)
+
+    async def add_histogram(self, name, values, step, bins):
+        writer, step = await self._get_writer_and_step(step)
+        writer.add_histogram(name, values, step, bins)
 
     async def add_graph(self, model, input_to_model):
         if self.writer is None:
             self._init_writer()
-        self.writer.add_graph(model, input_to_model)
+        self.writer.add_graph(model.eval(), input_to_model)
 
     async def query(self, name, time_window: bool) -> Metric:
         if not time_window:
@@ -288,6 +294,37 @@ def add_image(name: str, image: object, step: int = None, dataformats="CHW"):
     remote_metrics.add_image.remote(name, image, step, dataformats)
 
 
+def add_video(name: str, video: object, step: int = None, fps: int = 4):
+    """
+    输出视频到TensorBoard，支持在集群任何地方调用，
+    该方法就是直接调用TensorBoard的add_video方法
+    Args:
+        name: 视频的名字
+        video: 视频的数据，可以为numpy数组或者torch tensor，
+            维度为：(N,T,C,H,W)
+        step: 视频的横坐标，默认使用全局的step
+        fps: 视频的帧率，默认为4
+    """
+    remote_metrics = get_metrics_worker().remote_metrics
+    remote_metrics.add_video.remote(name, video, step, fps)
+
+
+def add_histogram(
+    name: str, values: object, step: int = None, bins: str = "tensorflow"
+):
+    """
+    输出直方图到TensorBoard，支持在集群任何地方调用，
+    该方法就是直接调用TensorBoard的add_histogram方法
+    Args:
+        name: 直方图的名字
+        values: 直方图的数据，可以为numpy数组或者torch tensor
+        step: 直方图的横坐标，默认使用全局的step
+        bins: 直方图的bins，默认为tensorflow
+    """
+    remote_metrics = get_metrics_worker().remote_metrics
+    remote_metrics.add_histogram.remote(name, values, step, bins)
+
+
 def add_graph(model, input_to_model):
     """
     输出模型到TensorBoard，支持在集群任何地方调用，
@@ -331,8 +368,8 @@ def merge_time_ms(name, beg, **kwargs):
         name,
         (time.time() - beg) * 1000,
         desc={
-            "time_window_avg": f"{name} latency ms",
-            "time_window_cnt": f"{name} per minute",
+            "time_window_avg": f"avg latency ms",
+            "time_window_cnt": f"cnt per minute",
         },
         **kwargs,
     )

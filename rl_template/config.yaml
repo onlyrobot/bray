@@ -1,0 +1,87 @@
+project: rl_template
+trial: train_ppo_v0
+
+model1:
+  kind: model
+  module: rl_template.models.model1
+  checkpoint_interval: null
+  max_batch_size: 1
+  num_workers: 0
+  cpus_per_worker: 0.5
+  gpus_per_worker: 0.0
+  memory_per_worker: 1024
+  use_onnx: null
+  local_mode: true
+  override_model: true
+  tensorboard_graph: true
+  tensorboard_step: true
+
+buffer1:
+  kind: buffer
+  enable: train
+  size: 512
+  batch_size: 128
+  num_workers: 2
+  density: 100
+
+agent1:
+  kind: agent
+  module: rl_template.agents.agent1
+  class: Agent1
+
+serialize_agent:
+  kind: agent
+  module: rl_template.agents.serialize_agent
+  class: SerializeAgent
+
+render_agent:
+  kind: agent
+  module: rl_template.agents.render_agent
+  class: RenderAgent
+
+metrics_agent:
+  kind: agent
+  module: rl_template.agents.metrics_agent
+  class: MetricsAgent
+
+actor1:
+  kind: actor
+  port: 8000
+  num_workers: 2
+  actors_per_worker: 10
+  cpus_per_worker: 1.0
+  memory_per_worker: 512
+  use_tcp: false
+  use_gateway: node
+  agents:
+    - agent1
+    - serialize_agent
+    - render_agent
+    - metrics_agent
+  episode_length: null
+  use_proto: false
+  tick_input_proto:
+    module: rl_template.tick_pb2
+    message: TickInput
+  tick_output_proto:
+    module: rl_template.tick_pb2
+    message: TickOutput
+
+trainer1:
+  kind: trainer
+  enable: train
+  module: rl_template.trainers.trainer1
+  class: Trainer1
+  model: model1
+  buffers:
+    - buffer1
+  use_gpu: null
+  num_workers: null
+  cpus_per_worker: null
+  batch_size: 1
+  batch_kind: concate
+  prefetch_size: 1
+  max_reuse: 1
+  clip_grad_max_norm: 1.0
+  weights_publish_interval: 1
+  num_steps: 10000000

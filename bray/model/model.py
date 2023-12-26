@@ -215,7 +215,7 @@ class ModelWorker:
             None, self.__forward, batch_args, batch_kwargs
         )
         ready_forwards = split_batch(outputs)
-        merge_time_ms("forward", beg, model=self.name)
+        merge_time_ms(f"forward/{self.name}", beg)
         return ready_forwards
 
     async def __forward_coro(self, forward_cond):
@@ -280,7 +280,7 @@ class ModelWorker:
         except Exception as e:
             print(f"Fail to get weights from {self.name}.", e)
             return
-        merge_time_ms("subscribe weights", beg, model=self.name)
+        merge_time_ms(f"subscribe weights/{self.name}", beg)
         if not self.use_onnx:
             self.set_model_weights(self.torch_model, weights)
         elif self.use_onnx == "train":
@@ -343,7 +343,9 @@ class Model:
         if torch_model is not None:
             torch.save(torch_model, self.torch_path)
         else:
-            assert os.path.exists(self.torch_path), "Missing torch model"
+            assert os.path.exists(
+                self.torch_path
+            ), f"Model {name} not found, missing torch model"
         self.name, self.model = name, None
         self.override_model = torch_model is not None and override_model
 
@@ -522,13 +524,12 @@ class Model:
         meta.weights = weights[0]
         meta.step = meta.step + 1 if step == -1 else step
         merge(
-            "step",
+            f"step/{name}",
             meta.step,
             desc={
                 "time_window_cnt": "step per minute",
                 "time_window_avg": "smoothed current step",
             },
-            model=name,
         )
         async with meta.step_cond:
             meta.step_cond.notify_all()
@@ -631,10 +632,9 @@ class Model:
         forward_time_sum -= local_forward_time_sum
         load_rate = max(0.0, forward_time_sum) / (len(meta.workers) * 60 * 1000)
         merge(
-            "load",
+            f"load/{name}",
             load_rate,
             desc={"time_window_avg": "load rate of model forward"},
-            model=name,
         )
         # 假设以概率p下掉worker，那么下掉后的worker数量为(1-p)*worker_num
         # 目标负载率为0.6，那么下掉后的负载量为(1-p)*worker_num*0.6
@@ -676,10 +676,9 @@ class Model:
         meta.workers = active_workers
         meta.workers.extend(old_workers[worker_num:])
         merge(
-            "worker",
+            f"worker/{name}",
             len(meta.workers),
             desc={"time_window_avg": "smoothed model worker num"},
-            model=name,
         )
         if meta.num_workers is None:
             self._load_balance(name)
@@ -909,7 +908,7 @@ class RemoteModel:
         beg = time.time()
         outputs = await self.local_worker.forward(args, kwargs)
         forward_time_ms = (time.time() - beg) * 1000
-        merge("forward", forward_time_ms, model=self.name, desc={}, mode="local")
+        merge(f"forward/{self.name}", forward_time_ms, desc={}, mode="local")
         return outputs
 
     async def _init_subscribe_task(self):
@@ -945,7 +944,7 @@ class RemoteModel:
             if (retry := retry - 1) < 0:
                 raise
             return await self._remote_forward(args, kwargs, retry)
-        merge_time_ms("forward", beg, model=self.name, mode="remote")
+        merge_time_ms(f"forward/{self.name}", beg, mode="remote")
         return outputs
 
     async def forward(

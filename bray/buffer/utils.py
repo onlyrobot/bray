@@ -16,7 +16,7 @@ class BatchBuffer:
     def __init__(
         self,
         buffer: Iterator[NestedArray],
-        batch_size,
+        batch_size: int,
         kind: ["stack", "concate", None] = "stack",
     ):
         """
@@ -130,7 +130,7 @@ class PrefetchBuffer:
             self.replays.append(next(self.buffer))
             self.cond.notify()
         if self.max_reuse > 0 and self.name:
-            merge("reuse", self.last_reuse, buffer=self.name)
+            merge(f"reuse/{self.name}", self.last_reuse)
 
     def _thread(self):
         while True:

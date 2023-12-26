@@ -32,10 +32,9 @@ class BufferWorker:
             await asyncio.sleep(wait_interval)
         before_size = len(self.replays)
         merge(
-            "push",
+            f"push/{self.name}",
             len(replays) * (batch or 1),
             desc={"time_window_sum": "push per minute"},
-            buffer=self.name,
         )
         batch_size, _replays = self.batch_size, self._replays
         if batch_size is None or (batch and batch == batch_size):
@@ -63,10 +62,9 @@ class BufferWorker:
         replays = self.replays.copy()
         batch_size = 1 if self.batch_size is None else self.batch_size
         merge(
-            "pop",
+            f"pop/{self.name}",
             len(replays) * batch_size,
             desc={"time_window_sum": "pop per minute"},
-            buffer=self.name,
         )
         self.replays.clear()  # 重复使用list，避免频繁的内存分配
         return replays
@@ -302,7 +300,7 @@ class RemoteBuffer:
             self.ready_replays, self.next_replays = ray.wait(
                 self.next_replays, num_returns=1
             )
-        merge_time_ms("pop_wait", pop_beg, buffer=self.name)
+        merge_time_ms(f"pop_wait/{self.name}", pop_beg)
         self.replays.clear()
         for replays in self.ready_replays:
             self.replays.extend(ray.get(replays))
@@ -344,9 +342,9 @@ class RemoteBuffer:
         gen_beg = time.time()
         self.worker_index = random.randint(0, 100)
         for data in source:
-            merge_time_ms("generate", gen_beg, buffer=self.name)
-            batch_data.append(data)
+            merge_time_ms(f"generate/{self.name}", gen_beg)
             gen_beg = time.time()
+            batch_data.append(data)
             if len(batch_data) < batch_size:
                 await asyncio.sleep(0)
                 continue
@@ -359,7 +357,7 @@ class RemoteBuffer:
         await last_push_task
         await self._push(*batch_data, drop=False)
 
-    def _generate_epoch(self, sources, num_workers, epoch):
+    def _generate_epoch(self, sources: list[Iterator], num_workers):
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
         def SourceWorker(source):
             asyncio.run(self._generate(source))
@@ -377,12 +375,12 @@ class RemoteBuffer:
             if (ret := ray.get(rets[0])) is None:
                 continue
             print("SourceWorker error: ", ret)
-
-        if (epoch := epoch - 1) < 1:
-            return
-        print(f"Buffer {self.name} remain {epoch} epoch")
-        merge("epoch", 1, desc={"cnt": "num epoch"}, buffer=self.name)
-        return self._generate_epoch(sources, num_workers, epoch)
+        while len(workers) > 0:
+            rets, workers = ray.wait(workers)
+            if (ret := ray.get(rets[0])) is None:
+                continue
+            print("SourceWorker error: ", ret)
+        merge(f"epoch/{self.name}", 1, desc={"cnt": "num epoch"})
 
     def add_source(self, *sources: Iterator[NestedArray], num_workers=None, epoch=1):
         """
@@ -391,7 +389,7 @@ class RemoteBuffer:
         Args:
             sources: 一个或多个数据源，数据源是一个可迭代对象
             num_workers: 从数据源中读取数据的并发度，默认为 CPU 的核数
-            epoch: 从数据源中读取数据的轮数，可以理解为数据源的数据会被重复的读取 epoch 轮
+            epoch: 从数据源中重复读取数据的轮数，也就是 epoch 数
 
         Returns:
             一个 ray.ObjectRef，可以通过 ray.cancel() 取消数据源的读取
@@ -402,6 +400,9 @@ class RemoteBuffer:
 
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
         def Source(sources, num_workers, epoch):
-            self._generate_epoch(sources, num_workers, epoch)
+            for i in range(epoch):
+                print(f"Buffer {self.name} epoch {i} start")
+                self._generate_epoch(sources, num_workers)
+            print(f"Buffer {self.name} epoch done")
 
         return Source.remote(sources, num_workers, epoch)

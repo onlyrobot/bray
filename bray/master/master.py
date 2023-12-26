@@ -25,7 +25,7 @@ def get_master() -> Master:
     """获取全局的 Master 对象，用于便捷地跨节点共享数据和同步计数"""
     global GLOBAL_MASTER
     if GLOBAL_MASTER is None:
-        GLOBAL_MASTER = Master.remote()
+        GLOBAL_MASTER = Master.options(get_if_exists=True).remote()
     return GLOBAL_MASTER
 
 

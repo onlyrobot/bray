@@ -14,7 +14,8 @@ from bray.metric.metric import (
 
 
 class ActorGateway:
-    def __init__(self, Actor, args, kwargs, actors_per_worker):
+    def __init__(self, name, Actor, args, kwargs, actors_per_worker):
+        self.name = name
         self.Actor, self.args, self.kwargs = Actor, args, kwargs
         self.actors_per_worker = actors_per_worker
         self.actors = {}
@@ -36,16 +37,14 @@ class ActorGateway:
     async def _check_health(self):
         await asyncio.sleep(60)
         merge(
-            "actor",
+            f"actor/{self.name}",
             len(self.actors),
             desc={"time_window_sum": "smoothed actor num"},
-            actor="actor",
         )
         merge(
-            "game",
+            f"game/{self.name}",
             self.num_games,
             desc={"time_window_sum": "game start per minute"},
-            actor="actor",
         )
         self.num_games = 0
         asyncio.create_task(self._check_health())
@@ -97,7 +96,7 @@ class ActorGateway:
         except:
             self.actors.pop(game_id, None)
             raise
-        merge_time_ms("tick", actor.__bray_atime)
+        merge_time_ms(f"tick/{self.name}", actor.__bray_atime)
         return tick_ret
 
     async def auto(self, data) -> bytes:
@@ -117,7 +116,7 @@ class ActorGateway:
         except:
             self.auto_actor = None
             raise
-        merge_time_ms("tick", beg)
+        merge_time_ms(f"tick/{self.name}", beg)
         return tick_ret
 
     async def __call__(self, headers: dict, body: bytes) -> bytes:
@@ -227,7 +226,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
 
 
 @ray.remote(max_retries=-1)
-def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
+def ActorWorker(name, port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
     gateway.register.remote("localhost", port) if gateway else None
 
     async def serve_tcp_gateway():
@@ -238,7 +237,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
             await server.serve_forever()
 
     try:
-        gateway = ActorGateway(Actor, args, kwargs, actors_per_worker)
+        gateway = ActorGateway(name, Actor, args, kwargs, actors_per_worker)
         set_actor_gateway(gateway)
     except:
         traceback.print_exc()
@@ -275,7 +274,7 @@ def ActorWorker(port, Actor, args, kwargs, actors_per_worker, use_tcp, gateway):
 class RemoteActor:
     def __init__(
         self,
-        name: str = "",
+        name: str = "default",
         port: int = 8000,
         num_workers: int = 2,
         cpus_per_worker: float = 1,
@@ -340,6 +339,7 @@ class RemoteActor:
                     node_id=node_id, soft=False
                 ),
             ).remote(
+                self.name,
                 self.port + (i + 1 if self.use_gateway else 0),
                 Actor,
                 args,

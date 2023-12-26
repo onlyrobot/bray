@@ -1,0 +1,89 @@
+project: sl_template
+trial: train_sl_v0
+
+model1:
+  kind: model
+  module: sl_template.models.model1
+  checkpoint_interval: null
+  max_batch_size: 1
+  num_workers: 0
+  cpus_per_worker: 0.5
+  gpus_per_worker: 0.0
+  memory_per_worker: 1024
+  use_onnx: null
+  local_mode: true
+  override_model: true
+  tensorboard_graph: true
+  tensorboard_step: true
+
+eval_source:
+  kind: source
+  enable: train
+  module: sl_rl_template.sources.eval
+  num_workers: null
+  epoch: 1
+
+train_source:
+  kind: source
+  enable: train
+  module: sl_rl_template.sources.train
+  num_workers: null
+  epoch: 1
+
+eval_buffer:
+  kind: buffer
+  enable: train
+  sources:
+    - eval_source
+  size: 512
+  batch_size: 128
+  num_workers: 2
+  density: 100
+
+train_buffer:
+  kind: buffer
+  enable: train
+  sources:
+    - train_source
+  size: 512
+  batch_size: null
+  num_workers: 2
+  density: 100
+
+actor1:
+  kind: actor
+  enable: deploy
+  module: sl_template.actors.actor1
+  class: Actor
+  port: 8000
+  num_workers: 2
+  actors_per_worker: 10
+  cpus_per_worker: 1.0
+  memory_per_worker: 512
+  use_tcp: false
+  use_gateway: node
+
+trainer1:
+  kind: trainer
+  enable: train
+  module: sl_template.trainers.trainer1
+  class: Trainer1
+  model: model1
+  buffers:
+    - train_buffer
+  buffer_weights:
+    - 1.0
+  eval:
+    buffer: eval_buffer
+    interval: 10
+    steps: 10
+  use_gpu: null
+  num_workers: null
+  cpus_per_worker: null
+  batch_size: 1
+  batch_kind: concate
+  prefetch_size: 1
+  max_reuse: 1
+  clip_grad_max_norm: 1.0
+  weights_publish_interval: 1
+  num_steps: 10000000
