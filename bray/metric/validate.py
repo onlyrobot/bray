@@ -65,7 +65,7 @@ class Metric:
         self.min = float("inf")
         if remain_value is None:
             return
-        self._merge_ndarray_samples(remain_value)
+        self._merge(remain_value)
 
     def report(self):
         samples = self.samples[: self.cnt]

@@ -22,7 +22,7 @@ eval_source:
   module: sl_template.sources.source1
   func: build_eval_source
   num_workers: null
-  epoch: 1000
+  epoch: 10000
 
 train_source:
   kind: source
@@ -30,16 +30,16 @@ train_source:
   module: sl_template.sources.source1
   func: build_source
   num_workers: null
-  epoch: 10
+  epoch: 100
 
 eval_buffer:
   kind: buffer
   enable: train
   sources:
     - eval_source
-  size: 512
+  size: 8
   batch_size: 128
-  num_workers: 2
+  num_workers: 1
   density: 100
 
 train_buffer:
@@ -47,9 +47,9 @@ train_buffer:
   enable: train
   sources:
     - train_source
-  size: 512
+  size: 8
   batch_size: 128
-  num_workers: 2
+  num_workers: 1
   density: 100
 
 actor1:

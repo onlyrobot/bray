@@ -4,7 +4,7 @@ import numpy as np
 
 
 class AtariDataset(Iterable[bray.NestedArray]):
-    def __init__(self, size=10000):
+    def __init__(self, size=1000000):
         self.fake_data = {
             "state": {"image": np.random.randn(4, 42, 42).astype(np.float32)},
             "action": np.random.randint(0, 9),
@@ -23,8 +23,8 @@ class AtariDataset(Iterable[bray.NestedArray]):
 
 
 def build_source() -> list[Iterator[bray.NestedArray]]:
-    return [AtariDataset() for _ in range(10)]
+    return [AtariDataset() for _ in range(2)]
 
 
 def build_eval_source() -> list[Iterator[bray.NestedArray]]:
-    return [AtariDataset() for _ in range(2)]
+    return [AtariDataset() for _ in range(1)]

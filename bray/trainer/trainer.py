@@ -3,6 +3,7 @@ from typing import Type
 import math
 import time
 import ray
+import numpy as np
 from bray.trainer.base import Trainer
 from bray.model.model import RemoteModel, get_torch_model_weights
 from bray.buffer.buffer import RemoteBuffer
@@ -37,6 +38,7 @@ def train(
     import horovod.torch as hvd
 
     hvd.init()
+    np.random.seed(0)
     device = torch.device(
         hvd.local_rank() if torch.cuda.is_available() else "cpu",
     )

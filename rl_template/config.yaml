@@ -19,7 +19,7 @@ model1:
 buffer1:
   kind: buffer
   enable: train
-  size: 512
+  size: 8
   batch_size: 128
   num_workers: 2
   density: 100
