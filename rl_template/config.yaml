@@ -75,6 +75,8 @@ trainer1:
   model: model1
   buffers:
     - buffer1
+  buffer_weights:
+    - 1.0
   use_gpu: null
   num_workers: null
   cpus_per_worker: null

@@ -19,6 +19,7 @@ class MetricsAgent(bray.Agent):
         self.name = name
         self.need_metrics = random.random() < 0.01
         self.trajectory = []
+        self.episode_reward = 0.0
 
     async def on_tick(self, state: bray.State):
         if not self.need_metrics:
@@ -28,6 +29,7 @@ class MetricsAgent(bray.Agent):
         reward = transition["reward"]
         value = transition["value"]
         logit = transition["logit"]
+        self.episode_reward += transition["raw_reward"]
         MetricsAgent.reward_metric.merge(reward)
         MetricsAgent.value_metric.merge(value)
         MetricsAgent.logit_metric.merge(logit)
@@ -40,3 +42,4 @@ class MetricsAgent(bray.Agent):
         bray.add_histogram(f"reward/{self.name}", rewards)
         values = np.array([t["value"] for t in self.trajectory])
         bray.add_histogram(f"value/{self.name}", values)
+        bray.merge(f"episode_reward/{self.name}", self.episode_reward)

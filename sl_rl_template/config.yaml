@@ -3,7 +3,7 @@ trial: train_sl_rl_v0
 
 model1:
   kind: model
-  module: sl_rl_template.models.model1
+  module: rl_template.models.model1
   checkpoint_interval: null
   max_batch_size: 1
   num_workers: 0
@@ -19,16 +19,18 @@ model1:
 eval_source:
   kind: source
   enable: train
-  module: sl_rl_template.sources.eval
+  module: sl_template.sources.source1
+  func: build_eval_source
   num_workers: null
-  epoch: 1
+  epoch: 1000
 
 train_source:
   kind: source
   enable: train
-  module: sl_rl_template.sources.train
+  module: sl_template.sources.source1
+  func: build_source
   num_workers: null
-  epoch: 1
+  epoch: 10
 
 eval_buffer:
   kind: buffer
@@ -40,17 +42,17 @@ eval_buffer:
   num_workers: 2
   density: 100
 
-train_buffer:
+sl_buffer:
   kind: buffer
   enable: train
   sources:
     - train_source
   size: 512
-  batch_size: null
+  batch_size: 128
   num_workers: 2
   density: 100
 
-rl_buffer:
+buffer1:
   kind: buffer
   enable: train
   size: 512
@@ -60,11 +62,27 @@ rl_buffer:
 
 agent1:
   kind: agent
-  module: sl_rl_template.agents.agent1
+  module: rl_template.agents.agent1
+  class: Agent1
+
+serialize_agent:
+  kind: agent
+  module: rl_template.agents.serialize_agent
+  class: SerializeAgent
+
+render_agent:
+  kind: agent
+  module: rl_template.agents.render_agent
+  class: RenderAgent
+
+metrics_agent:
+  kind: agent
+  module: rl_template.agents.metrics_agent
+  class: MetricsAgent
 
 actor1:
   kind: actor
-  port: 9000
+  port: 8000
   num_workers: 2
   actors_per_worker: 10
   cpus_per_worker: 1.0
@@ -73,19 +91,41 @@ actor1:
   use_gateway: node
   agents:
     - agent1
+    - serialize_agent
+    - render_agent
+    - metrics_agent
+  episode_length: null
+  use_proto: false
   tick_input_proto:
-    module: sl_rl_template.tick_pb2
+    module: rl_template.tick_pb2
     message: TickInput
   tick_output_proto:
-    module: sl_rl_template.tick_pb2
+    module: rl_template.tick_pb2
     message: TickOutput
-  episode_length: null
-  environment: null
 
 trainer1:
   kind: trainer
   enable: train
   module: sl_rl_template.trainers.trainer1
+  class: Trainer1
+  model: model1
+  buffers:
+    - sl_buffer
+    - buffer1
+  buffer_weights:
+    - 0.5
+    - 0.5
+  eval:
+    buffer: eval_buffer
+    interval: 1000
+    steps: 10
   use_gpu: null
   num_workers: null
   cpus_per_worker: null
+  batch_size: 1
+  batch_kind: concate
+  prefetch_size: 1
+  max_reuse: 1
+  clip_grad_max_norm: 1.0
+  weights_publish_interval: 1
+  num_steps: 10000000

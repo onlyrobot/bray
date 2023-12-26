@@ -19,12 +19,10 @@ def gae(trajectory: list, bootstrap_value=0.0):
 class Agent1(bray.Agent):
     def __init__(self, name: str):
         self.name = name
-        self.episode_reward = 0.0
 
     async def on_tick(self, state: bray.State):
         input = await state.input
         reward = input["reward"]
-        self.episode_reward += reward
         obs = {"image": input["obs"]}
         value, logit, action = await bray.forward("model1", obs)
         state.transition = {
@@ -33,6 +31,7 @@ class Agent1(bray.Agent):
             "value": value,
             "logit": logit,
             "reward": np.array(np.sign(reward)),
+            "raw_reward": reward,
         }
         output = {"action": action.tolist()}
         state.output = output
@@ -43,6 +42,3 @@ class Agent1(bray.Agent):
         bootstrap_value = last_transition["value"]
         gae(trajectory, bootstrap_value)
         bray.push("buffer1", *trajectory)
-        if not done:
-            return
-        bray.merge(f"reward/{self.name}", self.episode_reward)

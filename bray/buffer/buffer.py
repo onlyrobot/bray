@@ -357,21 +357,21 @@ class RemoteBuffer:
         await last_push_task
         await self._push(*batch_data, drop=False)
 
-    def _generate_epoch(self, sources: list[Iterator], num_workers):
+    def _generate_epoch(self, source: list[Iterator], num_workers):
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
         def SourceWorker(source):
             asyncio.run(self._generate(source))
 
-        num_workers = min(len(sources), num_workers)
+        num_workers = min(len(source), num_workers)
         index, workers = num_workers - 1, []
 
         for i in range(num_workers):
-            workers.append(SourceWorker.remote(sources[i]))
+            workers.append(SourceWorker.remote(source[i]))
             time.sleep(0.5)
 
-        while (index := index + 1) < len(sources):
+        while (index := index + 1) < len(source):
             rets, workers = ray.wait(workers)
-            workers.append(SourceWorker.remote(sources[index]))
+            workers.append(SourceWorker.remote(source[index]))
             if (ret := ray.get(rets[0])) is None:
                 continue
             print("SourceWorker error: ", ret)
@@ -382,12 +382,12 @@ class RemoteBuffer:
             print("SourceWorker error: ", ret)
         merge(f"epoch/{self.name}", 1, desc={"cnt": "num epoch"})
 
-    def add_source(self, *sources: Iterator[NestedArray], num_workers=None, epoch=1):
+    def add_source(self, *source: Iterator[NestedArray], num_workers=None, epoch=1):
         """
         将一个或多个数据源添加到 Buffer 中，这些数据源会被异步的推送到 Buffer 中
 
         Args:
-            sources: 一个或多个数据源，数据源是一个可迭代对象
+            source: 一个或多个数据源，数据源是一个可迭代对象
             num_workers: 从数据源中读取数据的并发度，默认为 CPU 的核数
             epoch: 从数据源中重复读取数据的轮数，也就是 epoch 数
 
@@ -399,10 +399,10 @@ class RemoteBuffer:
             num_workers = max(1, int(cpu_num))
 
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")
-        def Source(sources, num_workers, epoch):
+        def Source(source, num_workers, epoch):
             for i in range(epoch):
                 print(f"Buffer {self.name} epoch {i} start")
-                self._generate_epoch(sources, num_workers)
+                self._generate_epoch(source, num_workers)
             print(f"Buffer {self.name} epoch done")
 
-        return Source.remote(sources, num_workers, epoch)
+        return Source.remote(source, num_workers, epoch)

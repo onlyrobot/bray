@@ -56,14 +56,15 @@ class State:
             try:
                 await asyncio.wait_for(
                     coro,
-                    timeout=5,
+                    timeout=10,
                 )
                 return True
             except asyncio.TimeoutError:
                 return False
 
         async with (cond := conditions[__name]):
-            while not await wait_for_set_attr(
+            retry = 3
+            while (retry := retry - 1) and not await wait_for_set_attr(
                 cond.wait_for(lambda: _hasattr(self, __name))
             ):
                 print(f"Get attr {__name} timeout, retry...")

@@ -3,7 +3,7 @@ trial: train_sl_v0
 
 model1:
   kind: model
-  module: sl_template.models.model1
+  module: rl_template.models.model1
   checkpoint_interval: null
   max_batch_size: 1
   num_workers: 0
@@ -19,16 +19,18 @@ model1:
 eval_source:
   kind: source
   enable: train
-  module: sl_rl_template.sources.eval
+  module: sl_template.sources.source1
+  func: build_eval_source
   num_workers: null
-  epoch: 1
+  epoch: 1000
 
 train_source:
   kind: source
   enable: train
-  module: sl_rl_template.sources.train
+  module: sl_template.sources.source1
+  func: build_source
   num_workers: null
-  epoch: 1
+  epoch: 10
 
 eval_buffer:
   kind: buffer
@@ -46,7 +48,7 @@ train_buffer:
   sources:
     - train_source
   size: 512
-  batch_size: null
+  batch_size: 128
   num_workers: 2
   density: 100
 
@@ -75,7 +77,7 @@ trainer1:
     - 1.0
   eval:
     buffer: eval_buffer
-    interval: 10
+    interval: 1000
     steps: 10
   use_gpu: null
   num_workers: null

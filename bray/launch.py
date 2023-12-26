@@ -49,9 +49,10 @@ for name, c in FILTER_CONFIG("model").items():
 
 
 for name, c in FILTER_CONFIG("source").items():
-    sources = importlib.import_module(c["module"]).build_source()
+    module = importlib.import_module(c["module"])
+    build_source = getattr(module, c.get("func") or "build_source")
     SOURCES[name] = {
-        "sources": sources,
+        "source": build_source(),
         "num_workers": c.get("num_workers"),
         "epoch": c.get("epoch"),
     }
@@ -67,8 +68,13 @@ for name, c in FILTER_CONFIG("buffer").items():
     )
     if not (sources := c.get("sources")):
         continue
-    for source in [s for s in sources if s in SOURCES]:
-        remote_buffer.add_source(*SOURCES[source])
+    for n in [s for s in sources if s in SOURCES]:
+        source = SOURCES[n]
+        remote_buffer.add_source(
+            *source["source"],
+            num_workers=source["num_workers"],
+            epoch=source["epoch"],
+        )
 
 
 for name, c in FILTER_CONFIG("trainer").items():

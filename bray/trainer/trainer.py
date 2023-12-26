@@ -56,10 +56,9 @@ def train(
     # initialize buffer
     # total batch size = buffer batch size * batch_size * horovod size
     buffers = list(remote_buffers.values())
-    names = [buffer.name for buffer in buffers]
     if remote_eval_buffer:
         buffers.append(remote_eval_buffer)
-        names.append(remote_eval_buffer.name)
+    names = [buffer.name for buffer in buffers]
     buffers = [
         BatchBuffer(
             b,
