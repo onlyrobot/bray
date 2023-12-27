@@ -1,30 +1,23 @@
 import torch
 import bray
+from template.trainers.rl_trainer import Trainer1 as RLTrainer
+from template.trainers.sl_trainer import Trainer1 as SLTrainer
 
 
 class Trainer1(bray.Trainer):
     def __init__(self, model: torch.nn.Module):
-        self.model = model
+        self.rl_trainer = RLTrainer(model)
+        self.sl_trainer = SLTrainer(model)
 
     def replay_handler(self, replay: bray.NestedArray) -> bray.NestedArray:
         return replay
 
     def loss(self, replay: bray.NestedArray) -> torch.Tensor:
-        state, action = replay["state"], replay["action"]
-
-        _, logit, _ = self.model(state)
-        loss = torch.nn.functional.cross_entropy(
-            input=logit, target=action, reduction="none"
-        )
-        loss = loss.mean()
-        bray.merge("loss/total", loss)
-        return loss
+        if "advantage" in replay:
+            return self.rl_trainer.loss(replay)
+        return self.sl_trainer.loss(replay)
 
     def eval(self, replay: bray.NestedArray):
-        state, action = replay["state"], replay["action"]
-        _, logit, _ = self.model(state)
-        loss = torch.nn.functional.cross_entropy(
-            input=logit, target=action, reduction="none"
-        )
-        loss = loss.mean()
-        bray.merge("eval/loss/total", loss)
+        if "advantage" in replay:
+            return
+        return self.sl_trainer.eval(replay)
