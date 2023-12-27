@@ -1,131 +1,143 @@
-project: template
-trial: train_sl_rl_v0
+project: template  # 项目名称，此处为模板
+trial: train_sl_rl_v0  # 实验名称，项目和实验共同确定一个命名空间
 
-model1:
-  kind: model
-  module: template.models.model1
-  checkpoint_interval: null
-  max_batch_size: 1
-  num_workers: 0
-  cpus_per_worker: 0.5
-  gpus_per_worker: 0.0
-  memory_per_worker: 1024
-  use_onnx: null
-  local_mode: true
-  override_model: true
-  tensorboard_graph: true
-  tensorboard_step: true
+# 模型配置 - 定义了一个PyTorch模型的具体参数和设置
+model1:  
+  kind: model  # 组件类型：模型
+  module: template.models.model1  # 模型的模块路径，确保该模块下包含 build_model 函数
+  checkpoint_interval: null  # 模型检查点保存间隔，单位step，null表示10分钟保存一次
+  max_batch_size: 1  # 模型推理的最大批次大小
+  num_workers: 0  # 工作进程数
+  cpus_per_worker: 0.5  # 每个工作进程分配的CPU数量
+  gpus_per_worker: 0.0  # 每个工作进程分配的GPU数量
+  memory_per_worker: 1024  # 每个工作进程分配的内存量（以MB为单位）
+  use_onnx: null  # 是否使用ONNX格式，可选值为[train, infer, quantize, null]
+  local_mode: true  # 是否在本地模式下运行，开启后模型将部署在调用方本地
+  override_model: true  # 多次实验时，是否覆盖已存在的模型，改为false可以加速启动
+  tensorboard_graph: true  # 是否将模型可视化到TensorBoard中
+  tensorboard_step: true  # 是否将TensorBoard的横坐标设为模型的step
 
+# 评估数据源配置 - 定义了评估数据的来源和设置
 eval_source:
-  kind: source
-  enable: train
-  module: template.sources.source1
-  func: build_eval_source
-  num_workers: null
-  epoch: 10000
+  kind: source  # 组件类型：数据源
+  enable: train  # 启用状态，此处为训练模式下启用
+  module: template.sources.source1  # 评估数据源的模块路径
+  func: build_eval_source  # 模块路径下构建数据源的函数
+  num_workers: null  # 工作进程数，null表示默认值
+  epoch: 10000  # 迭代周期数
 
+# 训练数据源配置 - 定义了训练数据的来源和设置
 train_source:
-  kind: source
-  enable: train
-  module: template.sources.source1
-  func: build_source
-  num_workers: null
-  epoch: 100
+  kind: source  # 组件类型：数据源
+  enable: train  # 启用状态，此处为训练模式下启用
+  module: template.sources.source1  # 训练数据源的模块路径
+  func: build_source  # 模块路径下构建数据源的函数
+  num_workers: null  # 工作进程数，null表示默认值
+  epoch: 100  # 迭代周期数
 
+# 缓存区配置 - 定义了评估数据缓存的设置
 eval_buffer:
-  kind: buffer
-  enable: train
+  kind: buffer  # 组件类型：缓冲区
+  enable: train  # 启用状态，此处为训练模式下启用
   sources:
-    - eval_source
-  size: 8
-  batch_size: 128
-  num_workers: 1
-  density: 100
+    - eval_source  # 添加的数据源名称
+  size: 8  # 缓冲区大小，单位为批次数量，过大容易导致OOM
+  batch_size: 128  # 批量大小，null表示不组批次
+  num_workers: 1  # 工作进程数，一般为1即可
+  density: 100  # 数据生产和消费端连接密度，调小可以减少系统资源占用
 
+# 缓存区配置 - 定义了训练数据缓存的设置
 train_buffer:
-  kind: buffer
-  enable: train
+  kind: buffer  # 组件类型：缓冲区
+  enable: train  # 启用状态，此处为训练模式下启用
   sources:
-    - train_source
-  size: 8
-  batch_size: 128
-  num_workers: 1
-  density: 100
+    - train_source  # 添加的数据源名称
+  size: 8  # 缓冲区大小，单位为批次数量，过大容易导致OOM
+  batch_size: 128  # 批量大小，null表示不组批次
+  num_workers: 1  # 工作进程数，一般为1即可
+  density: 100  # 数据生产和消费端连接密度，调小可以减少系统资源占用
 
+# 缓存区配置 - 定义了强化学习经验池的设置
 buffer1:
-  kind: buffer
-  enable: train
-  size: 8
-  batch_size: 128
-  num_workers: 2
-  density: 100
+  kind: buffer  # 组件类型：缓冲区
+  enable: train  # 启用状态，此处为训练模式下启用
+  size: 8  # 缓冲区大小，单位为批次数量，过大容易导致OOM
+  batch_size: 128  # 批量大小，null表示不组批次
+  num_workers: 2  # 工作进程数，一般为1~2
+  density: 100  # 数据生产和消费端连接密度，调小可以减少系统资源占用
 
+# 智能体配置 - 定义了负责决策和动作的主智能体
 agent1:
-  kind: agent
-  module: template.agents.agent1
-  class: Agent1
+  kind: agent  # 组件类型：智能体
+  module: template.agents.agent1  # 智能体的模块路径
+  class: Agent1  # 智能体类的名称
 
+# 智能体配置 - 定义了负责数据序列化和反序列化的智能体
 serialize_agent:
-  kind: agent
-  module: template.agents.serialize_agent
-  class: SerializeAgent
+  kind: agent  # 组件类型：智能体
+  module: template.agents.serialize_agent  # 智能体的模块路径
+  class: SerializeAgent  # 智能体类的名称
 
+# 智能体配置 - 定义了负责实时渲染游戏状态的智能体
 render_agent:
-  kind: agent
-  module: template.agents.render_agent
-  class: RenderAgent
+  kind: agent  # 组件类型：智能体
+  module: template.agents.render_agent  # 智能体的模块路径
+  class: RenderAgent  # 智能体类的名称
 
+# 智能体配置 - 定义了负责实时统计输出指标的智能体 
 metrics_agent:
-  kind: agent
-  module: template.agents.metrics_agent
-  class: MetricsAgent
+  kind: agent  # 组件类型：智能体
+  module: template.agents.metrics_agent  # 智能体的模块路径
+  class: MetricsAgent  # 智能体类的名称
 
+# Actor配置 - 一个Actor封装了了智能体和环境交互逻辑
 actor1:
-  kind: actor
-  port: 8000
-  num_workers: 2
-  actors_per_worker: 10
-  cpus_per_worker: 1.0
-  memory_per_worker: 512
-  use_tcp: false
-  use_gateway: node
-  agents:
+  kind: actor  # 组件类型：Actor
+  port: 8000  # 环境通过该端口和Actor交互，也就是AI服务的端口号
+  num_workers: 2  # 工作进程数
+  actors_per_worker: 10  # 每个工作进程的Actor数量，用于控制并发
+  cpus_per_worker: 1.0  # 每个工作进程分配的CPU数量
+  memory_per_worker: 512  # 每个工作进程分配的内存量（以MB为单位）
+  use_tcp: false  # 是否使用TCP协议，默认为HTTP协议
+  use_gateway: node  # 使用的网关类型，可选值为[node, head, null]
+  agents:  # 包含的智能体
     - agent1
     - serialize_agent
     - render_agent
     - metrics_agent
-  episode_length: null
-  use_proto: false
-  tick_input_proto:
-    module: template.tick_pb2
-    message: TickInput
-  tick_output_proto:
-    module: template.tick_pb2
-    message: TickOutput
+  episode_length: null  # 单次轨迹的长度，null表示不限制，取决于游戏何时结束
+  use_proto: false  # 是否使用protobuf作为环境和Actor的通信协议
+  tick_input_proto:  # Actor的tick输入protobuf数据定义
+    module: template.tick_pb2  # 编译好的protobuf文件模块路径
+    message: TickInput  # 在模块路径下具体的Message类
+  tick_output_proto:  # Actor的tick输出protobuf数据定义
+    module: template.tick_pb2  # 编译好的protobuf文件模块路径
+    message: TickOutput  # 在模块路径下具体的Message类
 
+# 训练器配置 - 定义了一个训练器的设置
 trainer1:
-  kind: trainer
-  enable: train
-  module: template.trainers.sl_rl_trainer
-  class: Trainer1
-  model: model1
-  buffers:
+  kind: trainer  # 组件类型：训练器
+  enable: train  # 启用状态，此处为训练时启用
+  module: template.trainers.sl_rl_trainer  # 训练器的模块路径
+  class: Trainer1  # 训练器的类名称
+  model: model1  # 被训练的模型
+  buffers:  # 训练用的缓存区列表
     - train_buffer
     - buffer1
-  buffer_weights:
+  buffer_weights:  # 每个训练用缓存区对应的采样权重
     - 0.5
     - 0.5
-  eval:
-    buffer: eval_buffer
-    interval: 1000
-    steps: 10
-  use_gpu: null
-  num_workers: null
-  cpus_per_worker: null
-  batch_size: 1
-  batch_kind: concate
-  prefetch_size: 1
-  max_reuse: 1
-  clip_grad_max_norm: 1.0
-  weights_publish_interval: 1
-  num_steps: 10000000
+  eval:  # 评估相关的配置信息
+    buffer: eval_buffer  # 评估使用的缓冲区
+    interval: 1000  # 评估间隔，单位step
+    steps: 10  # 每次评估的步数
+  use_gpu: null  # 是否使用GPU，null表示不使用
+  num_workers: null  # 工作进程数，null表示默认值
+  cpus_per_worker: null  # 每个工作进程分配的CPU数量，null表示默认设置
+  batch_size: 1  # 训练用的批次大小，这是在缓存区的批次大小基础上再次组批次
+  batch_kind: concate  # 组批次的方式，可选值为["concate", "stack", None]
+  prefetch_size: 1  # 预取批次大小，为0表示不预取，一般设为1
+  max_reuse: 1  # 样本最大重用次数，和预取批次大小结合使用
+  clip_grad_max_norm: 1.0  # 梯度裁剪的最大范数
+  weights_publish_interval: 1  # 权重发布间隔，强化学习的实时性较高
+  num_steps: 10000000  # 总训练步数
