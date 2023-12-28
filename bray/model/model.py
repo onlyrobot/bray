@@ -351,6 +351,9 @@ class Model:
 
         args_path = os.path.join(root_path, "forward_inputs.pt")
         if forward_args or forward_kwargs:
+            forward_args, forward_kwargs = handle_nested_array(
+                (forward_args, forward_kwargs), np.array
+            )
             torch.save((forward_args, forward_kwargs), args_path)
         else:
             assert os.path.exists(args_path), "Missing forward args"
