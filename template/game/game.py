@@ -30,14 +30,14 @@ def rollout(env, game_id: str):
     while not done:
         obs = base64.b64encode(obs.tobytes()).decode('utf-8')
         data = {"obs": obs, "reward": reward}
-        res = client.tick(json.dumps(data))
+        res = client._tick(json.dumps(data))
         cmd = json.loads(res)
         cmd = int(cmd["action"])
         obs, reward, done, _ = env.step(cmd)
     # final reward
     obs = base64.b64encode(obs.tobytes()).decode('utf-8')
     data = {"obs": obs, "reward": reward}
-    res = client.tick(json.dumps(data))
+    res = client._tick(json.dumps(data))
     client.stop()
     print("Game Stop")
 
