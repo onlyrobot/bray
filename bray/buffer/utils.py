@@ -112,10 +112,11 @@ class PrefetchBuffer:
         """
         Args:
             buffer: 迭代器
-            size: 缓冲区大小，即预取的样本数量
+            size: 缓冲区大小，即预取的样本数量，最小为1
             max_reuse: 样本的最大重用次数，设为0关闭重用
             name: buffer名称，用于reuse指标的统计
         """
+        assert size >= 1, "Prefetch buffer size must be greater than 1"
         self.buffer, self.size, self.name = buffer, size, name
         self.max_reuse, self.remain_reuse = max_reuse, max_reuse
         self.last_reuse = 0

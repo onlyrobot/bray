@@ -4,7 +4,7 @@ import bray
 MODELS, SOURCES, BUFFERS, TRAINERS, AGENTS, ACTORS = {}, {}, {}, {}, {}, {}
 
 parser = argparse.ArgumentParser(description="Launch Bray for train or deploy")
-parser.add_argument("--config", help="Config yaml file")
+parser.add_argument("--config", help="Config yaml file", required=True)
 parser.add_argument("--trial", help="Override trial name in config file")
 parser.add_argument("--mode", help="Launch mode, train or deploy", default="train")
 args = parser.parse_args()

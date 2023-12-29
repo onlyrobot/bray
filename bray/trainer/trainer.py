@@ -86,7 +86,7 @@ def train(
     buffers = [
         PrefetchBuffer(
             buffers[i],
-            size=prefetch_size,
+            size=max(1, prefetch_size),
             max_reuse=max_reuse,
             name=names[i],
         )
