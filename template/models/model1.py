@@ -65,7 +65,7 @@ def build_model() -> tuple[torch.nn.Module, tuple]:
     构建PyTorch模型，用于推理和训练，返回模型和输入数据的样例
     Returns:
         model: PyTorch模型
-        forward_args: 保证 model(*batch(forward_args)) 可以正常执行
+        forward_args: 保证 model(*forward_args) 可以正常执行
     """
     model = Model1()
 
