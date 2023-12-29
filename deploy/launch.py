@@ -7,7 +7,6 @@ import torch
 import onnxruntime as ort
 import numpy as np
 from bray.utils.nested_array import (
-    make_batch,
     flatten_nested_array,
 )
 
@@ -18,10 +17,10 @@ os.makedirs(model_dir, exist_ok=True)
 shutil.copy2(join(bray_model_dir, "model.onnx"), join(model_dir, "model.onnx"))
 
 forward_inputs = torch.load(join(bray_model_dir, "forward_inputs.pt"))
-batch_args, batch_kwargs = make_batch([forward_inputs])
+forward_args, forwarad_kwargs = forward_inputs
 
 flatten_inputs = flatten_nested_array(
-    (batch_args, tuple(batch_kwargs.values())), sort_keys=True
+    (forward_args, tuple(forwarad_kwargs.values())), sort_keys=True
 )
 ort_session = ort.InferenceSession(
     join(model_dir, "model.onnx"), providers=["CPUExecutionProvider"]

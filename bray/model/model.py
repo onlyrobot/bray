@@ -29,7 +29,7 @@ def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
 
 def build_tensorflow_model(model, forward_args, forward_kwargs):
     tensorflow_model = model()
-    args, kwargs = make_batch([(forward_args, forward_kwargs)])
+    args, kwargs = forward_args, forward_kwargs
     import tensorflow as tf
 
     args, kwargs = handle_nested_array((args, kwargs), tf.identity)
@@ -157,7 +157,6 @@ class ModelWorker:
             tf.config.set_visible_devices([], "GPU")
         self.torch_model = model = model()
         args, kwargs = ray.get(self.model.get_forward_inputs.remote())
-        args, kwargs = make_batch([(args, kwargs)])
         self.torch_model(*args, **kwargs)
         weights = ray.get(self.model.get_weights.remote(self.name))
         model.set_weights(weights)
@@ -209,12 +208,14 @@ class ModelWorker:
         return handle_nested_array(outputs, lambda x: x.cpu().numpy())
 
     async def _forward(self, pending_forwards: list[tuple, dict]):
-        beg = time.time()
-        batch_args, batch_kwargs = make_batch(pending_forwards)
+        beg, parts = time.time(), []
+        batch_args, batch_kwargs = make_batch(
+            pending_forwards, concate=True, parts=parts
+        )
         outputs = await asyncio.get_running_loop().run_in_executor(
             None, self.__forward, batch_args, batch_kwargs
         )
-        ready_forwards = split_batch(outputs)
+        ready_forwards = split_batch(outputs, parts)
         merge_time_ms(f"forward/{self.name}", beg)
         return ready_forwards
 
@@ -569,6 +570,7 @@ class Model:
                 self.trial_path,
                 f"{cloned_name}/weights.pt",
             )
+            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
             if not os.path.exists(weights_path):
                 save_weights(weights, weights_path)
 
@@ -951,17 +953,25 @@ class RemoteModel:
         return outputs
 
     async def forward(
-        self, *args: tuple[NestedArray], **kwargs: dict[str:NestedArray]
+        self, *args: NestedArray, batch=False, **kwargs: NestedArray
     ) -> NestedArray:
         """
-        执行模型的前向计算，返回模型的输出
+        执行模型的前向计算，返回模型的输出，请注意batch维度的特殊处理
         Args:
             *args: 模型的位置参数输入，为一个或者多个 np.ndarray
+            batch: 输入和输出是否包含batch维度，默认不包含
             **kwargs: 模型的关键字参数输入，为 np.ndarray 字典
         Returns:
             模型的输出，是一个或多个 np.ndarray
         """
-        return await self._forward(args, kwargs)
+        if not batch:
+            args, kwargs = handle_nested_array(
+                (args, kwargs), lambda x: np.expand_dims(x, 0)
+            )
+        output = await self._forward(args, kwargs)
+        if not batch:
+            output = handle_nested_array(output, np.squeeze)
+        return output
 
     @property
     def step(self) -> int:
@@ -1057,6 +1067,6 @@ class RemoteModel:
     def get_torch_forward_inputs(self):
         forward_args, forward_kwargs = ray.get(self.model.get_forward_inputs.remote())
         torch_args, torch_kwargs = handle_nested_array(
-            make_batch([(forward_args, forward_kwargs)]), torch.as_tensor
+            (forward_args, forward_kwargs), torch.as_tensor
         )
         return torch_args, torch_kwargs

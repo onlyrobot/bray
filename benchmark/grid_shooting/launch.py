@@ -8,8 +8,8 @@ from .trainer import train_grid_shooting
 bray.init(project="./grid-shooting", trial="ppo-v0")
 
 input_dict = {
-    "obs": np.random.randn(56).astype(np.float32),
-    "action_mask": np.ones(9).astype(np.float32),
+    "obs": np.random.randn(1, 56).astype(np.float32),
+    "action_mask": np.ones((1, 9)).astype(np.float32),
 }
 
 remote_model = bray.RemoteModel(

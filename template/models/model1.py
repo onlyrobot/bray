@@ -69,5 +69,5 @@ def build_model() -> tuple[torch.nn.Module, tuple]:
     """
     model = Model1()
 
-    forward_args = ({"image": np.random.randn(4, 42, 42).astype(np.float32)},)
+    forward_args = ({"image": np.random.randn(1, 4, 42, 42).astype(np.float32)},)
     return model, forward_args

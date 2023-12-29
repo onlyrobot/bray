@@ -7,7 +7,7 @@ from .trainer import train_atari
 
 bray.init(project="./atari-pengyao", trial="ppo-v0")
 
-model_inputs = {"image": np.random.randn(42, 42, 4).astype(np.float32)}
+model_inputs = {"image": np.random.randn(1, 42, 42, 4).astype(np.float32)}
 
 remote_model = bray.RemoteModel(
     name="atari_model",

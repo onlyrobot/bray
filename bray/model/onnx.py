@@ -4,7 +4,6 @@ import numpy as np
 from bray.utils.nested_array import (
     NestedArray,
     handle_nested_array,
-    make_batch,
     flatten_nested_array,
 )
 
@@ -33,7 +32,6 @@ def export_onnx(
     Returns:
         NestedArray: 模型的原始输出，用于恢复onnx模型输出的numpy数组的结构。
     """
-    forward_args, forward_kwargs = make_batch([(forward_args, forward_kwargs)])
     tensor_args, tensor_kwargs = handle_nested_array(
         (forward_args, forward_kwargs), torch.from_numpy, sort_keys=True
     )

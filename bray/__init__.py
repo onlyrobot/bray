@@ -77,17 +77,18 @@ def run_until_asked_to_stop():
     signal.sigwait([signal.SIGTERM, signal.SIGINT])
 
 
-async def forward(name: str, *args, **kwargs) -> NestedArray:
+async def forward(name: str, *args, batch=False, **kwargs) -> NestedArray:
     """
-    调用指定Model的 forward 方法，返回 forward 的结果
+    调用指定Model的 forward 方法，返回 forward 结果，注意batch维度的处理
     Args:
         name: Model名称，如果不存在会抛出异常
         *args: 位置参数，类型为 NestedArray
+        batch: 输入和输出是否包含batch维度，默认不包含
         **kwargs: 关键字参数，类型为 NestedArray
     Returns:
         forward 的结果，类型为 NestedArray
     """
-    return await RemoteModel(name).forward(*args, **kwargs)
+    return await RemoteModel(name).forward(*args, batch=batch, **kwargs)
 
 
 def push(name: str, *args: NestedArray, drop=True):

@@ -135,7 +135,7 @@ trainer1:
   num_workers: null  # 工作进程数，null表示默认值
   cpus_per_worker: null  # 每个工作进程分配的CPU数量，null表示默认设置
   batch_size: 1  # 训练用的批次大小，这是在缓存区的批次大小基础上再次组批次
-  batch_kind: concate  # 组批次的方式，可选值为["concate", "stack", None]
+  batch_kind: concate  # 组批次的方式，可选值为["concate", "stack", null]
   prefetch_size: 1  # 预取批次大小，为0表示不预取，一般设为1
   max_reuse: 1  # 样本最大重用次数，和预取批次大小结合使用
   clip_grad_max_norm: 1.0  # 梯度裁剪的最大范数

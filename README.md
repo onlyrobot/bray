@@ -82,22 +82,21 @@ Model接入主要是为了保证以下几点：
 模型接入流程非常简单：[Gym Atari的简单PyTorch模型](./benchmark/atari/model.py)
 
 ```python
+inputs = np.random.randn(1, 42, 42, 4).astype(np.float32)
 remote_model = bray.RemoteModel(
     name="atari_model", 
     model=AtariModel(),
-    forward_args=(np.random.randn(42, 42, 4).astype(np.float32),),
+    forward_args=(inputs,),
     )
 # 以下命令可以在集群中任何地方执行
 # 在 Actor 中用 await remote_model.forward(inputs)
-outputs = asyncio.run(remote_model.forward(inputs))
+outputs = asyncio.run(remote_model.forward(inputs, batch=True))
 model = remote_model.get_model()
 weights = bray.get_torch_model_weights(model)
 remote_model.publish_weights(weights)
 ```
 
-> 注意：
-> * 这里的 `forward_args` 和 `forward_kwargs` 的类型分别是 `tuple[np.ndarray]` 和 `dict[str: np.ndarray]` ，传给 `AtariModel().forward` 函数时，会经过组Batch和转Torch Tensor，所以在 `AtariModel().forward` 中看到的是转换后的增加一个Batch维度的 `NestedTensor`。
-> * `AtariModel().forward` 输出应该为一个或者多个 Torch Tensor 或者 Torch Tensor 的字典，且包含Batch维度，Bray会自动缩减掉该维度并且转为 `np.ndarray` 返回。
+> 注意：请注意这里 forward_args 的 batch 维度的处理
 
 ### 3. Actor接入
 

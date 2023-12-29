@@ -47,7 +47,7 @@ def handle_nested_array(inputs, handler: Callable, type_check=False, sort_keys=F
         return handler(inputs)
 
 
-def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> list[NestedArray]:
+def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> list[np.ndarray]:
     flatten_arrays = []
 
     def flatten(array):
@@ -68,7 +68,15 @@ def unflatten_nested_array(
     return handle_nested_array(inputs, unflatten, sort_keys=sort_keys)
 
 
-def make_batch(nested_arrays: list[NestedArray], concate=False) -> NestedArray:
+def make_batch(
+    nested_arrays: list[NestedArray], concate=False, parts: list[int] = None
+) -> NestedArray:
+    """
+    Args:
+        nested_arrays: 一个NestedArray列表，要求能够符合batch的要求
+        concate: 是否使用np.concatenate而不是np.stack
+        parts: 如果是concate，这里输出了每个数组的维度，用于拆分
+    """
     flatten_arrays = [flatten_nested_array(arrays) for arrays in nested_arrays]
     arrays = zip(*flatten_arrays)
     try:
@@ -82,13 +90,18 @@ def make_batch(nested_arrays: list[NestedArray], concate=False) -> NestedArray:
         ):
             print(signature)
         raise
+    if parts is not None:
+        parts.extend([len(arrays[0]) for arrays in flatten_arrays])
     return unflatten_nested_array(
         nested_arrays[0] if nested_arrays else [], batch_arrays
     )
 
 
-def split_batch(batch: NestedArray) -> list[NestedArray]:
+def split_batch(batch: NestedArray, parts: list[int] = None) -> list[NestedArray]:
     flatten_arrays = flatten_nested_array(batch)
+    if parts is not None:
+        indices = np.cumsum(parts)
+        flatten_arrays = [np.split(a, indices[:-1]) for a in flatten_arrays]
     arrays = zip(*flatten_arrays)
     return [unflatten_nested_array(batch, a) for a in arrays]
 
@@ -125,4 +138,27 @@ if __name__ == "__main__":
     split_array2 = split_batch(batch2)
     np.testing.assert_array_equal(split_array2[0][0], nested_arrays[0][0][0])
     np.testing.assert_array_equal(split_array2[0][1], nested_arrays[0][1][0])
+    nested_arrays = [
+        [
+            np.array([[1, 2, 3]]),
+            np.array([[4]]),
+            {"a": np.array([[7, 8, 9]]), "b": np.array([[10, 11, 12]])},
+        ],
+        [
+            np.array([[1, 2, 3], [3, 2, 1]]),
+            np.array([[4], [5]]),
+            {
+                "a": np.array([[7, 8, 9], [9, 8, 7]]),
+                "b": np.array([[10, 11, 12], [12, 11, 10]]),
+            },
+        ],
+    ]
+    parts = []
+    batch = make_batch(nested_arrays, concate=True, parts=parts)
+    assert parts == [1, 2]
+    split_array = split_batch(batch, parts=parts)
+    np.testing.assert_array_equal(split_array[0][0], nested_arrays[0][0])
+    np.testing.assert_array_equal(split_array[0][1], nested_arrays[0][1])
+    np.testing.assert_array_equal(split_array[1][0], nested_arrays[1][0])
+    np.testing.assert_array_equal(split_array[1][1], nested_arrays[1][1])
     print("test make_batch passed")
