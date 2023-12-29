@@ -16,15 +16,15 @@ class FakeActor(bray.Actor):
         print("FakeActor.tick: ", data)
         return self.config["fake_actor_tick_return"]
 
-    def end(self, data):
-        print("FakeActor.end: ", data)
-        return self.config["fake_actor_end_return"]
+    def stop(self, data):
+        print("FakeActor.stop: ", data)
+        return self.config["fake_actor_stop_return"]
 
 
 config = {
     "fake_actor_start_return": b"fake_actor_start_return",
     "fake_actor_tick_return": b"fake_actor_tick_return",
-    "fake_actor_end_return": b"fake_actor_end_return",
+    "fake_actor_stop_return": b"fake_actor_stop_return",
 }
 actor_port = 8000
 

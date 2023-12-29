@@ -42,6 +42,12 @@ from bray.master.master import (
     get,
     register,
 )
+from bray.client.client import (
+    Client,
+    AsyncClient,
+    ProtobufClient,
+    AsyncProtobufClient,
+)
 
 import ray, logging, os
 

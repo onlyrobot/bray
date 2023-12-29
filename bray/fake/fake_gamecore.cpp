@@ -112,7 +112,7 @@ int main(int argc, char* argv[])
         res = actor_step(sock, game_id, "fake game state", "tick");
         cout << res << endl;
     }
-    res = actor_step(sock, game_id, "end game", "end");
+    res = actor_step(sock, game_id, "stop game", "stop");
     cout << res << endl;
     // 关闭套接字
 #ifdef _WIN32
@@ -122,6 +122,6 @@ int main(int argc, char* argv[])
 #else
     close(sock);
 #endif
-    cout << "fake gamecore end" << endl;
+    cout << "fake gamecore stopped" << endl;
     return 0;
 }

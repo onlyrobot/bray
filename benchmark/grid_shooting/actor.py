@@ -72,7 +72,7 @@ class GridShootingActor(bray.Actor):
         )
         return json.dumps({"action": [int(action), int(action_1)]}).encode()
 
-    async def end(self, data: bytes) -> bytes:
+    async def stop(self, data: bytes) -> bytes:
         data = json.loads(data)
         reward_0, _ = data["rewards"]
         self.episode_reward += reward_0

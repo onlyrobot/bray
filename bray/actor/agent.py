@@ -177,7 +177,7 @@ class AgentActor(Actor):
         self.episode = []
         return await state.output_data
 
-    async def end(self, _: bytes) -> bytes:
+    async def stop(self, _: bytes) -> bytes:
         asyncio.gather(
             *[
                 a.on_episode(
@@ -188,4 +188,4 @@ class AgentActor(Actor):
             ]
         )
         self.episode = []
-        return b"Game Ended"
+        return b"Game Stopped"

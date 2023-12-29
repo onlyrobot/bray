@@ -6,7 +6,7 @@ import time
 config = {
     "fake_gamecore_step_start_data": b"fake_gamecore_step_start_data",
     "fake_gamecore_step_tick_data": b"fake_gamecore_step_tick_data",
-    "fake_gamecore_step_end_data": b"fake_gamecore_step_end_data",
+    "fake_gamecore_step_stop_data": b"fake_gamecore_step_stop_data",
 }
 actor_url = "http://localhost:8000/step"
 
@@ -48,8 +48,8 @@ def rollout(game_id, config):
     res = actor_step(
         sess,
         game_id,
-        "end",
-        config["fake_gamecore_step_end_data"],
+        "stop",
+        config["fake_gamecore_step_stop_data"],
     )
     print(res)
 

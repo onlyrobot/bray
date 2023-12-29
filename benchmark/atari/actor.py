@@ -55,7 +55,7 @@ class AtariActor(bray.Actor):
         self._append_to_trajectory(state, action, reward, value, logit)
         return json.dumps({"action": action.tolist()}).encode()
 
-    async def end(self, data: bytes) -> bytes:
+    async def stop(self, data: bytes) -> bytes:
         data = json.loads(data)
         reward = data["reward"]
         self.episode_reward += reward

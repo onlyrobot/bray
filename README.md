@@ -41,7 +41,7 @@ Gamecore指的是强化学习中的仿真环境。在真实的游戏业务场景
 
 ![Http Header](./docs/img/http_header_body.png)
 
-Header中的 `step_kind` 用于标识当前 step 的类型，一局游戏的请求顺序是 `start` -> `tick` -> `...` -> `tick` -> `end` 。
+Header中的 `step_kind` 用于标识当前 step 的类型，一局游戏的请求顺序是 `start` -> `tick` -> `...` -> `tick` -> `stop` 。
 
 > 强化训练过程中需要知道完整的trajectory序列所以一般都要求有状态，而为了让推理和训练复用同一套代码（降低接入成本、保证迁移正确性），线上推理也都使用有状态服务。
 
@@ -56,7 +56,7 @@ Http的body为任意数据，框架本身不会对其解析，Gamecore和Actor�
 ```python
 config = {
     "fake_actor_tick_return": b"fake_actor_tick_return",
-    "fake_actor_end_return": b"fake_actor_end_return"
+    "fake_actor_stop_return": b"fake_actor_stop_return"
 }
 actor_port = 8000
 ```

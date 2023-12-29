@@ -66,7 +66,7 @@ def rollout(gym_id: str, game_id: str):
     game_end_res = actor_step(
         sock,
         game_id,
-        "end",
+        "stop",
         json.dumps(data).encode(),
     )
     print(game_end_res)

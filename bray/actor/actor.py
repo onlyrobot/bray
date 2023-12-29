@@ -137,16 +137,16 @@ class ActorGateway:
         if step_kind == "start":
             return await self.start(game_id, body)
 
-        if step_kind != "end":
+        if step_kind != "stop":
             raise Exception("Unknown step_kind:", step_kind)
 
         actor = self.actors.pop(game_id, None)
         if not actor:
             raise Exception(f"Game {game_id} not started.")
 
-        end_ret = await actor.end(body)
+        stop_ret = await actor.stop(body)
         self.inactive_actors.append(actor)
-        return end_ret
+        return stop_ret
 
 
 ACTOR_GATEWAY: ActorGateway = None

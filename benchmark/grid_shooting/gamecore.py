@@ -42,7 +42,7 @@ def rollout(game_id: str):
         rewards, done, _ = env.step(cmd[0], cmd[1])
     # final reward
     data = {"rewards": rewards}
-    game_end_res = actor_step(sess, game_id, "end", json.dumps(data))
+    game_end_res = actor_step(sess, game_id, "stop", json.dumps(data))
     print(game_end_res)
 
 

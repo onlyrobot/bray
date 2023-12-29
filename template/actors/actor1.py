@@ -11,5 +11,5 @@ class Actor1(bray.Actor):
     async def tick(self, data: bytes) -> bytes:
         raise NotImplementedError
 
-    async def end(self, data: bytes) -> bytes:
+    async def stop(self, data: bytes) -> bytes:
         raise NotImplementedError
