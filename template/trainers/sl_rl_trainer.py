@@ -5,9 +5,9 @@ from template.trainers.sl_trainer import Trainer1 as SLTrainer
 
 
 class Trainer1(bray.Trainer):
-    def __init__(self, model: torch.nn.Module):
-        self.rl_trainer = RLTrainer(model)
-        self.sl_trainer = SLTrainer(model)
+    def __init__(self, name, config: dict, model: torch.nn.Module):
+        self.rl_trainer = RLTrainer(name, config, model)
+        self.sl_trainer = SLTrainer(name, config, model)
 
     def replay_handler(self, replay: bray.NestedArray) -> bray.NestedArray:
         return replay

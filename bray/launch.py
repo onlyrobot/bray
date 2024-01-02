@@ -13,7 +13,7 @@ with open(args.config) as f:
     CONFIG = yaml.load(f, Loader=yaml.FullLoader)
 
 bray.init(project=CONFIG["project"], trial=args.trial or CONFIG["trial"])
-bray.set("config", CONFIG)
+bray.ray.get(bray.set("config", CONFIG))
 
 FILTER_CONFIG = lambda kind: {
     name: conf
@@ -23,7 +23,8 @@ FILTER_CONFIG = lambda kind: {
 }
 
 for name, c in FILTER_CONFIG("model").items():
-    model, forward_args = importlib.import_module(c["module"]).build_model()
+    module = importlib.import_module(c["module"])
+    model, forward_args = module.build_model(name, bray.get("config"))
     remote_model = MODELS[name] = bray.RemoteModel(
         name=name,
         model=model,
@@ -52,7 +53,7 @@ for name, c in FILTER_CONFIG("source").items():
     module = importlib.import_module(c["module"])
     build_source = getattr(module, c.get("func") or "build_source")
     SOURCES[name] = {
-        "source": build_source(),
+        "source": build_source(name, bray.get("config")),
         "num_workers": c.get("num_workers"),
         "epoch": c.get("epoch"),
     }
@@ -125,7 +126,11 @@ for name, c in FILTER_CONFIG("actor").items():
     if module := c.get("module"):
         module = importlib.import_module(module)
         Actor = getattr(module, c.get("class"))
-        remote_actor.serve(Actor=Actor)
+        remote_actor.serve(
+            Actor=Actor,
+            name=name,
+            config=bray.get("config"),
+        )
         continue
     if not (agents := c.get("agents")):
         continue

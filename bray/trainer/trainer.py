@@ -15,6 +15,7 @@ from bray.buffer.utils import (
     SampleBuffer,
 )
 from bray.metric.metric import merge_time_ms
+from bray.master.master import get
 
 
 def train(
@@ -45,7 +46,7 @@ def train(
     # initialize model and and trainer
     model = remote_model.get_model()
     model.to(device=device)
-    trainer = Trainer(model)
+    trainer = Trainer(name, get("config"), model)
     # initialize optimizer
     parameters = model.parameters()
     optimizer = torch.optim.Adam(parameters, lr=5e-4)

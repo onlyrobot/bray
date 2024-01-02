@@ -2,7 +2,7 @@ import bray
 
 
 class Actor1(bray.Actor):
-    def __init__(self):
+    def __init__(self, name, config: dict):
         raise NotImplementedError
 
     async def start(self, game_id, data: bytes) -> bytes:

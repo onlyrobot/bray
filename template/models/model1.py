@@ -60,13 +60,17 @@ class Model1(torch.nn.Module):
         return values, logits, actions
 
 
-def build_model() -> tuple[torch.nn.Module, tuple]:
+def build_model(name, config: dict) -> tuple[torch.nn.Module, tuple]:
     """
     构建PyTorch模型，用于推理和训练，返回模型和输入数据的样例
+    Args:
+        name: 模型名称，在配置文件中指定
+        config: 全局配置，通过 `config[name]` 获取当前模型配置
     Returns:
         model: PyTorch模型
         forward_args: 保证 model(*forward_args) 可以正常执行
     """
+    print(config)
     model = Model1()
 
     forward_args = ({"image": np.random.randn(1, 4, 42, 42).astype(np.float32)},)

@@ -24,7 +24,7 @@ def cal_entroy(logits):
 
 
 class Trainer1(bray.Trainer):
-    def __init__(self, model: torch.nn.Module):
+    def __init__(self, name, config: dict, model: torch.nn.Module):
         self.model = model
 
     def replay_handler(self, replay: bray.NestedArray) -> bray.NestedArray:

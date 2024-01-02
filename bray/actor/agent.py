@@ -2,7 +2,7 @@ import asyncio
 from typing import Any, Type
 from google.protobuf.message import Message
 from bray.actor.base import Actor
-from bray.master.master import register
+from bray.master.master import register, get
 
 
 class State:
@@ -72,12 +72,13 @@ class State:
 
 
 class Agent:
-    def __init__(self, name: str):
+    def __init__(self, name: str, config: dict):
         """
         初始化一个新的Agent，当一局新的游戏开始时，会调用这个方法，
         你可以在这里初始化一些状态
         Args:
             name: Agent的名称，由Actor传入
+            config: 全局配置，由Actor传入
         """
 
     async def on_tick(self, state: State):
@@ -119,6 +120,7 @@ class AgentActor(Actor):
         TickOutputProto: Type[Message] = None,
     ):
         self.name, self.Agents = name, Agents
+        self.config = get("config")
         self.actor_id = register(self.name)
         self.episode_length = episode_length
         self.TickInputProto = TickInputProto
@@ -129,6 +131,7 @@ class AgentActor(Actor):
         self.agents: dict[str:Agent] = {
             name: Agent(
                 name,
+                self.config,
             )
             for name, Agent in self.Agents.items()
         }
