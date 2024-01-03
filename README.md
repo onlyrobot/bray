@@ -2,6 +2,8 @@
 
 Bray for based on ray and better than ray
 
+[项目文档](https://docs.popo.netease.com/lingxi/cdaee1b197bb457fa8d99287c9a9de25)
+
 ## 定位
 
 针对分布式强化学习在游戏场景下的落地进行优化，主要解决以下几个痛点问题：
