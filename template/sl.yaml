@@ -1,5 +1,6 @@
 project: template
 trial: train_sl_v0
+mode: train
 
 model1:
   kind: model

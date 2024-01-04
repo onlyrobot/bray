@@ -1,5 +1,6 @@
 project: template  # 项目名称，此处为模板
 trial: train_sl_rl_v0  # 实验名称，项目和实验共同确定一个命名空间
+mode: train  # 启动模式，此处为训练模式
 
 # 模型配置 - 定义了一个PyTorch模型的具体参数和设置
 model1:  

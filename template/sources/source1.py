@@ -17,7 +17,7 @@ class AtariDataset(Iterable[bray.NestedArray]):
         """
         return self.generate()
 
-    def generate(self) -> Iterator[bray.NestedArray]:
+    def generate(self) -> Iterable[bray.NestedArray]:
         for _ in range(self.size):
             yield self.fake_data
 

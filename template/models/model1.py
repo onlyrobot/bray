@@ -70,7 +70,6 @@ def build_model(name, config: dict) -> tuple[torch.nn.Module, tuple]:
         model: PyTorch模型
         forward_args: 保证 model(*forward_args) 可以正常执行
     """
-    print(config)
     model = Model1()
 
     forward_args = ({"image": np.random.randn(1, 4, 42, 42).astype(np.float32)},)

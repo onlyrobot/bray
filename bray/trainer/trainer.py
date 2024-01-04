@@ -113,8 +113,9 @@ def train(
     def eval_at_step(step):
         print(f"Trainer {name} eval at step {step}")
         model.eval()
-        for _ in range(eval_steps):
-            eval_one_step()
+        with torch.no_grad():
+            for _ in range(eval_steps):
+                eval_one_step()
         model.train()
         print(f"Trainer {name} eval done")
 
