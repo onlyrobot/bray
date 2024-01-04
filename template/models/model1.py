@@ -72,5 +72,15 @@ def build_model(name, config: dict) -> tuple[torch.nn.Module, tuple]:
     """
     model = Model1()
 
-    forward_args = ({"image": np.random.randn(1, 4, 42, 42).astype(np.float32)},)
+    forward_args = ({"image": torch.randn(1, 4, 42, 42, dtype=torch.float32)},)
     return model, forward_args
+
+
+if __name__ == "__main__":
+    import os, yaml
+
+    path = os.path.dirname(__file__)
+    with open(os.path.join(path, "../config.yaml"), "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+    model, forward_args = build_model("model1", config)
+    print(model(*forward_args))

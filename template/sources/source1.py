@@ -37,3 +37,17 @@ def build_source(name, config: dict) -> list[Iterable[bray.NestedArray]]:
 
 def build_eval_source(name, config: dict) -> list[Iterator[bray.NestedArray]]:
     return [AtariDataset() for _ in range(1)]
+
+
+if __name__ == "__main__":
+    import os, yaml
+
+    path = os.path.dirname(__file__)
+    with open(os.path.join(path, "../config.yaml"), "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+    source = build_source("train_source", config)
+    print(source)
+    print(next(iter(source[0])))
+    eval_source = build_eval_source("eval_source", config)
+    print(eval_source)
+    print(next(iter(eval_source[0])))
