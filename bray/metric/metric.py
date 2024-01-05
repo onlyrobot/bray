@@ -73,7 +73,7 @@ class Metrics:
         for name, metric in metrics.items():
             await self.merge(name, metric, None)
 
-    async def _get_writer_and_step(self, step):
+    async def _get_writer_and_step(self, step=None):
         if self.writer is None:
             self._init_writer()
         step = await self._get_step() if step is None else step
@@ -96,9 +96,10 @@ class Metrics:
         writer.add_histogram(name, values, step, bins)
 
     async def add_graph(self, model, input_to_model):
+        writer, _ = await self._get_writer_and_step()
         if self.writer is None:
             self._init_writer()
-        self.writer.add_graph(model.eval(), input_to_model)
+        writer.add_graph(model.eval(), input_to_model, use_strict_trace=False)
 
     async def query(self, name, time_window: bool) -> Metric:
         if not time_window:

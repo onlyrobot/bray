@@ -429,9 +429,11 @@ class Model:
             ckpt_steps = self._build_ckpt_steps(name, ckpt_dir)
             step = ckpt_steps[-1] if ckpt_steps else 0
             meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
-            print(f"Model {name} latest checkpoint step is {step}")
         except Exception as e:
             print(f"Build checkpoint steps for {name} failed: {e}")
+
+        if meta.step != 0:
+            print(f"Model {name} restore checkpoint step is {meta.step}")
 
         meta.max_batch_size = max_batch_size
         self.models[name] = meta
@@ -970,7 +972,7 @@ class RemoteModel:
             )
         output = await self._forward(args, kwargs)
         if not batch:
-            output = handle_nested_array(output, np.squeeze)
+            output = handle_nested_array(output, lambda x: np.squeeze(x, 0))
         return output
 
     @property

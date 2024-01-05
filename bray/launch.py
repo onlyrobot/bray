@@ -1,5 +1,6 @@
 import yaml, importlib, argparse
 import bray
+import torch
 
 MODELS, SOURCES, BUFFERS, TRAINERS, AGENTS, ACTORS = {}, {}, {}, {}, {}, {}
 
@@ -25,6 +26,9 @@ FILTER_CONFIG = lambda kind: {
 for name, c in FILTER_CONFIG("model").items():
     module = importlib.import_module(c["module"])
     model, forward_args = module.build_model(name, bray.get("config"))
+    if checkpoint := c.get("checkpoint"):
+        print(f"Model {name} loading checkpoint {checkpoint}")
+        model.load_state_dict(torch.load(checkpoint))
     remote_model = MODELS[name] = bray.RemoteModel(
         name=name,
         model=model,
