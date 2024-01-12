@@ -138,7 +138,7 @@ for name, c in FILTER_CONFIG("actor").items():
         continue
     if not (agents := c.get("agents")):
         continue
-    if c.get("use_proto"):
+    if c.get("serialize") == "proto":
         module = c["tick_input_proto"]["module"]
         TickInputProto = getattr(
             importlib.import_module(module),
@@ -156,6 +156,7 @@ for name, c in FILTER_CONFIG("actor").items():
         name=name,
         Agents={a: AGENTS[a] for a in agents if a in AGENTS},
         episode_length=c.get("episode_length"),
+        serialize=c.get("serialize"),
         TickInputProto=TickInputProto,
         TickOutputProto=TickOutputProto,
     )

@@ -97,8 +97,6 @@ class Metrics:
 
     async def add_graph(self, model, input_to_model):
         writer, _ = await self._get_writer_and_step()
-        if self.writer is None:
-            self._init_writer()
         writer.add_graph(model.eval(), input_to_model, use_strict_trace=False)
 
     async def query(self, name, time_window: bool) -> Metric:

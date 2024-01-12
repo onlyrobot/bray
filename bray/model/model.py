@@ -168,7 +168,8 @@ class ModelWorker:
         if self.tensorflow_model is None:
             self.tensorflow_model = tf.function(model)
         else:
-            self.set_model_weights(self.tensorflow_model, weights)
+            self.torch_model = self.tensorflow_model.python_function
+            self.set_model_weights(self.torch_model, weights)
         self._forward_torch = self._forward_tensorflow
 
     def _forward_torch(self, batch_args, batch_kwargs):

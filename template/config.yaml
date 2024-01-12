@@ -7,6 +7,7 @@ model1:
   kind: model  # 组件类型：模型
   module: template.models.model1  # 模型的模块路径，确保该模块下包含 build_model 函数
   checkpoint_interval: null  # 模型检查点保存间隔，单位step，null表示10分钟保存一次
+  checkpoint: null  # 模型检查点路径，null表示不加载检查点
   max_batch_size: 1  # 模型推理的最大批次大小
   num_workers: 0  # 工作进程数
   cpus_per_worker: 0.5  # 每个工作进程分配的CPU数量
@@ -107,7 +108,7 @@ actor1:
     - render_agent
     - metrics_agent
   episode_length: null  # 单次轨迹的长度，null表示不限制，取决于游戏何时结束
-  use_proto: false  # 是否使用protobuf作为环境和Actor的通信协议
+  serialize: null  # 序列化器，null表示不使用，可选值为["proto", "json"]
   tick_input_proto:  # Actor的tick输入protobuf数据定义
     module: template.tick_pb2  # 编译好的protobuf文件模块路径
     message: TickInput  # 在模块路径下具体的Message类

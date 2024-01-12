@@ -6,6 +6,7 @@ model1:
   kind: model
   module: template.models.model1
   checkpoint_interval: null
+  checkpoint: null
   max_batch_size: 1
   num_workers: 0
   cpus_per_worker: 0.5
@@ -60,7 +61,7 @@ actor1:
     - render_agent
     - metrics_agent
   episode_length: null
-  use_proto: false
+  serialize: null
   tick_input_proto:
     module: template.tick_pb2
     message: TickInput

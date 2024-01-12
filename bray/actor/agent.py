@@ -3,6 +3,7 @@ from typing import Any, Type
 from google.protobuf.message import Message
 from bray.actor.base import Actor
 from bray.master.master import register, get
+import json
 
 
 class State:
@@ -116,6 +117,7 @@ class AgentActor(Actor):
         name: str = "default",
         Agents: dict[str, Type[Agent]] = {},
         episode_length: int = 128,
+        serialize: str = None,
         TickInputProto: Type[Message] = None,
         TickOutputProto: Type[Message] = None,
     ):
@@ -123,6 +125,7 @@ class AgentActor(Actor):
         self.config = get("config")
         self.actor_id = register(self.name)
         self.episode_length = episode_length
+        self.serialize = serialize
         self.TickInputProto = TickInputProto
         self.TickOutputProto = TickOutputProto
 
@@ -146,8 +149,12 @@ class AgentActor(Actor):
         if self.TickInputProto:
             input = self.TickInputProto()
             input.ParseFromString(data)
-            state.input = input
-            state.output = self.TickOutputProto()
+            state.input_proto = input
+            state.output_proto = self.TickOutputProto()
+        elif self.serialize == "json":
+            input = json.loads(data)
+            state.input_json = input
+            state.output_json = {}
         self.episode.append(state)
         await asyncio.gather(
             *[
@@ -158,7 +165,7 @@ class AgentActor(Actor):
             ]
         )
         if self.TickInputProto:
-            output = await state.output
+            output = await state.output_proto
             state.output_data = output.SerializeToString()
         if (
             not self.episode_length
