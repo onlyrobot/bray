@@ -8,7 +8,7 @@ class FakeActor(bray.Actor):
         self.config = config
         print("FakeActor.__init__: ", config)
 
-    def start(self, game_id, data):
+    async def start(self, game_id, data):
         print("FakeActor.start: ", game_id, data)
         return self.config["fake_actor_start_return"]
 
@@ -16,7 +16,7 @@ class FakeActor(bray.Actor):
         print("FakeActor.tick: ", data)
         return self.config["fake_actor_tick_return"]
 
-    def stop(self, data):
+    async def stop(self, data):
         print("FakeActor.stop: ", data)
         return self.config["fake_actor_stop_return"]
 
@@ -28,7 +28,7 @@ config = {
 }
 actor_port = 8000
 
-remote_actor = bray.RemoteActor(port=actor_port, use_tcp=False)
+remote_actor = bray.RemoteActor(port=actor_port, use_tcp=True)
 remote_actor.serve(Actor=FakeActor, config=config)
 
 bray.run_until_asked_to_stop()

@@ -49,7 +49,7 @@ def rollout(env, game_id: str):
         obs, reward, done, _ = env.step(cmd)
     # final reward
     data = {"reward": reward}
-    game_end_res = actor_step(sess, game_id, "end", json.dumps(data))
+    game_end_res = actor_step(sess, game_id, "stop", json.dumps(data))
     print(game_end_res)
 
 

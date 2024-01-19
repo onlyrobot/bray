@@ -101,7 +101,7 @@ class ActorGateway:
 
     async def auto(self, data) -> bytes:
         beg = time.time()
-        while self.concurrency >= self.actors_per_worker:
+        while self.concurrency >= self.actors_per_worker * 5:
             await asyncio.sleep(0.001)
         if self.auto_actor is None:
             try:

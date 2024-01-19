@@ -44,7 +44,6 @@ def save_weights(weights: NestedArray, path: str):
 
 class ModelWorker:
     ort_session_and_forward_outputs: dict[str, tuple] = {}
-    cached_tf_model = None
 
     def __init__(self, name: str, model: "Model" = None):
         self.name, self.model = name, model if model else ray.get_actor(
@@ -81,8 +80,6 @@ class ModelWorker:
         self.is_initialized = True
 
     def finalize_async_context(self):
-        if self._forward_torch == self._forward_tensorflow:
-            ModelWorker.cached_tf_model = self.tensorflow_model
         if not self.is_initialized:
             return
         self.forward_task.cancel()
@@ -161,15 +158,7 @@ class ModelWorker:
         weights = ray.get(self.model.get_weights.remote(self.name))
         model.set_weights(weights)
         self.set_model_weights = lambda m, w: m.set_weights(w)
-        ModelWorker.cached_tf_model, self.tensorflow_model = (
-            None,
-            ModelWorker.cached_tf_model,
-        )
-        if self.tensorflow_model is None:
-            self.tensorflow_model = tf.function(model)
-        else:
-            self.torch_model = self.tensorflow_model.python_function
-            self.set_model_weights(self.torch_model, weights)
+        self.tensorflow_model = tf.function(model)
         self._forward_torch = self._forward_tensorflow
 
     def _forward_torch(self, batch_args, batch_kwargs):
@@ -1027,7 +1016,7 @@ class RemoteModel:
         Returns:
             克隆的RemoteModel
         """
-        RemoteModel.remote_models[self.name] = self
+        # RemoteModel.remote_models[self.name] = self
         if local_mode is None:
             local_mode = self._forward == self._local_forward
         if cloned_name := self.cached_cloned_names.get(step, None):

@@ -1,0 +1,1 @@
+g++ -I ./bray/boost_1_84_0 -o main bray/client/cpp/main.cpp bray/client/cpp/client.cpp
