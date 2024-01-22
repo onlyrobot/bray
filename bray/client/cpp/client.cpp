@@ -17,29 +17,31 @@ public:
                void (*callback)(std::string data));
     ~ClientImpl() = default;
 
-    void start(std::string) override;
-    void tick(const std::string &data) override;
-    void stop() override;
-    void step(const std::string &data) override;
+    std::string start(std::string id) override;
+    std::string tick(const std::string &data) override;
+    std::string stop() override;
 
 private:
+    void _try_callback(std::string data);
+    void _handle_write(const error_code &, size_t size);
+    size_t _read_until(const error_code &, size_t size);
+    void _handle_read(const error_code &, size_t size);
     void _connect_to_server();
-    void _build_send_buffer(
+    std::string _sync_request(const std::string &send_buf);
+    const std::string &_build_send_buffer(
         std::string kind, const std::string &data);
-    void _handle_write(const error_code &error, size_t size);
-    size_t _read_until(const error_code &error, size_t size);
-    void _handle_read(const error_code &error, size_t size);
+    size_t _parse_head(int64_t &id_size, int64_t &body_size);
 
     std::function<void(const error_code &, size_t)>
         handle_write_, handle_read_;
-    size_t pending_read_size_ = 0;
+    volatile size_t pending_read_num_ = 0;
     std::function<size_t(const error_code &, size_t)> read_until_;
     std::string host_;
     int port_;
 
     ip::tcp::socket socket_;
-    void (*callback)(std::string data);
-    std::string game_id_;
+    void (*callback_)(std::string data);
+    std::string id_;
     const std::string key_;
     const std::string token_;
     std::string recv_buffer_;
@@ -61,11 +63,9 @@ std::thread io_thread([]
     ioc.run(); });
 
 ClientImpl::ClientImpl(const std::string &host, int port,
-                       void (*callback)(std::string data))
-    : host_(host), port_(port), socket_(ioc), callback(callback)
+                       void (*callback)(std::string))
+    : host_(host), port_(port), socket_(ioc), callback_(callback)
 {
-    recv_buffer_.resize(1024 * 2);
-    _connect_to_server();
     handle_write_ = std::bind(
         &ClientImpl::_handle_write, this,
         std::placeholders::_1, std::placeholders::_2);
@@ -75,6 +75,27 @@ ClientImpl::ClientImpl(const std::string &host, int port,
     read_until_ = std::bind(
         &ClientImpl::_read_until, this,
         std::placeholders::_1, std::placeholders::_2);
+    recv_buffer_.resize(1024 * 2);
+    try
+    {
+        _connect_to_server();
+    }
+    catch (std::exception &e)
+    {
+        std::cout << "connect error: " << e.what() << std::endl;
+    }
+}
+
+void ClientImpl::_try_callback(std::string data)
+{
+    try
+    {
+        callback_(data);
+    }
+    catch (std::exception &e)
+    {
+        std::cout << "callback error: " << e.what() << std::endl;
+    }
 }
 
 void ClientImpl::_connect_to_server()
@@ -87,45 +108,67 @@ void ClientImpl::_connect_to_server()
     connect(socket_, endpoints);
 }
 
-void ClientImpl::_build_send_buffer(std::string kind, const std::string &data)
+std::string ClientImpl::_sync_request(const std::string &send_buf)
 {
-    int64_t offset = 0;
+    write(socket_, buffer(send_buf));
+    size_t n = read(socket_, buffer(recv_buffer_), read_until_);
+    int64_t id_size = 0, body_size = 0;
+    size_t total_size = _parse_head(id_size, body_size);
+    size_t offset = sizeof(int64_t) * 3 + id_.size();
+    if (total_size == n)
+        return std::string(&recv_buffer_[0] + offset, body_size);
+    recv_buffer_.resize(total_size * 2);
+    auto b = buffer(&recv_buffer_[0] + n, total_size - n);
+    n = read(socket_, b, transfer_exactly(total_size - n));
+    return std::string(&recv_buffer_[0] + offset, body_size);
+}
+
+size_t ClientImpl::_parse_head(int64_t &id_size, int64_t &body_size)
+{
+    using namespace boost::endian;
+    memcpy(&id_size, recv_buffer_.c_str(), sizeof(int64_t));
+    id_size = big_to_native(id_size);
+    memcpy(&body_size, recv_buffer_.c_str() + sizeof(int64_t),
+           sizeof(int64_t));
+    body_size = big_to_native(body_size);
+    return sizeof(int64_t) * 3 + id_size + body_size;
+}
+
+const std::string &ClientImpl::_build_send_buffer(
+    std::string kind, const std::string &data)
+{
+    using namespace boost::endian;
     char head_buffer[1024 * 2];
 
-    using namespace boost::endian;
     // 报头第一组 gameid长度的b64编码
-    int64_t head_size = native_to_big(game_id_.size());
+    int64_t offset = 0;
+    int64_t head_size = native_to_big(id_.size());
     memcpy(head_buffer, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
-
     // 报头第二组 kind长度的b64编码
     head_size = native_to_big(kind.size());
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
-
     // 报头第三组 key长度的b64编码
     head_size = native_to_big(key_.size());
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
-
     // 报头第四组 token长度的b64编码
     head_size = native_to_big(token_.size());
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
-
     // 报头第五组 正文内容长度的b64编码
     head_size = native_to_big(data.size());
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
-
     // 报头第六组 时间戳长度的b64编码
     int64_t time = 0;
     head_size = htobe64(sizeof(time));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
 
-    memcpy(head_buffer + offset, game_id_.c_str(), game_id_.size());
-    offset += game_id_.size();
+    memcpy(head_buffer + offset, id_.c_str(), id_.size());
+    offset += id_.size();
     memcpy(head_buffer + offset, kind.c_str(), kind.size());
     offset += kind.size();
     memcpy(head_buffer + offset, key_.c_str(), key_.size());
@@ -136,51 +179,35 @@ void ClientImpl::_build_send_buffer(std::string kind, const std::string &data)
     send_buffer_.resize(offset + data.size());
     memcpy(&send_buffer_[0], head_buffer, offset);
     memcpy(&send_buffer_[offset], data.c_str(), data.size());
-}
-
-void ClientImpl::start(std::string game_id)
-{
-    std::cout << "starting " << game_id << std::endl;
-    if (!socket_.is_open())
-        _connect_to_server();
-    game_id_ = game_id;
-    if (game_id_ == "")
-    {
-        auto uuid = uuid_generator();
-        game_id_ = boost::uuids::to_string(uuid);
-    }
-    _build_send_buffer("start", "");
-    write(socket_, buffer(send_buffer_));
-    read(socket_, buffer(recv_buffer_), read_until_);
+    return send_buffer_;
 }
 
 void ClientImpl::_handle_read(const error_code &error, size_t size)
 {
-    if (error)
+    if (error || size < sizeof(int64_t) * 3)
     {
         std::cout << "read error: " << error << std::endl;
+        _try_callback("");
         return socket_.close();
     }
-    using namespace boost::endian;
-    int64_t game_id_size = 0;
-    memcpy(&game_id_size, recv_buffer_.c_str(), sizeof(int64_t));
-    game_id_size = big_to_native(game_id_size);
-    int64_t body_size = 0;
-    memcpy(&body_size, recv_buffer_.c_str() + sizeof(int64_t),
-           sizeof(int64_t));
-    body_size = big_to_native(body_size);
-    size_t total_size = sizeof(int64_t) * 3 + game_id_size + body_size;
+    int64_t id_size = 0, body_size = 0;
+    size_t total_size = _parse_head(id_size, body_size);
+    if (id_size != id_.size())
+    {
+        std::cout << "read invalid id size: " << id_size << std::endl;
+        return _try_callback("");
+    }
     if (total_size != size)
     {
-        assert(total_size > recv_buffer_.size());
         recv_buffer_.resize(total_size * 2);
-        async_read(socket_, buffer(recv_buffer_),
-                   transfer_exactly(total_size - size), handle_read_);
-        return;
+        auto b = buffer(&recv_buffer_[0] + size, total_size - size);
+        return async_read(
+            socket_, b, transfer_exactly(total_size - size),
+            handle_read_);
     }
-    char *data = &recv_buffer_[0] + sizeof(int64_t) * 3 + game_id_size;
-    callback(std::string(data, body_size));
-    if (--pending_read_size_ == 0)
+    size_t offset = sizeof(int64_t) * 3 + id_.size();
+    _try_callback(std::string(&recv_buffer_[0] + offset, body_size));
+    if (--pending_read_num_ == 0)
         return;
     async_read(socket_, buffer(recv_buffer_), read_until_, handle_read_);
 }
@@ -190,7 +217,6 @@ size_t ClientImpl::_read_until(const error_code &error, size_t size)
     if (error)
     {
         std::cout << "read error: " << error << std::endl;
-        socket_.close();
         return 0;
     }
     size_t total_head_size = sizeof(int64_t) * 3;
@@ -198,23 +224,11 @@ size_t ClientImpl::_read_until(const error_code &error, size_t size)
     {
         return total_head_size - size;
     }
-    using namespace boost::endian;
-    int64_t game_id_size = 0;
-    memcpy(&game_id_size, recv_buffer_.c_str(), sizeof(int64_t));
-    game_id_size = big_to_native(game_id_size);
-    int64_t body_size = 0;
-    memcpy(&body_size, recv_buffer_.c_str() + sizeof(int64_t),
-           sizeof(int64_t));
-    body_size = big_to_native(body_size);
-    int64_t time = 0;
-    memcpy(&time, recv_buffer_.c_str() + sizeof(int64_t) * 2,
-           sizeof(int64_t));
-    time = big_to_native(time);
-    size_t total_size = total_head_size + game_id_size + body_size;
+    int64_t id_size = 0, body_size = 0;
+    size_t total_size = _parse_head(id_size, body_size);
     if (size > total_size)
     {
         std::cout << "read invalid size: " << size << std::endl;
-        socket_.close();
         return 0;
     }
     if (recv_buffer_.size() < total_size)
@@ -224,37 +238,85 @@ size_t ClientImpl::_read_until(const error_code &error, size_t size)
 
 void ClientImpl::_handle_write(const error_code &error, size_t size)
 {
-    if (error)
+    if (error || size != send_buffer_.size())
     {
         std::cout << "write error: " << error << std::endl;
+        _try_callback("");
         return socket_.close();
     }
-    if (++pending_read_size_ != 1)
+    if (++pending_read_num_ != 1)
         return;
     async_read(socket_, buffer(recv_buffer_), read_until_, handle_read_);
 }
 
-void ClientImpl::tick(const std::string &data)
+std::string ClientImpl::start(std::string id)
 {
-    _build_send_buffer("tick", data);
-    async_write(socket_, buffer(send_buffer_), handle_write_);
-}
-
-void ClientImpl::stop()
-{
-    _build_send_buffer("stop", "");
-    write(socket_, buffer(send_buffer_));
-    if (pending_read_size_ == 0)
+    id_ = id == "" ? boost::uuids::to_string(uuid_generator()) : id;
+    std::cout << "starting " << id_ << std::endl;
+    auto &send_buf = _build_send_buffer("start", "");
+    if (pending_read_num_ != 0)
     {
-        read(socket_, buffer(recv_buffer_), read_until_);
-        return;
+        std::cout << "start before callback done" << std::endl;
+        socket_.close();
+        _connect_to_server();
     }
-    std::cout << "stop before tick finish" << std::endl;
-    socket_.close();
+    try
+    {
+        return _sync_request(send_buf);
+    }
+    catch (std::exception &e)
+    {
+        std::cout << "start error: " << e.what() << std::endl;
+        socket_.close();
+    }
+    std::cout << "recovering " << id_ << std::endl;
+    try
+    {
+        _connect_to_server();
+        pending_read_num_ = 0;
+        return _sync_request(send_buf);
+    }
+    catch (std::exception &e)
+    {
+        std::cout << "start error: " << e.what() << std::endl;
+        return "";
+    }
 }
 
-void ClientImpl::step(const std::string &data)
+std::string ClientImpl::tick(const std::string &data)
 {
-    _build_send_buffer("auto", data);
-    async_write(socket_, buffer(send_buffer_), handle_write_);
+    auto &send_buf = _build_send_buffer("tick", data);
+    if (callback_)
+    {
+        async_write(socket_, buffer(send_buf), handle_write_);
+        return "";
+    }
+    try
+    {
+        return _sync_request(send_buf);
+    }
+    catch (std::exception &e)
+    {
+        std::cout << "tick error: " << e.what() << std::endl;
+        return "";
+    }
+}
+
+std::string ClientImpl::stop()
+{
+    auto &send_buf = _build_send_buffer("stop", "");
+    if (pending_read_num_ != 0)
+    {
+        std::cout << "stop before callback done" << std::endl;
+        return "";
+    }
+    try
+    {
+        return _sync_request(send_buf);
+    }
+    catch (std::exception &e)
+    {
+        std::cout << "stop error: " << e.what() << std::endl;
+        return "";
+    }
 }

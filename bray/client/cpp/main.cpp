@@ -25,10 +25,17 @@ void test_client(int i)
         std::this_thread::sleep_for(std::chrono::seconds(1));
         client->stop();
     }
-    for (int j = 0; j < 100; j++)
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    delete client;
+    client = create_client(HOST, PORT);
+    client->start();
+    for (int j = 0; j < 10; j++)
     {
-        client->step("hello");
+        std::cout << client->tick("hello") << std::endl;
+        std::cout << client->tick("world") << std::endl;
     }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::cout << client->stop() << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
     delete client;
 }
