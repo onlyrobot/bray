@@ -19,7 +19,7 @@ void test_client(int i)
         client->start();
         for (int k = 0; k < 10; k++)
         {
-            client->tick("hello");
+            client->tick("hello world");
             client->tick("world");
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));

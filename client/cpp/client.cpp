@@ -5,7 +5,7 @@
 #include <boost/uuid/uuid_io.hpp>
 #include <thread>
 #include <iostream>
-#include <functional>
+#include <atomic>
 
 using error_code = boost::system::error_code;
 using namespace boost::asio;
@@ -14,7 +14,7 @@ class ClientImpl : public Client
 {
 public:
     ClientImpl(const std::string &host, int port,
-               void (*callback)(std::string data));
+               std::function<void(std::string)> callback);
     ~ClientImpl() = default;
 
     std::string start(std::string id) override;
@@ -22,40 +22,43 @@ public:
     std::string stop() override;
 
 private:
-    void _try_callback(std::string data);
+    void _try_callback(std::string&& data);
     void _handle_write(const error_code &, size_t size);
     size_t _read_until(const error_code &, size_t size);
     void _handle_read(const error_code &, size_t size);
     void _connect_to_server();
     std::string _sync_request(const std::string &send_buf);
-    const std::string &_build_send_buffer(
+    void _prepare_send_buffer(
         std::string kind, const std::string &data);
     size_t _parse_head(int64_t &id_size, int64_t &body_size);
+    void _async_tick(const std::string &data);
 
     std::function<void(const error_code &, size_t)>
-        handle_write_, handle_read_;
-    volatile size_t pending_read_num_ = 0;
+        handle_read_, handle_write_;
     std::function<size_t(const error_code &, size_t)> read_until_;
     std::string host_;
     int port_;
+    int64_t pending_reads_ = 0;
 
     ip::tcp::socket socket_;
-    void (*callback_)(std::string data);
+    std::function<void(std::string)> callback_;
     std::string id_;
     const std::string key_;
     const std::string token_;
     std::string recv_buffer_;
-    std::string send_buffer_;
+    std::string send_buffer_, sending_buffer_;
+    // 0: idle, 1: sending w/o pending, 2: sending with pending
+    std::atomic<int64_t> sending_state_{0};
 };
 
 Client *create_client(
-    std::string host, int port, void (*callback)(std::string data),
+    std::string host, int port, std::function<void(std::string)> callback,
     std::string key, std::string token)
 {
     return new ClientImpl(host, port, callback);
 }
 
-boost::uuids::random_generator uuid_generator;
+boost::uuids::random_generator gen_uuid;
 io_context ioc;
 std::thread io_thread([]
                       {
@@ -63,17 +66,20 @@ std::thread io_thread([]
     ioc.run(); });
 
 ClientImpl::ClientImpl(const std::string &host, int port,
-                       void (*callback)(std::string))
+                       std::function<void(std::string)> callback)
     : host_(host), port_(port), socket_(ioc), callback_(callback)
 {
-    handle_write_ = std::bind(
-        &ClientImpl::_handle_write, this,
-        std::placeholders::_1, std::placeholders::_2);
     handle_read_ = std::bind(
-        &ClientImpl::_handle_read, this,
+        &ClientImpl::_handle_read,
+        this,
+        std::placeholders::_1, std::placeholders::_2);
+    handle_write_ = std::bind(
+        &ClientImpl::_handle_write,
+        this,
         std::placeholders::_1, std::placeholders::_2);
     read_until_ = std::bind(
-        &ClientImpl::_read_until, this,
+        &ClientImpl::_read_until,
+        this,
         std::placeholders::_1, std::placeholders::_2);
     recv_buffer_.resize(1024 * 2);
     try
@@ -86,7 +92,7 @@ ClientImpl::ClientImpl(const std::string &host, int port,
     }
 }
 
-void ClientImpl::_try_callback(std::string data)
+void ClientImpl::_try_callback(std::string&& data)
 {
     try
     {
@@ -134,8 +140,8 @@ size_t ClientImpl::_parse_head(int64_t &id_size, int64_t &body_size)
     return sizeof(int64_t) * 3 + id_size + body_size;
 }
 
-const std::string &ClientImpl::_build_send_buffer(
-    std::string kind, const std::string &data)
+void ClientImpl::_prepare_send_buffer(std::string kind,
+                                      const std::string &data)
 {
     using namespace boost::endian;
     char head_buffer[1024 * 2];
@@ -163,7 +169,7 @@ const std::string &ClientImpl::_build_send_buffer(
     offset += sizeof(int64_t);
     // 报头第六组 时间戳长度的b64编码
     int64_t time = 0;
-    head_size = htobe64(sizeof(time));
+    head_size = native_to_big(sizeof(time));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
 
@@ -179,7 +185,6 @@ const std::string &ClientImpl::_build_send_buffer(
     send_buffer_.resize(offset + data.size());
     memcpy(&send_buffer_[0], head_buffer, offset);
     memcpy(&send_buffer_[offset], data.c_str(), data.size());
-    return send_buffer_;
 }
 
 void ClientImpl::_handle_read(const error_code &error, size_t size)
@@ -195,19 +200,21 @@ void ClientImpl::_handle_read(const error_code &error, size_t size)
     if (id_size != id_.size())
     {
         std::cout << "read invalid id size: " << id_size << std::endl;
-        return _try_callback("");
+        _try_callback("");
+        return socket_.close();
     }
     if (total_size != size)
     {
         recv_buffer_.resize(total_size * 2);
         auto b = buffer(&recv_buffer_[0] + size, total_size - size);
         return async_read(
-            socket_, b, transfer_exactly(total_size - size),
+            socket_, b,
+            transfer_exactly(total_size - size),
             handle_read_);
     }
     size_t offset = sizeof(int64_t) * 3 + id_.size();
     _try_callback(std::string(&recv_buffer_[0] + offset, body_size));
-    if (--pending_read_num_ == 0)
+    if (--pending_reads_ == 0)
         return;
     async_read(socket_, buffer(recv_buffer_), read_until_, handle_read_);
 }
@@ -238,31 +245,56 @@ size_t ClientImpl::_read_until(const error_code &error, size_t size)
 
 void ClientImpl::_handle_write(const error_code &error, size_t size)
 {
-    if (error || size != send_buffer_.size())
+    if (error || size != sending_buffer_.size())
     {
         std::cout << "write error: " << error << std::endl;
         _try_callback("");
         return socket_.close();
     }
-    if (++pending_read_num_ != 1)
+    if (pending_reads_++ == 0)
+    {
+        async_read(socket_, buffer(recv_buffer_),
+                   read_until_, handle_read_);
+    }
+    int64_t before_state = 1;
+    if (sending_state_.compare_exchange_strong(before_state, 0))
         return;
-    async_read(socket_, buffer(recv_buffer_), read_until_, handle_read_);
+    if (before_state != 2)
+        return;
+    send_buffer_.swap(sending_buffer_);
+    sending_state_.store(1);
+    async_write(socket_, buffer(sending_buffer_), handle_write_);
+}
+
+void ClientImpl::_async_tick(const std::string &data)
+{
+    if (sending_state_.load() == 2)
+    {
+        std::cout << "tick before callback done" << std::endl;
+        return _try_callback("");
+    }
+    _prepare_send_buffer("tick", data);
+    if (sending_state_.fetch_add(1) == 1) // sending w/o pending
+        return;
+    sending_buffer_.swap(send_buffer_);
+    async_write(socket_, buffer(sending_buffer_), handle_write_);
 }
 
 std::string ClientImpl::start(std::string id)
 {
-    id_ = id == "" ? boost::uuids::to_string(uuid_generator()) : id;
+    id_ = id == "" ? boost::uuids::to_string(gen_uuid()) : id;
     std::cout << "starting " << id_ << std::endl;
-    auto &send_buf = _build_send_buffer("start", "");
-    if (pending_read_num_ != 0)
+    if (sending_state_.load() != 0 || pending_reads_ != 0)
     {
         std::cout << "start before callback done" << std::endl;
         socket_.close();
         _connect_to_server();
+        sending_state_ = pending_reads_ = 0;
     }
+    _prepare_send_buffer("start", "");
     try
     {
-        return _sync_request(send_buf);
+        return _sync_request(send_buffer_);
     }
     catch (std::exception &e)
     {
@@ -273,8 +305,7 @@ std::string ClientImpl::start(std::string id)
     try
     {
         _connect_to_server();
-        pending_read_num_ = 0;
-        return _sync_request(send_buf);
+        return _sync_request(send_buffer_);
     }
     catch (std::exception &e)
     {
@@ -285,15 +316,15 @@ std::string ClientImpl::start(std::string id)
 
 std::string ClientImpl::tick(const std::string &data)
 {
-    auto &send_buf = _build_send_buffer("tick", data);
-    if (callback_)
+    if (callback_) // async mode, callback in io thread
     {
-        async_write(socket_, buffer(send_buf), handle_write_);
+        _async_tick(data);
         return "";
     }
+    _prepare_send_buffer("tick", data);
     try
     {
-        return _sync_request(send_buf);
+        return _sync_request(send_buffer_);
     }
     catch (std::exception &e)
     {
@@ -304,15 +335,15 @@ std::string ClientImpl::tick(const std::string &data)
 
 std::string ClientImpl::stop()
 {
-    auto &send_buf = _build_send_buffer("stop", "");
-    if (pending_read_num_ != 0)
+    if (sending_state_.load() != 0 || pending_reads_ != 0)
     {
         std::cout << "stop before callback done" << std::endl;
         return "";
     }
+    _prepare_send_buffer("stop", "");
     try
     {
-        return _sync_request(send_buf);
+        return _sync_request(send_buffer_);
     }
     catch (std::exception &e)
     {
