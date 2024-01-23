@@ -1,7 +1,9 @@
 #include <functional>
 #include <string>
 
-// 定义一个抽象基类Client，用于和Bray的Actor通信
+// 定义一个抽象基类Client，用于和Bray的Actor通信，支持同步和异步两种模式，
+// 一个Client实例对应到游戏中的一个Agent，可以创建多个Client实例，
+// 每个Client实例只能在一个线程中使用，不能在多个线程中共享
 class Client
 {
 public:
