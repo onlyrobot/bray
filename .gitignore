@@ -54,6 +54,8 @@ docs/_build/
 *.pt
 *.onnx
 *.npy
+*.pkl
+*.csv
 
 # Ignore Visual Studio temporary files
 .vs/

@@ -24,7 +24,7 @@ class MetricsAgent(bray.Agent):
     async def on_tick(self, state: bray.State):
         if not self.need_metrics:
             return
-        transition = await state.transition
+        transition = await state.wait("transition")
         self.trajectory.append(transition)
         reward = transition["reward"]
         value = transition["value"]

@@ -71,16 +71,16 @@ def train(
         for b in buffers
     ]
     buffers = [
-        TorchTensorBuffer(
+        CallbackBuffer(
             b,
-            device=device,
+            callback=trainer.handle,
         )
         for b in buffers
     ]
     buffers = [
-        CallbackBuffer(
+        TorchTensorBuffer(
             b,
-            callback=trainer.replay_handler,
+            device=device,
         )
         for b in buffers
     ]

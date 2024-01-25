@@ -9,7 +9,7 @@ class Trainer1(bray.Trainer):
         self.rl_trainer = RLTrainer(name, config, model)
         self.sl_trainer = SLTrainer(name, config, model)
 
-    def replay_handler(self, replay: bray.NestedArray) -> bray.NestedArray:
+    def handle(self, replay: bray.NestedArray) -> bray.NestedArray:
         return replay
 
     def loss(self, replay: bray.NestedArray) -> torch.Tensor:

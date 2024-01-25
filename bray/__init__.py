@@ -18,7 +18,12 @@ from bray.trainer.trainer import RemoteTrainer, train
 from bray.trainer.base import Trainer
 from bray.actor.actor import RemoteActor
 from bray.actor.base import Actor
-from bray.actor.agent import State, Agent, AgentActor
+from bray.actor.agent import (
+    State,
+    Agent,
+    AgentActor,
+    RemoteStateDumper,
+)
 from bray.utils.nested_array import (
     NestedArray,
     handle_nested_array,
@@ -35,6 +40,7 @@ from bray.metric.metric import (
     get_metrics_worker,
     set_tensorboard_step,
     get_trial_launch_path,
+    get_step,
 )
 from bray.metric.validate import Metric
 from bray.master.master import (

@@ -1,9 +1,13 @@
 import asyncio
+import os
 from typing import Any, Type
 from google.protobuf.message import Message
+import ray
 from bray.actor.base import Actor
+from bray.buffer.buffer import RemoteBuffer
 from bray.master.master import register, get
 import json
+import pickle
 
 
 class State:
@@ -20,8 +24,7 @@ class State:
 
     def __setattr__(self, __name: str, __value: Any) -> None:
         super().__setattr__(__name, __value)
-        conditions = super().__getattribute__("conditions")
-        if not (cond := conditions.pop(__name, None)):
+        if not (cond := self.conditions.pop(__name, None)):
             return
 
         async def notify_all_get_attr(cond):
@@ -30,30 +33,14 @@ class State:
 
         asyncio.create_task(notify_all_get_attr(cond))
 
-    def get(self, __name: str, __default: Any = None) -> Any:
-        """
-        获取状态的属性，如果属性不存在，则返回默认值
-        """
-        try:
-            return super().__getattribute__(__name)
-        except AttributeError:
-            return __default
-
-    async def __getattribute__(self, __name: str) -> Any:
-        def _hasattr(__obj, __name) -> bool:
-            try:
-                __obj.__getattribute__(__name)
-                return True
-            except AttributeError:
-                return False
-
-        if _hasattr(self := super(), __name):
+    async def wait(self, __name: str) -> Any:
+        if hasattr(self, __name):
             return self.__getattribute__(__name)
-        conditions = self.__getattribute__("conditions")
-        if __name not in conditions:
-            conditions[__name] = asyncio.Condition()
 
-        async def wait_for_set_attr(coro) -> bool:
+        if __name not in self.conditions:
+            self.conditions[__name] = asyncio.Condition()
+
+        async def wait_set_attr(coro) -> bool:
             try:
                 await asyncio.wait_for(
                     coro,
@@ -63,13 +50,17 @@ class State:
             except asyncio.TimeoutError:
                 return False
 
-        async with (cond := conditions[__name]):
+        async with (cond := self.conditions[__name]):
             retry = 3
-            while (retry := retry - 1) and not await wait_for_set_attr(
-                cond.wait_for(lambda: _hasattr(self, __name))
+            while retry and not await wait_set_attr(
+                cond.wait_for(lambda: hasattr(self, __name))
             ):
-                print(f"Get attr {__name} timeout, retry...")
+                retry -= 1
+                print(f"Wait {__name} timeout, retry...")
         return self.__getattribute__(__name)
+
+    def __repr__(self) -> str:
+        return f"<State {self.__dict__}>"
 
 
 class Agent:
@@ -79,7 +70,7 @@ class Agent:
         你可以在这里初始化一些状态
         Args:
             name: Agent的名称，由Actor传入
-            config: 全局配置，由Actor传入
+            config: 全局配置，可以通过 config[name] 获取当前Agent的配置
         """
 
     async def on_tick(self, state: State):
@@ -111,12 +102,62 @@ class Agent:
         """
 
 
+@ray.remote(num_cpus=0, name="StateDumper")
+def StateDumper(name: str):
+    print("StateDumper started")
+    trial_path = ray.get_runtime_context().namespace
+    state_path = os.path.join(trial_path, "episode")
+    if not os.path.exists(state_path):
+        os.makedirs(state_path, exist_ok=True)
+    print("Dump episode to: ", state_path)
+
+    def dump(state: State):
+        path = os.path.join(state_path, state.game_id)
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, f"tick-{state.tick_id}.pkl")
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+
+    state_buffer = RemoteBuffer(name)
+    for state in state_buffer:
+        try:
+            dump(state)
+        except Exception as e:
+            print(e)
+    print("StateDumper stopped")
+
+
+def RemoteStateDumper(name: str = "state"):
+    from ray.util.scheduling_strategies import (
+        NodeAffinitySchedulingStrategy,
+    )
+
+    scheduling_local = NodeAffinitySchedulingStrategy(
+        node_id=ray.get_runtime_context().get_node_id(),
+        soft=False,
+    )
+    return StateDumper.options(
+        scheduling_strategy=scheduling_local,
+    ).remote(name)
+
+
 class AgentActor(Actor):
+    """
+    AgentActor是一个特殊的的Actor，封装了Actor的start->tick->...->stop流程，
+    以及数据序列化、反序列化的逻辑，提供了Agent、State和Episode的抽象，
+    其中Agent代表游戏中的智能体，State代表了一次tick的状态，多个Agent可以共享状态，
+    Episode代表了一段连续的tick，基于Episode可以计算出Agent的Replay用于训练
+    """
+
+    actor_start_count: int = 0
+
     def __init__(
         self,
         name: str = "default",
         Agents: dict[str, Type[Agent]] = {},
         episode_length: int = 128,
+        episode_save_interval: int = None,
         serialize: str = None,
         TickInputProto: Type[Message] = None,
         TickOutputProto: Type[Message] = None,
@@ -125,12 +166,22 @@ class AgentActor(Actor):
         self.config = get("config")
         self.actor_id = register(self.name)
         self.episode_length = episode_length
+        self.episode_save_interval = episode_save_interval
+        self.state_buffer = None
         self.serialize = serialize
         self.TickInputProto = TickInputProto
         self.TickOutputProto = TickOutputProto
 
     async def start(self, game_id, _: bytes) -> bytes:
+        self.state_buffer = None
+        if (
+            self.episode_save_interval is not None
+            and AgentActor.actor_start_count % self.episode_save_interval == 0
+        ):
+            self.state_buffer = RemoteBuffer("state")
+        AgentActor.actor_start_count += 1
         self.game_id = game_id
+        self.tick_id = 0
         self.agents: dict[str:Agent] = {
             name: Agent(
                 name,
@@ -145,16 +196,16 @@ class AgentActor(Actor):
         state = State()
         state.actor_id = self.actor_id
         state.game_id = self.game_id
-        state.input_data = data
-        if self.TickInputProto:
-            input = self.TickInputProto()
-            input.ParseFromString(data)
-            state.input_proto = input
-            state.output_proto = self.TickOutputProto()
+        state.tick_id = self.tick_id
+        self.tick_id += 1
+        state.input = data
+        if self.serialize == "proto":
+            state.input = self.TickInputProto()
+            state.input.ParseFromString(data)
+            state.output = self.TickOutputProto()
         elif self.serialize == "json":
-            input = json.loads(data)
-            state.input_json = input
-            state.output_json = {}
+            state.input = json.loads(data)
+            state.output = {}
         self.episode.append(state)
         await asyncio.gather(
             *[
@@ -164,9 +215,13 @@ class AgentActor(Actor):
                 for a in self.agents.values()
             ]
         )
-        if self.TickInputProto:
-            output = await state.output_proto
-            state.output_data = output.SerializeToString()
+        data = state.output
+        if self.serialize == "proto":
+            data = state.output.SerializeToString()
+        elif self.serialize == "json":
+            data = json.dumps(state.output).encode()
+        if self.state_buffer:
+            self.state_buffer.push(state)
         if (
             not self.episode_length
             or len(
@@ -174,7 +229,7 @@ class AgentActor(Actor):
             )
             < self.episode_length
         ):
-            return await state.output_data
+            return data
         asyncio.gather(
             *[
                 a.on_episode(
@@ -185,7 +240,7 @@ class AgentActor(Actor):
             ]
         )
         self.episode = []
-        return await state.output_data
+        return data
 
     async def stop(self, _: bytes) -> bytes:
         asyncio.gather(

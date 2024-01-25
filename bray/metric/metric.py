@@ -30,7 +30,7 @@ class Metrics:
         self.diff_metrics = {}
         self.descs = {}
         self.step, self.time_window = -1, time_window
-        self.step_model, self.get_step = None, None
+        self.step_model, self._get_step = None, None
 
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=1)
@@ -76,7 +76,7 @@ class Metrics:
     async def _get_writer_and_step(self, step=None):
         if self.writer is None:
             self._init_writer()
-        step = await self._get_step() if step is None else step
+        step = await self.get_step() if step is None else step
         return self.writer, step
 
     async def add_scalar(self, name, value, step):
@@ -150,7 +150,7 @@ class Metrics:
 
     async def dump_to_tensorboard(self):
         current_metrics = copy.deepcopy(self.metrics)
-        self.step = await self._get_step()
+        self.step = await self.get_step()
 
         for name, current in current_metrics.items():
             last = self.last_metrics.get(name, Metric())
@@ -168,16 +168,16 @@ class Metrics:
         await asyncio.sleep(self.time_window)
         asyncio.create_task(self.dump_to_tensorboard())
 
-    async def _get_step(self) -> int:
+    async def get_step(self) -> int:
         if self.step_model:
             return await self.step_model.get_step.remote(self.model_name)
-        if not self.get_step:
+        if not self._get_step:
             return self.step + 1
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(
                 None,
-                self.get_step,
+                self._get_step,
             )
         except Exception as e:
             print(f"Get step error: {e}")
@@ -187,7 +187,7 @@ class Metrics:
         if model:
             self.step_model = ray.get_actor(model.split("/")[0])
             self.model_name = model
-        self.get_step = get_step
+        self._get_step = get_step
 
 
 def build_name(name, **kwargs) -> str:
@@ -334,6 +334,12 @@ def add_graph(model, input_to_model):
     """
     remote_metrics = get_metrics_worker().remote_metrics
     remote_metrics.add_graph.remote(model, input_to_model)
+
+
+def get_step() -> int:
+    """获取全局的step，支持在集群任何地方调用"""
+    remote_metrics = get_metrics_worker().remote_metrics
+    return ray.get(remote_metrics.get_step.remote())
 
 
 def query(

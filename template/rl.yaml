@@ -1,6 +1,7 @@
 project: template
 trial: train_rl_v0
 mode: train
+dump_state: true
 
 model1:
   kind: model
@@ -31,16 +32,6 @@ agent1:
   module: template.agents.agent1
   class: Agent1
 
-serialize_agent:
-  kind: agent
-  module: template.agents.serialize_agent
-  class: SerializeAgent
-
-render_agent:
-  kind: agent
-  module: template.agents.render_agent
-  class: RenderAgent
-
 metrics_agent:
   kind: agent
   module: template.agents.metrics_agent
@@ -57,17 +48,21 @@ actor1:
   use_gateway: node
   agents:
     - agent1
-    - serialize_agent
-    - render_agent
     - metrics_agent
   episode_length: null
-  serialize: null
+  episode_save_interval: 1000
+  serialize: json
   tick_input_proto:
     module: template.tick_pb2
     message: TickInput
   tick_output_proto:
     module: template.tick_pb2
     message: TickOutput
+
+render1:
+  kind: render
+  module: template.renders.render1
+  func: render
 
 trainer1:
   kind: trainer

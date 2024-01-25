@@ -18,7 +18,7 @@ class Trainer:
         """
         raise NotImplementedError
 
-    def replay_handler(self, replay: NestedArray) -> NestedArray:
+    def handle(self, replay: NestedArray) -> NestedArray:
         """
         这里的replay来自Buffer的pop，这里可以定义对replay的预处理逻辑
         Args:

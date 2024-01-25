@@ -116,6 +116,10 @@ for name, c in FILTER_CONFIG("agent").items():
     AGENTS[name] = getattr(importlib.import_module(c["module"]), c["class"])
 
 
+if CONFIG.get("dump_state", True):
+    state_dumper = bray.RemoteStateDumper("state")
+
+
 for name, c in FILTER_CONFIG("actor").items():
     remote_actor = ACTORS[name] = bray.RemoteActor(
         name=name,
@@ -156,10 +160,12 @@ for name, c in FILTER_CONFIG("actor").items():
         name=name,
         Agents={a: AGENTS[a] for a in agents if a in AGENTS},
         episode_length=c.get("episode_length"),
+        episode_save_interval=c.get("episode_save_interval"),
         serialize=c.get("serialize"),
         TickInputProto=TickInputProto,
         TickOutputProto=TickOutputProto,
     )
+
 
 print(f"Bray launch success at config {args.config} in mode {args.mode}")
 bray.run_until_asked_to_stop()

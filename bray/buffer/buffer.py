@@ -395,7 +395,7 @@ class RemoteBuffer:
             一个 ray.ObjectRef，可以通过 ray.cancel() 取消数据源的读取
         """
         if num_workers is None:
-            cpu_num = sum([node["Resources"]["CPU"] for node in ray.nodes()])
+            cpu_num = ray.available_resources()["CPU"]
             num_workers = max(1, int(cpu_num))
 
         @ray.remote(num_cpus=0, scheduling_strategy="SPREAD")

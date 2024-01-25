@@ -1,5 +1,6 @@
 import numpy as np
 import bray
+import base64
 
 
 def gae(trajectory: list, bootstrap_value=0.0):
@@ -21,9 +22,13 @@ class Agent1(bray.Agent):
         self.name = name
 
     async def on_tick(self, state: bray.State):
-        input = await state.input
-        reward = input["reward"]
-        obs = {"image": input["obs"]}
+        obs = base64.b64decode(state.input["obs"])
+        obs = np.frombuffer(
+            obs,
+            dtype=np.float32,
+        ).reshape(42, 42, 4).transpose(2, 0, 1)
+        obs = {"image": obs}
+        reward = state.input["reward"]
         value, logit, action = await bray.forward("model1", obs)
         state.transition = {
             "state": obs,
@@ -33,11 +38,10 @@ class Agent1(bray.Agent):
             "reward": np.array(np.sign(reward)),
             "raw_reward": reward,
         }
-        output = {"action": action.tolist()}
-        state.output = output
+        state.output["action"] = action.tolist()
 
     async def on_episode(self, episode: list[bray.State], done: bool):
-        trajectory = [await s.transition for s in episode]
+        trajectory = [s.transition for s in episode]
         last_transition = trajectory.pop()
         bootstrap_value = last_transition["value"]
         gae(trajectory, bootstrap_value)

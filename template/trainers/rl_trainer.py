@@ -27,7 +27,7 @@ class Trainer1(bray.Trainer):
     def __init__(self, name, config: dict, model: torch.nn.Module):
         self.model = model
 
-    def replay_handler(self, replay: bray.NestedArray) -> bray.NestedArray:
+    def handle(self, replay: bray.NestedArray) -> bray.NestedArray:
         return replay
 
     def loss(self, replay: bray.NestedArray) -> torch.Tensor:

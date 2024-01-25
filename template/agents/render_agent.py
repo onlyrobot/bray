@@ -19,7 +19,7 @@ class RenderAgent(bray.Agent):
     async def on_tick(self, state: bray.State):
         if not self.need_render:
             return
-        input = await state.input
+        input = await state.wait("input")
         self.episode_obs.append(input["obs"])
 
     async def on_episode(self, episode: list[State], done: bool):
