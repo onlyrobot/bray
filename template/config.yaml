@@ -110,6 +110,12 @@ render1:
   module: template.renders.render1  # 渲染器的模块路径
   func: render  # 模块路径下渲染器的函数，默认为 render
 
+# 渲染器配置 - 渲染器负责将轨迹渲染为图片或视频
+action_render:
+  kind: render  # 组件类型：渲染器
+  module: template.renders.render1  # 渲染器的模块路径
+  func: action_distribution  # 模块路径下渲染器的函数，默认为 render
+
 # 训练器配置 - 定义了一个训练器的设置
 trainer1:
   kind: trainer  # 组件类型：训练器

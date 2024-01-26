@@ -8,8 +8,13 @@ parser = argparse.ArgumentParser(description="Launch Bray render")
 parser.add_argument("--config", help="Config yaml file", required=True)
 args = parser.parse_args()
 
-with open(args.config) as f:
-    CONFIG = yaml.load(f, Loader=yaml.FullLoader)
+
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+
+CONFIG, MAX_TICK = load_config(args.config), 100
 
 
 def build_trials() -> list[str]:
@@ -34,9 +39,6 @@ def select_trial(trial: str):
     return gr.update(choices=build_episodes(trial), value="")
 
 
-MAX_TICK: int = 100
-
-
 def select_episode(trial: str, episode: str, tick: int):
     episode_path = os.path.join(CONFIG["project"], trial, "episode", episode)
     global MAX_TICK
@@ -46,6 +48,10 @@ def select_episode(trial: str, episode: str, tick: int):
 
 
 def build_image(trial: str, episode: str, tick: int, render: str):
+    hidden, visible = gr.update(visible=False), gr.update(visible=True)
+    if not trial or not episode or not render:
+        return visible, hidden
+
     def load_state(path: str, tick: int) -> bray.State:
         path = os.path.join(path, f"tick-{tick}.pkl")
         with open(path, "rb") as f:
@@ -58,7 +64,6 @@ def build_image(trial: str, episode: str, tick: int, render: str):
 
     path = os.path.join(CONFIG["project"], trial, "episode", episode)
     eps = build_episode(path)
-    hidden = gr.update(visible=False)
     if render == "raw":
         return hidden, gr.update(value=str(eps[tick]), visible=True)
     module = importlib.import_module(CONFIG[render]["module"])
@@ -72,25 +77,38 @@ with gr.Blocks() as app:
         "Bray Render For " + CONFIG["project"].capitalize(),
     )
     with gr.Row():
-        trial = gr.Dropdown(
-            choices=build_trials(),
-            value=CONFIG["trial"],
-            label="Select Trial",
-        )
+        trial = gr.Dropdown(label="Select Trial")
         episode = gr.Dropdown(
-            choices=build_episodes(CONFIG["trial"]),
             label="Select Episode",
         )
-        render = gr.Dropdown(
-            choices=build_renders(),
-            label="Select Render",
-        )
+        render = gr.Dropdown(label="Select Render")
         speed = gr.Slider(
             minimum=0,
             maximum=5,
             step=0.1,
             label="Play Speed",
         )
+
+    def dynamic_reload_config():
+        global CONFIG
+        CONFIG = load_config(args.config)
+        trial = gr.update(
+            choices=build_trials(),
+            value=CONFIG["trial"],
+        )
+        episode = gr.update(
+            choices=build_episodes(CONFIG["trial"]),
+        )
+        render = gr.update(
+            choices=build_renders(),
+        )
+        return trial, episode, render
+
+    app.load(
+        dynamic_reload_config,
+        inputs=None,
+        outputs=[trial, episode, render],
+    )
     tick = gr.Slider(label="Select Tick")
     image = gr.Image(label="Render Image")
     markdown = gr.Markdown(visible=False)

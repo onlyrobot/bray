@@ -7,7 +7,7 @@ MODELS, SOURCES, BUFFERS, TRAINERS, AGENTS, ACTORS = {}, {}, {}, {}, {}, {}
 parser = argparse.ArgumentParser(description="Launch Bray for train or deploy")
 parser.add_argument("--config", help="Config yaml file", required=True)
 parser.add_argument("--trial", help="Override trial name in config file")
-parser.add_argument("--mode", help="Launch mode, train or deploy", default="train")
+parser.add_argument("--mode", help="Launch mode, train or deploy")
 args = parser.parse_args()
 
 with open(args.config) as f:
@@ -20,7 +20,7 @@ FILTER_CONFIG = lambda kind: {
     name: conf
     for name, conf in CONFIG.items()
     if (isinstance(conf, dict) and conf.get("kind") == kind)
-    and conf.get("enable") in [None, True, args.mode]
+    and conf.get("enable") in [None, True, args.mode or CONFIG["mode"]]
 }
 
 for name, c in FILTER_CONFIG("model").items():
