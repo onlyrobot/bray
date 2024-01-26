@@ -12,11 +12,12 @@ import pickle
 
 class State:
     """
-    状态类，用于存储Actor的状态，可以通过.运算符访问和设置状态的属性，
-    其中访问属性是异步的，设置属性是同步的，例如：
-    # Agent1: `state.game_id = 1`
-    # Agent2: `game_id = await state.game_id`
-    访问属性时，如果不存在，会等待属性被设置，从而实现Agent间状态同步
+    状态类，用于存储Actor的状态，可以通过.运算符或者wait方法修改和获取状态的属性，
+    其中.运算符是同步的，wait方法是异步的，例如：
+    # Agent1: `state.session = 1`
+    # Agent2: `session = state.session`
+    # Agent3: `session = await state.wait("session")`
+    wait方法访问属性时，如果不存在，会等待属性被设置，从而实现Agent间状态同步
     """
 
     def __init__(self):
@@ -80,7 +81,7 @@ class Agent:
         2. 执行当前Agent的决策逻辑，例如调用 `bray.forward` 方法
         3. 将输出放到state中，例如 `state.action = action`
         state中预设了一些属性，如下：
-        state.game_id: 当前游戏的ID
+        state.session: 当前的游戏session，类型为str
         state.data: 当前tick的原始输入数据，类型为bytes
         state.input: 当前tick反序列化后的输入数据，类型为Protobuf的Message
         state.output: 当前tick的输出数据，类型为Protobuf的Message
@@ -112,7 +113,7 @@ def StateDumper(name: str):
     print("Dump episode to: ", state_path)
 
     def dump(state: State):
-        path = os.path.join(state_path, state.game_id)
+        path = os.path.join(state_path, state.session)
         if not os.path.exists(path):
             os.makedirs(path, exist_ok=True)
         path = os.path.join(path, f"tick-{state.tick_id}.pkl")
@@ -172,7 +173,7 @@ class AgentActor(Actor):
         self.TickInputProto = TickInputProto
         self.TickOutputProto = TickOutputProto
 
-    async def start(self, game_id, _: bytes) -> bytes:
+    async def start(self, session, _: bytes) -> bytes:
         self.state_buffer = None
         if (
             self.episode_save_interval is not None
@@ -180,7 +181,7 @@ class AgentActor(Actor):
         ):
             self.state_buffer = RemoteBuffer("state")
         AgentActor.actor_start_count += 1
-        self.game_id = game_id
+        self.session = session
         self.tick_id = 0
         self.agents: dict[str:Agent] = {
             name: Agent(
@@ -195,7 +196,7 @@ class AgentActor(Actor):
     async def tick(self, data: bytes) -> bytes:
         state = State()
         state.actor_id = self.actor_id
-        state.game_id = self.game_id
+        state.session = self.session
         state.tick_id = self.tick_id
         self.tick_id += 1
         state.input = data

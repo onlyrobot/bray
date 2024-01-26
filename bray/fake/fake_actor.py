@@ -8,8 +8,8 @@ class FakeActor(bray.Actor):
         self.config = config
         print("FakeActor.__init__: ", config)
 
-    async def start(self, game_id, data):
-        print("FakeActor.start: ", game_id, data)
+    async def start(self, session, data):
+        print("FakeActor.start: ", session, data)
         return self.config["fake_actor_start_return"]
 
     async def tick(self, data):

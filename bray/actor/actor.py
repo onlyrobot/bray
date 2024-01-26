@@ -54,47 +54,47 @@ class ActorGateway:
             raise Exception("Game exceeds max num.")
         return self.Actor(*self.args, **self.kwargs)
 
-    async def _check_active(self, game_id):
+    async def _check_active(self, session):
         await asyncio.sleep(self.active_check_interval)
-        actor = self.actors.get(game_id, None)
+        actor = self.actors.get(session, None)
         if not actor:
             return
         interval = time.time() - actor.__bray_atime
         if interval < self.active_check_interval:
-            asyncio.create_task(self._check_active(game_id))
+            asyncio.create_task(self._check_active(session))
             return
         # self.inactive_actors.append(actor)
-        self.actors.pop(game_id)
-        print(f"Actor with game_id={game_id} inactive.")
+        self.actors.pop(session)
+        print(f"Actor with session={session} inactive.")
 
-    async def start(self, game_id, data) -> bytes:
-        actor = self.actors.get(game_id, None)
+    async def start(self, session, data) -> bytes:
+        actor = self.actors.get(session, None)
         if actor:
-            raise Exception(f"Game {game_id} already started.")
+            raise Exception(f"Game {session} already started.")
         try:
             actor = self.inactive_actors.pop()
         except IndexError:
             actor = self._create_worker()
-        self.actors[game_id] = actor
+        self.actors[session] = actor
         try:
             actor.__bray_atime = time.time()
-            start_ret = await actor.start(game_id, data)
+            start_ret = await actor.start(session, data)
         except:
-            self.actors.pop(game_id, None)
+            self.actors.pop(session, None)
             raise
         self.num_games += 1
-        asyncio.create_task(self._check_active(game_id))
+        asyncio.create_task(self._check_active(session))
         return start_ret
 
-    async def tick(self, game_id, data) -> bytes:
-        actor = self.actors.get(game_id, None)
+    async def tick(self, session, data) -> bytes:
+        actor = self.actors.get(session, None)
         if not actor:
-            raise Exception(f"Game {game_id} not started.")
+            raise Exception(f"Game {session} not started.")
         actor.__bray_atime = time.time()
         try:
             tick_ret = await actor.tick(data)
         except:
-            self.actors.pop(game_id, None)
+            self.actors.pop(session, None)
             raise
         merge_time_ms(f"tick/{self.name}", actor.__bray_atime)
         return tick_ret
@@ -127,22 +127,22 @@ class ActorGateway:
         if step_kind == "auto":
             return await self.auto(body)
 
-        game_id = headers.get("game_id")
-        if game_id is None:
-            raise Exception("game_id must be provided.")
+        session = headers.get("session")
+        if session is None:
+            raise Exception("session must be provided.")
 
         if step_kind == "tick":
-            return await self.tick(game_id, body)
+            return await self.tick(session, body)
 
         if step_kind == "start":
-            return await self.start(game_id, body)
+            return await self.start(session, body)
 
         if step_kind != "stop":
             raise Exception("Unknown step_kind:", step_kind)
 
-        actor = self.actors.pop(game_id, None)
+        actor = self.actors.pop(session, None)
         if not actor:
-            raise Exception(f"Game {game_id} not started.")
+            raise Exception(f"Game {session} not started.")
 
         stop_ret = await actor.stop(body)
         self.inactive_actors.append(actor)
@@ -169,12 +169,12 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             return
         if not isinstance(data, bytes):
             raise Exception("Actor return must be bytes")
-        game_id_size = len(headers["game_id"])
+        session_size = len(headers["session"])
         body_size = len(data)
         time = headers["time"]
         try:
-            header = struct.pack("!3q", game_id_size, body_size, time)
-            writer.write(header + headers["game_id"] + data)
+            header = struct.pack("!3q", session_size, body_size, time)
+            writer.write(header + headers["session"] + data)
             await writer.drain()
         except:
             traceback.print_exc()
@@ -185,7 +185,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
         try:
             data = await reader.readexactly(8 * 6)
             (
-                game_id_size,
+                session_size,
                 step_kind_size,
                 key_size,
                 token_size,
@@ -193,7 +193,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
                 time,
             ) = struct.unpack("!6q", data)
             data = await reader.readexactly(
-                game_id_size + step_kind_size + key_size + token_size + body_size
+                session_size + step_kind_size + key_size + token_size + body_size
             )
         except (
             ConnectionResetError,
@@ -208,15 +208,15 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             writer.close()
             await writer.wait_closed()
             return
-        game_id = data[0:game_id_size]
-        step_kind = data[game_id_size : game_id_size + step_kind_size]
-        offset = game_id_size + step_kind_size
+        session = data[0:session_size]
+        step_kind = data[session_size : session_size + step_kind_size]
+        offset = session_size + step_kind_size
         key = data[offset : offset + key_size]
         offset += key_size
         token = data[offset : offset + token_size]
         body = data[offset + token_size :]
         headers = {
-            "game_id": game_id,
+            "session": session,
             "step_kind": step_kind.decode(),
             "key": key.decode(),
             "token": token.decode(),

@@ -11,11 +11,11 @@ config = {
 actor_url = "http://localhost:8000/step"
 
 
-def actor_step(sess: requests.Session, game_id, step_kind, data):
+def actor_step(sess: requests.Session, session, step_kind, data):
     res = sess.post(
         actor_url,
         headers={
-            "game_id": game_id,
+            "session": session,
             "step_kind": step_kind,
         },
         data=data,
@@ -25,11 +25,11 @@ def actor_step(sess: requests.Session, game_id, step_kind, data):
     return res
 
 
-def rollout(game_id, config):
+def rollout(session, config):
     sess = requests.Session()
     res = actor_step(
         sess,
-        game_id,
+        session,
         "start",
         config["fake_gamecore_step_start_data"],
     )
@@ -40,30 +40,30 @@ def rollout(game_id, config):
         time.sleep(0.5)
         res = actor_step(
             sess,
-            game_id,
+            session,
             "tick",
             config["fake_gamecore_step_tick_data"],
         )
         print(res)
     res = actor_step(
         sess,
-        game_id,
+        session,
         "stop",
         config["fake_gamecore_step_stop_data"],
     )
     print(res)
 
 
-def endless_rollout(game_id, config):
+def endless_rollout(session, config):
     while True:
         try:
-            rollout(game_id, config)
+            rollout(session, config)
         except Exception as e:
             print(e)
             time.sleep(5)
-        game_id = "game_" + str(uuid.uuid4())
+        session = "game_" + str(uuid.uuid4())
 
 
 for i in range(2):
-    game_id = "game_" + str(uuid.uuid4())
-    Thread(target=endless_rollout, args=(game_id, config)).start()
+    session = "game_" + str(uuid.uuid4())
+    Thread(target=endless_rollout, args=(session, config)).start()

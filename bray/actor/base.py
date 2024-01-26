@@ -13,11 +13,11 @@ class Actor:
         """
         raise NotImplementedError
 
-    async def start(self, game_id, data: bytes) -> bytes:
+    async def start(self, session, data: bytes) -> bytes:
         """
         开始一局新的游戏，由Gamecore调用，请在这里初始化游戏状态
         Args:
-            game_id: 一个唯一的游戏ID，由Gamecore传入
+            session: 当前的游戏会话，由Gamecore传入
             data: 一个任意的字节串，由Gamecore传入，通常是游戏状态
         Returns:
             一个任意的字节串，通常是游戏状态

@@ -10,7 +10,7 @@ class Actor:
         """构造函数，初始化状态、模型等"""
         raise NotImplementedError
 
-    def start(self, game_id: str):
+    def start(self, session: str):
         """开始一局游戏，在结束游戏前，不要再次调用"""
         raise NotImplementedError
 
@@ -54,7 +54,7 @@ class Client:
         self.key, self.secret, self.token = key, secret, token
         self.sess = None
         self.url = f"http://{host}:{port}/step"
-        self.game_id = ""
+        self.session = ""
 
     def _request(self, step_kind, data):
         if self.sess is None:
@@ -62,7 +62,7 @@ class Client:
         res = self.sess.post(
             url=self.url,
             headers={
-                "game_id": self.game_id,
+                "session": self.session,
                 "step_kind": step_kind,
             },
             data=data,
@@ -72,15 +72,15 @@ class Client:
             raise Exception(res.text)
         return res.content
 
-    def start(self, game_id: str = None):
+    def start(self, session: str = None):
         """开始一局游戏，在上一局游戏结束前，不要再次调用"""
-        if game_id is None:
-            game_id = str(uuid.uuid4())
-        self.game_id = game_id
+        if session is None:
+            session = str(uuid.uuid4())
+        self.session = session
         if self.actor is None:
             self._request("start", b"")
         else:
-            self.actor.start(game_id)
+            self.actor.start(session)
 
     def tick(self, input: Message, output: Message):
         """

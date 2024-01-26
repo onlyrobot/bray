@@ -14,7 +14,7 @@ def load_config(path: str) -> dict:
         return yaml.load(f, Loader=yaml.FullLoader)
 
 
-CONFIG, MAX_TICK = load_config(args.config), 100
+CONFIG = load_config(args.config)
 
 
 def build_trials() -> list[str]:
@@ -41,10 +41,9 @@ def select_trial(trial: str):
 
 def select_episode(trial: str, episode: str, tick: int):
     episode_path = os.path.join(CONFIG["project"], trial, "episode", episode)
-    global MAX_TICK
-    MAX_TICK = len(os.listdir(episode_path))
-    tick = tick if tick < MAX_TICK else 0
-    return gr.update(maximum=MAX_TICK - 1, value=tick)
+    max_tick = len(os.listdir(episode_path))
+    tick = tick if tick < max_tick else 0
+    return gr.update(maximum=max_tick - 1, value=tick), max_tick
 
 
 def build_image(trial: str, episode: str, tick: int, render: str):
@@ -84,7 +83,7 @@ with gr.Blocks() as app:
         render = gr.Dropdown(label="Select Render")
         speed = gr.Slider(
             minimum=0,
-            maximum=5,
+            maximum=10,
             step=0.1,
             label="Play Speed",
         )
@@ -110,13 +109,14 @@ with gr.Blocks() as app:
         outputs=[trial, episode, render],
     )
     tick = gr.Slider(label="Select Tick")
+    max_tick = gr.Number(visible=False)
     image = gr.Image(label="Render Image")
     markdown = gr.Markdown(visible=False)
     trial.change(select_trial, inputs=[trial], outputs=[episode])
     episode.change(
         select_episode,
         inputs=[trial, episode, tick],
-        outputs=[tick],
+        outputs=[tick, max_tick],
         show_progress="hidden",
     )
     render.change(
@@ -131,24 +131,29 @@ with gr.Blocks() as app:
         outputs=[image, markdown],
         show_progress="hidden",
     )
-    counter = gr.Number(visible=False)
 
-    def play(counter, tick, speed):
-        if speed and counter % (1 / speed) < 0.2:
-            tick = tick + 1
-        return min(tick, MAX_TICK - 1)
+    def count(speed, player):
+        time.sleep(1 / speed if speed else 0.2)
+        return time.time(), player + speed
 
-    counter.change(
-        play,
-        inputs=[counter, tick, speed],
+    player = gr.Number(visible=False)
+    player.change(
+        lambda t, max_t: min(t + 1, max_t - 1),
+        inputs=[tick, max_tick],
         outputs=[tick],
+        show_progress="hidden",
+    )
+    counter = gr.Number(visible=False)
+    counter.change(
+        count,
+        inputs=[speed, player],
+        outputs=[counter, player],
         show_progress="hidden",
     )
     app.load(
         lambda: time.time(),
         inputs=None,
         outputs=[counter],
-        every=0.2,
         show_progress="hidden",
     )
 app.launch(share=True, server_port=7860)

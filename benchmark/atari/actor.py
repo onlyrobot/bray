@@ -34,11 +34,11 @@ class AtariActor(bray.Actor):
         self.value_metric = bray.Metric("value")
         self.logit_metric = bray.Metric("logit")
 
-    async def start(self, game_id, data: bytes) -> bytes:
-        self.game_id = game_id
+    async def start(self, session, data: bytes) -> bytes:
+        self.session = session
         self.trajectory = []
         self.episode_reward = 0.0
-        bray.logger.info(f"Actor.start: {game_id}")
+        bray.logger.info(f"Actor.start: {session}")
         return b"Game started."
 
     async def tick(self, data: bytes) -> bytes:
@@ -61,7 +61,7 @@ class AtariActor(bray.Actor):
         self.episode_reward += reward
         bray.merge("episode_reward", self.episode_reward)
         self._append_to_trajectory(None, None, reward, None, None, end=True)
-        bray.logger.info(f"Actor.end: {self.game_id}")
+        bray.logger.info(f"Actor.end: {self.session}")
         return b"Game ended."
 
     def _append_to_trajectory(

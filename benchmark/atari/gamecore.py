@@ -12,11 +12,11 @@ actor_url = "http://localhost:8000/step"
 gym_id = "BeamRiderNoFrameskip-v4"
 
 
-def actor_step(sess: requests.Session, game_id, step_kind, data):
+def actor_step(sess: requests.Session, session, step_kind, data):
     res = sess.post(
         actor_url,
         headers={
-            "game_id": game_id,
+            "session": session,
             "step_kind": step_kind,
         },
         data=data,
@@ -34,39 +34,39 @@ def make_env(gym_id: str):
     return env
 
 
-def rollout(env, game_id: str):
+def rollout(env, session: str):
     sess = requests.Session()
-    game_start_res = actor_step(sess, game_id, "start", b"")
+    game_start_res = actor_step(sess, session, "start", b"")
     print(game_start_res)
     done, reward = False, 0.0
     obs = env.reset()
     while not done:
         obs = base64.b64encode(obs.tobytes()).decode('utf-8')
         data = {"obs": obs, "reward": reward}
-        res = actor_step(sess, game_id, "tick", json.dumps(data))
+        res = actor_step(sess, session, "tick", json.dumps(data))
         cmd = json.loads(res)
         cmd = int(cmd["action"])
         obs, reward, done, _ = env.step(cmd)
     # final reward
     data = {"reward": reward}
-    game_end_res = actor_step(sess, game_id, "stop", json.dumps(data))
+    game_end_res = actor_step(sess, session, "stop", json.dumps(data))
     print(game_end_res)
 
 
-def endless_rollout(gym_id: str, game_id: str):
+def endless_rollout(gym_id: str, session: str):
     env = make_env(gym_id)
     while True:
-        # rollout(gym_id, game_id)
+        # rollout(gym_id, session)
         try:
-            rollout(env, game_id)
+            rollout(env, session)
         except Exception as e:
             import traceback
             traceback.print_exc()
         time.sleep(5)
-        game_id = "game_" + str(uuid.uuid4())
+        session = "game_" + str(uuid.uuid4())
 
 
 # parallel rollout (may be thread or process)
 for i in range(4):
-    game_id = "game_" + str(uuid.uuid4())
-    Thread(target=endless_rollout, args=(gym_id, game_id)).start()
+    session = "game_" + str(uuid.uuid4())
+    Thread(target=endless_rollout, args=(gym_id, session)).start()

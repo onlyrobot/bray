@@ -21,7 +21,7 @@ def make_env(gym_id: str):
     return env
 
 
-def rollout(env, game_id: str):
+def rollout(env, session: str):
     client = bray.Client("localhost", 8000)
     client.start()
     print("Game Start")
@@ -42,20 +42,20 @@ def rollout(env, game_id: str):
     print("Game Stop")
 
 
-def endless_rollout(gym_id: str, game_id: str):
+def endless_rollout(gym_id: str, session: str):
     env = make_env(gym_id)
     while True:
-        # rollout(gym_id, game_id)
+        # rollout(gym_id, session)
         try:
-            rollout(env, game_id)
+            rollout(env, session)
         except Exception as e:
             import traceback
             traceback.print_exc()
         time.sleep(5)
-        game_id = "game_" + str(uuid.uuid4())
+        session = "game_" + str(uuid.uuid4())
 
 
 # parallel rollout (may be thread or process)
 for i in range(4):
-    game_id = "game_" + str(uuid.uuid4())
-    Thread(target=endless_rollout, args=(gym_id, game_id)).start()
+    session = "game_" + str(uuid.uuid4())
+    Thread(target=endless_rollout, args=(gym_id, session)).start()

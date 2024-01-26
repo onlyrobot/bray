@@ -20,10 +20,10 @@ uint64_t be64toh(uint64_t value) {
 }
 #endif
 
-string actor_step(int sock, string game_id, string msg, string kind)
+string actor_step(int sock, string session, string msg, string kind)
 {
     // 构造请求数据包
-    int64_t size = htobe64(game_id.size());
+    int64_t size = htobe64(session.size());
     memcpy(buffer, &size, sizeof(int64_t));
     int offset = sizeof(int64_t);
     size = htobe64(kind.size());
@@ -42,8 +42,8 @@ string actor_step(int sock, string game_id, string msg, string kind)
     size = htobe64(time);
     memcpy(buffer + offset, &size, sizeof(int64_t));
     offset += sizeof(int64_t);
-    memcpy(buffer + offset, game_id.c_str(), game_id.size());
-    offset += game_id.size();
+    memcpy(buffer + offset, session.c_str(), session.size());
+    offset += session.size();
     memcpy(buffer + offset, kind.c_str(), kind.size());
     offset += kind.size();
     memcpy(buffer + offset, key.c_str(), key.size());
@@ -58,14 +58,14 @@ string actor_step(int sock, string game_id, string msg, string kind)
     // 接收服务器的响应
     recv(sock, buffer, sizeof(int64_t) * 3, 0);
     memcpy(&size, buffer, sizeof(int64_t));
-    int64_t game_id_size_recv = be64toh(size);
-    assert(be64toh(size) == game_id.size());
+    int64_t session_size_recv = be64toh(size);
+    assert(be64toh(size) == session.size());
     memcpy(&size, buffer + sizeof(int64_t), sizeof(int64_t));
     int64_t body_size_recv = be64toh(size);
     memcpy(&size, buffer + sizeof(int64_t) * 2, sizeof(int64_t));
     assert(be64toh(size) == time);
-    string game_id_recv(game_id_size_recv, ' ');
-    recv(sock, &game_id_recv[0], game_id_size_recv, 0);
+    string session_recv(session_size_recv, ' ');
+    recv(sock, &session_recv[0], session_size_recv, 0);
     string msg_recv(body_size_recv, ' ');
     recv(sock, &msg_recv[0], body_size_recv, 0);
     return move(msg_recv);
@@ -104,15 +104,15 @@ int main(int argc, char* argv[])
     connect(sock, (struct sockaddr *)&server_address, sizeof(server_address));
 
     int64_t t = static_cast<int64_t>(time(nullptr));
-    string game_id = "game_id_" + to_string(t);
-    string res = actor_step(sock, game_id, "start game", "start");
+    string session = "session_" + to_string(t);
+    string res = actor_step(sock, session, "start game", "start");
     cout << res << endl;
     for (int i = 0; i < 100; i++)
     {
-        res = actor_step(sock, game_id, "fake game state", "tick");
+        res = actor_step(sock, session, "fake game state", "tick");
         cout << res << endl;
     }
-    res = actor_step(sock, game_id, "stop game", "stop");
+    res = actor_step(sock, session, "stop game", "stop");
     cout << res << endl;
     // 关闭套接字
 #ifdef _WIN32

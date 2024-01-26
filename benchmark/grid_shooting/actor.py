@@ -30,8 +30,8 @@ class GridShootingActor(bray.Actor):
         self.target_model_reuse = 0
         self.target_model_max_reuse = target_model_max_reuse
 
-    async def start(self, game_id, data: bytes) -> bytes:
-        self.game_id = game_id
+    async def start(self, session, data: bytes) -> bytes:
+        self.session = session
         self.trajectory = []
         self.episode_reward = 0.0
         if (
@@ -44,7 +44,7 @@ class GridShootingActor(bray.Actor):
             self.target_model_reuse = 0
         else:
             self.target_model_reuse += 1
-        bray.logger.info(f"Actor.start: {game_id}")
+        bray.logger.info(f"Actor.start: {session}")
         return b"Game started."
 
     async def tick(self, data: bytes) -> bytes:
@@ -79,7 +79,7 @@ class GridShootingActor(bray.Actor):
         bray.merge("episode_reward", self.episode_reward)
         bray.merge("episode_reward", self.episode_reward, target=self.target_model.name)
         self._append_to_trajectory(None, None, reward_0, None, None, end=True)
-        bray.logger.info(f"Actor.end: {self.game_id}")
+        bray.logger.info(f"Actor.end: {self.session}")
         return b"Game ended."
 
     def _append_to_trajectory(
