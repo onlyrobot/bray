@@ -5,7 +5,7 @@ RUN apt update && apt upgrade -y && apt install -y build-essential cmake wget
 RUN wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run
 RUN sh cuda_11.8.0_520.61.05_linux.run --silent --toolkit && rm cuda_11.8.0_520.61.05_linux.run
 
-RUN apt update && apt install -y zlib1g
+RUN apt update && apt install -y zlib1g protobuf-compiler
 ENV CUDNN_FILE=cudnn-local-repo-ubuntu2204-8.9.7.29_1.0-1_amd64.deb
 COPY ${CUDNN_FILE} ./
 RUN dpkg -i ${CUDNN_FILE} && rm ${CUDNN_FILE}
@@ -24,10 +24,12 @@ RUN pip3 install ray[all]==2.9.1
 RUN pip3 install tensorflow==2.14.0
 RUN HOROVOD_WITH_GLOO=1 HOROVOD_GPU_OPERATIONS=NCCL pip3 install git+https://github.com/onlyrobot/horovod.git
 RUN pip3 install tensorboard==2.13.0 moviepy==1.0.3
-RUN pip3 install onnx==1.14.0 onnxruntime==1.15.1 onnxruntime-gpu==1.15.1
+RUN pip3 install onnx==1.15.0 onnxruntime==1.16.3 onnxruntime-gpu==1.16.3
 RUN pip3 install gradio==4.15.0 protobuf==3.20.0
 
 RUN ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa && cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys && \
     chmod 600 ~/.ssh/authorized_keys
 
 RUN echo "ulimit -n 65536\nulimit -u unlimited" >> /root/.bashrc
+
+RUN apt install curl && curl -fsSL https://code-server.dev/install.sh | sh
