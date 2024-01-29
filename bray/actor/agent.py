@@ -6,6 +6,7 @@ import ray
 from bray.actor.base import Actor
 from bray.buffer.buffer import RemoteBuffer
 from bray.master.master import register, get
+from bray.metric.metric import get_step
 import json
 import pickle
 
@@ -103,6 +104,21 @@ class Agent:
         """
 
 
+def dump(state_path, state, session2path={}):
+    if state.session not in session2path:
+        path = os.path.join(
+            state_path,
+            f"step-{get_step()}-{state.session}",
+        )
+        session2path[state.session] = path
+    path = session2path[state.session]
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+    path = os.path.join(path, f"tick-{state.tick_id}.pkl")
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+
+
 @ray.remote(num_cpus=0, name="StateDumper")
 def StateDumper(name: str):
     print("StateDumper started")
@@ -112,18 +128,10 @@ def StateDumper(name: str):
         os.makedirs(state_path, exist_ok=True)
     print("Dump episode to: ", state_path)
 
-    def dump(state: State):
-        path = os.path.join(state_path, state.session)
-        if not os.path.exists(path):
-            os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, f"tick-{state.tick_id}.pkl")
-        with open(path, "wb") as f:
-            pickle.dump(state, f)
-
     state_buffer = RemoteBuffer(name)
     for state in state_buffer:
         try:
-            dump(state)
+            dump(state_path, state)
         except Exception as e:
             print(e)
     print("StateDumper stopped")

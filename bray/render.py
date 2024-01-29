@@ -27,7 +27,8 @@ def build_trials() -> list[str]:
 
 
 def build_episodes(trial: str) -> list[str]:
-    return os.listdir(os.path.join(CONFIG["project"], trial, "episode"))
+    episodes = os.listdir(os.path.join(CONFIG["project"], trial, "episode"))
+    return sorted(episodes, key=lambda x: int(x.split("-")[1]), reverse=True)
 
 
 def build_renders() -> dict[str, callable]:
@@ -36,7 +37,7 @@ def build_renders() -> dict[str, callable]:
 
 
 def select_trial(trial: str):
-    return gr.update(choices=build_episodes(trial), value="")
+    return gr.update(choices=build_episodes(trial))
 
 
 def select_episode(trial: str, episode: str, tick: int):
