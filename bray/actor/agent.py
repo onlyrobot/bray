@@ -83,9 +83,8 @@ class Agent:
         3. 将输出放到state中，例如 `state.action = action`
         state中预设了一些属性，如下：
         state.session: 当前的游戏session，类型为str
-        state.data: 当前tick的原始输入数据，类型为bytes
-        state.input: 当前tick反序列化后的输入数据，类型为Protobuf的Message
-        state.output: 当前tick的输出数据，类型为Protobuf的Message
+        state.input: 当前tick的输入数据，类似为 bytes/proto/json
+        state.output: 当前tick的输出数据，类似为 bytes/proto/json
         Args:
             state: 当前tick的状态，可以通过.运算符访问和设置状态的属性
         """

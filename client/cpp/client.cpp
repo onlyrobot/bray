@@ -276,8 +276,11 @@ void ClientImpl::_async_tick(const std::string &data)
 
 std::string ClientImpl::start(std::string game, int agent)
 {
-    game = game == "" ? boost::uuids::to_string(gen_uuid()) : game;
-    session_ = game + "_" + std::to_string(agent);
+    if (game == "")
+    {
+        game = boost::uuids::to_string(gen_uuid());
+    }
+    session_ = game + "-" + std::to_string(agent);
     std::cout << "starting " << session_ << std::endl;
     if (sending_state_.load() != 0 ||
         pending_read_num_.load() != 0)

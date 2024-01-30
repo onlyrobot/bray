@@ -157,4 +157,4 @@ with gr.Blocks() as app:
         outputs=[counter],
         show_progress="hidden",
     )
-app.launch(share=True, server_port=7860)
+app.queue().launch(server_port=7860, inline=True)

@@ -9,10 +9,10 @@ class Master:
     async def push(self, key: str, value: object):
         self.data[key] = value
 
-    async def get(self, key: str) -> object:
+    def get(self, key: str) -> object:
         return self.data[key]
 
-    async def register(self, key: str) -> int:
+    def register(self, key: str) -> int:
         id = self.registery.get(key, 0)
         self.registery[key] = id + 1
         return id
@@ -22,7 +22,7 @@ GLOBAL_MASTER: Master = None
 
 
 def get_master() -> Master:
-    """获取全局的 Master 对象，用于便捷地跨节点共享数据和同步计数"""
+    """获取全局的 Master 对象，用于跨节点共享数据和同步计数"""
     global GLOBAL_MASTER
     if GLOBAL_MASTER is None:
         GLOBAL_MASTER = Master.options(get_if_exists=True).remote()
@@ -46,7 +46,7 @@ def register(key: str) -> int:
 
 if __name__ == "__main__":
     ray.init()
-    
+
     config = {"a": 1, "b": 2}
     ray.get(set("config", config))
     assert get("config") == config
