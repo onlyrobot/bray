@@ -1,5 +1,5 @@
 import asyncio
-import os
+import os, sys
 from typing import Any, Type
 from google.protobuf.message import Message
 import ray
@@ -174,7 +174,11 @@ class AgentActor(Actor):
         self.config = get("config")
         self.actor_id = register(self.name)
         self.episode_length = episode_length
+        if episode_length is None:
+            self.episode_length = sys.maxsize
         self.episode_save_interval = episode_save_interval
+        if episode_save_interval is None:
+            self.episode_save_interval = sys.maxsize
         self.state_buffer = None
         self.serialize = serialize
         self.TickInputProto = TickInputProto
@@ -182,10 +186,7 @@ class AgentActor(Actor):
 
     async def start(self, session, _: bytes) -> bytes:
         self.state_buffer = None
-        if (
-            self.episode_save_interval is not None
-            and AgentActor.actor_start_count % self.episode_save_interval == 0
-        ):
+        if AgentActor.actor_start_count % self.episode_save_interval == 0:
             self.state_buffer = RemoteBuffer("state")
         AgentActor.actor_start_count += 1
         self.session = session
@@ -201,6 +202,16 @@ class AgentActor(Actor):
         return b"Game Started"
 
     async def tick(self, data: bytes) -> bytes:
+        if len(self.episode) >= self.episode_length:
+            tasks = [
+                a.on_episode(
+                    self.episode,
+                    done=False,
+                )
+                for a in self.agents.values()
+            ]
+            asyncio.gather(*tasks)
+            self.episode = []
         state = State()
         state.actor_id = self.actor_id
         state.session = self.session
@@ -223,34 +234,13 @@ class AgentActor(Actor):
                 for a in self.agents.values()
             ]
         )
-        data = state.output
-        if isinstance(state.output, bytes):
-            data = state.output
-        if self.serialize == "proto":
-            data = state.output.SerializeToString()
-        elif self.serialize == "json":
-            data = json.dumps(state.output).encode()
         if self.state_buffer:
             self.state_buffer.push(state)
-        if (
-            not self.episode_length
-            or len(
-                self.episode,
-            )
-            < self.episode_length
-        ):
-            return data
-        asyncio.gather(
-            *[
-                a.on_episode(
-                    self.episode,
-                    done=False,
-                )
-                for a in self.agents.values()
-            ]
-        )
-        self.episode = []
-        return data
+        if isinstance(state.output, bytes):
+            return state.output
+        if self.serialize == "proto":
+            return state.output.SerializeToString()
+        return json.dumps(state.output).encode()
 
     async def stop(self, _: bytes) -> bytes:
         asyncio.gather(
