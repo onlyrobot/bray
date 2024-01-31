@@ -224,6 +224,8 @@ class AgentActor(Actor):
             ]
         )
         data = state.output
+        if isinstance(state.output, bytes):
+            data = state.output
         if self.serialize == "proto":
             data = state.output.SerializeToString()
         elif self.serialize == "json":
