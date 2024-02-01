@@ -20,12 +20,10 @@ void test_client(int i)
         for (int k = 0; k < 10; k++)
         {
             client->tick("hello world");
-            client->tick("world");
+            client->tick("world------------------------------");
         }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
         client->stop();
     }
-    std::this_thread::sleep_for(std::chrono::seconds(1));
     delete client;
     client = create_client(HOST, PORT);
     client->start();
@@ -34,9 +32,7 @@ void test_client(int i)
         std::cout << client->tick("hello") << std::endl;
         std::cout << client->tick("world") << std::endl;
     }
-    std::this_thread::sleep_for(std::chrono::seconds(1));
     std::cout << client->stop() << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
     delete client;
 }
 
@@ -54,6 +50,8 @@ int main()
     {
         threads[i].join();
     }
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 
     std::cout << "All client finished!" << std::endl;
 

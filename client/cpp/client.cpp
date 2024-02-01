@@ -15,7 +15,7 @@ class ClientImpl : public Client
 public:
     ClientImpl(const std::string &host, int port,
                std::function<void(std::string)> callback);
-    ~ClientImpl() = default;
+    ~ClientImpl();
 
     std::string start(std::string game, int agent) override;
     std::string tick(const std::string &data) override;
@@ -86,6 +86,23 @@ ClientImpl::ClientImpl(const std::string &host, int port,
     catch (std::exception &e)
     {
         std::cout << "connect error: " << e.what() << std::endl;
+    }
+}
+
+ClientImpl::~ClientImpl()
+{
+    auto interal = std::chrono::milliseconds(10);
+    int remain_retry = 20;
+    socket_.close();
+    while (remain_retry-- > 0 && (sending_state_.load() != 0 ||
+           pending_read_num_.load() != 0))
+    {
+        std::this_thread::sleep_for(interal);
+    }
+    if (sending_state_.load() != 0 ||
+        pending_read_num_.load() != 0)
+    {
+        std::cout << "client error" << std::endl;
     }
 }
 
