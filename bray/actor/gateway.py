@@ -1,5 +1,6 @@
 import asyncio
 from asyncio import StreamReader, StreamWriter
+import traceback
 
 import ray
 
@@ -40,6 +41,13 @@ class Gateway:
                 while data := await r.read(4096):
                     w.write(data)
                     await w.drain()
+            except (
+                ConnectionResetError,
+                asyncio.exceptions.IncompleteReadError,
+            ):
+                print("Client disconnected")
+            except:
+                traceback.print_exc()
             finally:
                 w.close()
                 await w.wait_closed()

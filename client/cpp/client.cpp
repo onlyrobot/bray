@@ -285,7 +285,7 @@ std::string ClientImpl::start(std::string game, int agent)
     if (sending_state_.load() != 0 ||
         pending_read_num_.load() != 0)
     {
-        std::cout << "start before callback done" << std::endl;
+        std::cout << "start before stop" << std::endl;
         socket_.close();
         sending_state_ = pending_read_num_ = 0;
     }
@@ -314,7 +314,7 @@ std::string ClientImpl::start(std::string game, int agent)
 
 std::string ClientImpl::tick(const std::string &data)
 {
-    if (callback_) // async mode, callback in io thread
+    if (callback_) // async mode, return immediately
     {
         _async_tick(data);
         return "";
@@ -333,10 +333,19 @@ std::string ClientImpl::tick(const std::string &data)
 
 std::string ClientImpl::stop()
 {
+    auto interal = std::chrono::milliseconds(10);
+    int remain_retry = 20;
+    while (remain_retry-- > 0 && (sending_state_.load() != 0 ||
+           pending_read_num_.load() != 0))
+    {
+        std::this_thread::sleep_for(interal);
+    }
     if (sending_state_.load() != 0 ||
         pending_read_num_.load() != 0)
     {
         std::cout << "stop before callback done" << std::endl;
+        socket_.close();
+        sending_state_ = pending_read_num_ = 0;
         return "";
     }
     _prepare_send_buffer("stop", "");

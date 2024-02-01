@@ -169,12 +169,13 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             return
         if not isinstance(data, bytes):
             raise Exception("Actor return must be bytes")
-        session_size = len(headers["session"])
+        session = headers["session"].encode()
+        session_size = len(session)
         body_size = len(data)
         time = headers["time"]
         try:
             header = struct.pack("!3q", session_size, body_size, time)
-            writer.write(header + headers["session"] + data)
+            writer.write(header + session + data)
             await writer.drain()
         except:
             traceback.print_exc()
@@ -208,7 +209,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             writer.close()
             await writer.wait_closed()
             return
-        session = data[0:session_size]
+        session = data[0:session_size].decode()
         step_kind = data[session_size : session_size + step_kind_size]
         offset = session_size + step_kind_size
         key = data[offset : offset + key_size]
