@@ -9,6 +9,7 @@ from bray.master.master import register, get
 from bray.metric.metric import get_step
 import json
 import pickle
+import random
 
 
 class State:
@@ -136,7 +137,7 @@ def StateDumper(name: str, size: int):
     print("StateDumper stopped")
 
 
-def RemoteStateDumper(name = "state", size = 1024 * 4):
+def RemoteStateDumper(name="state", size=1024 * 4):
     from ray.util.scheduling_strategies import (
         NodeAffinitySchedulingStrategy,
     )
@@ -158,7 +159,7 @@ class AgentActor(Actor):
     Episode代表了一段连续的tick，基于Episode可以计算出Agent的Replay用于训练
     """
 
-    actor_start_count: int = 0
+    episode_offset: int = None
 
     def __init__(
         self,
@@ -179,6 +180,10 @@ class AgentActor(Actor):
         self.episode_save_interval = episode_save_interval
         if episode_save_interval is None:
             self.episode_save_interval = sys.maxsize
+        AgentActor.episode_offset = random.randint(
+            0,
+            self.episode_save_interval,
+        )
         self.state_buffer = None
         self.serialize = serialize
         self.TickInputProto = TickInputProto
@@ -186,9 +191,9 @@ class AgentActor(Actor):
 
     async def start(self, session, _: bytes) -> bytes:
         self.state_buffer = None
-        if AgentActor.actor_start_count % self.episode_save_interval == 0:
+        if AgentActor.episode_offset % self.episode_save_interval == 0:
             self.state_buffer = RemoteBuffer("state")
-        AgentActor.actor_start_count += 1
+        AgentActor.episode_offset += 1
         self.session = session
         self.game, self.agent = session, ""
         if len(parts := session.split("-")) >= 3:
