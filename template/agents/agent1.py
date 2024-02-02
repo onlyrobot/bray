@@ -18,7 +18,7 @@ def gae(trajectory: list, bootstrap_value=0.0):
 
 
 class Agent1(bray.Agent):
-    def __init__(self, name, config: dict):
+    def __init__(self, name, config: dict, state: bray.State):
         self.name = name
 
     async def on_tick(self, state: bray.State):

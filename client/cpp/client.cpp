@@ -17,7 +17,7 @@ public:
                std::function<void(std::string)> callback);
     ~ClientImpl();
 
-    std::string start(std::string game, int agent) override;
+    std::string start(std::string game, std::string agent) override;
     std::string tick(const std::string &data) override;
     std::string stop() override;
 
@@ -291,12 +291,12 @@ void ClientImpl::_async_tick(const std::string &data)
     async_write(socket_, buffer(sending_buffer_), handle_write_);
 }
 
-std::string ClientImpl::start(std::string game, int agent)
+std::string ClientImpl::start(std::string game, std::string agent)
 {
     if (game == "") {
         game = boost::uuids::to_string(gen_uuid());
     }
-    session_ = game + "-agent-" + std::to_string(agent);
+    session_ = game + "-agent-" + agent;
     std::cout << "starting " << session_ << std::endl;
     if (sending_state_.load() != 0 ||
         pending_read_num_.load() != 0)

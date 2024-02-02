@@ -15,7 +15,7 @@ class MetricsAgent(bray.Agent):
     value_metric = bray.Metric("value")
     logit_metric = bray.Metric("logit")
 
-    def __init__(self, name, config: dict):
+    def __init__(self, name, config: dict, state: bray.State):
         self.name = name
         self.need_metrics = random.random() < 0.01
         self.trajectory = []

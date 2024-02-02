@@ -22,8 +22,14 @@ class State:
     wait方法访问属性时，如果不存在，会等待属性被设置，从而实现Agent间状态同步
     """
 
-    def __init__(self):
+    def __init__(self, session, actor, tick=0):
         self.conditions: dict[str : asyncio.Condition] = {}
+        self.game, self.agent = session, ""
+        self.session = session
+        if len(parts := session.split("-")) >= 3:
+            self.game = "".join(parts[:-2])
+            self.agent = parts[-1]
+        self.actor, self.tick = actor, tick
 
     def __setattr__(self, __name: str, __value: Any) -> None:
         super().__setattr__(__name, __value)
@@ -67,13 +73,14 @@ class State:
 
 
 class Agent:
-    def __init__(self, name: str, config: dict):
+    def __init__(self, name: str, config: dict, state: State):
         """
         初始化一个新的Agent，当一局新的游戏开始时，会调用这个方法，
         你可以在这里初始化一些状态
         Args:
             name: Agent的名称，由Actor传入
             config: 全局配置，可以通过 config[name] 获取当前Agent的配置
+            state: 当前session的状态，包括game, agent, session, actor属性
         """
 
     async def on_tick(self, state: State):
@@ -195,15 +202,13 @@ class AgentActor(Actor):
             self.state_buffer = RemoteBuffer("state")
         AgentActor.episode_offset += 1
         self.session = session
-        self.game, self.agent = session, ""
-        if len(parts := session.split("-")) >= 3:
-            self.game = parts[0]
-            self.agent = parts[-1]
         self.tick_id = 0
+        self.state = State(self.session, self.actor_id)
         self.agents: dict[str:Agent] = {
             name: Agent(
                 name,
                 self.config,
+                self.state,
             )
             for name, Agent in self.Agents.items()
         }
@@ -211,6 +216,25 @@ class AgentActor(Actor):
         return b"Game Started"
 
     async def tick(self, data: bytes) -> bytes:
+        state = State(self.session, self.actor_id)
+        state.tick = self.tick_id
+        self.tick_id += 1
+        state.input = data
+        if self.serialize == "proto":
+            state.input = self.TickInputProto()
+            state.input.ParseFromString(data)
+            state.output = self.TickOutputProto()
+        elif self.serialize == "json":
+            state.input = json.loads(data)
+            state.output = {}
+        await asyncio.gather(
+            *[
+                a.on_tick(
+                    state,
+                )
+                for a in self.agents.values()
+            ]
+        )
         if len(self.episode) >= self.episode_length:
             tasks = [
                 a.on_episode(
@@ -221,29 +245,7 @@ class AgentActor(Actor):
             ]
             asyncio.gather(*tasks)
             self.episode = []
-        state = State()
-        state.actor_id = self.actor_id
-        state.session = self.session
-        state.game, state.agent = self.game, self.agent
-        state.tick_id = self.tick_id
-        self.tick_id += 1
-        state.input = data
-        if self.serialize == "proto":
-            state.input = self.TickInputProto()
-            state.input.ParseFromString(data)
-            state.output = self.TickOutputProto()
-        elif self.serialize == "json":
-            state.input = json.loads(data)
-            state.output = {}
         self.episode.append(state)
-        await asyncio.gather(
-            *[
-                a.on_tick(
-                    state,
-                )
-                for a in self.agents.values()
-            ]
-        )
         if self.state_buffer:
             self.state_buffer.push(state)
         if isinstance(state.output, bytes):

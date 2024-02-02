@@ -10,7 +10,7 @@ class RenderAgent(bray.Agent):
     随机选择部分episode进行渲染
     """
 
-    def __init__(self, name, config: dict):
+    def __init__(self, name, config: dict, state: bray.State):
         self.name = name
         self.need_render = random.random() < 0.01
         # 额外保存一下episode的obs，用于生成完整游戏视频

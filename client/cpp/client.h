@@ -8,7 +8,7 @@ class Client
 {
 public:
     // 开始一局游戏，默认ID为随机生成的UUID
-    virtual std::string start(std::string game = "", int agent = 0) = 0;
+    virtual std::string start(std::string game = "", std::string agent = "") = 0;
     // 执行一次tick，如果是同步模式，返回值为tick的返回值，如果是异步模式，返回空字符串
     virtual std::string tick(const std::string &data) = 0;
     // 结束一局游戏，结束后可以重新开始新的一局
