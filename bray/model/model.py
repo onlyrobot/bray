@@ -452,7 +452,7 @@ class Model:
         onnx_step = meta.onnx_step
         if (
             (self.override_model and onnx_step == -1)
-            or (onnx_step != -1 and onnx_step < step)
+            or (onnx_step < step and meta.use_onnx != "train")
             or not os.path.exists(onnx_path)
             or not os.path.exists(outputs_path)
         ):
