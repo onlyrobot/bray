@@ -28,7 +28,7 @@ def build_trials() -> list[str]:
 
 def build_episodes(trial: str) -> list[str]:
     episodes = os.listdir(os.path.join(CONFIG["project"], trial, "episode"))
-    return sorted(episodes, key=lambda x: int(x.split("-")[1]), reverse=True)
+    return sorted(episodes, key=lambda x: int(x.split("-")[1]))
 
 
 def build_renders() -> dict[str, callable]:
@@ -70,6 +70,14 @@ def build_image(trial: str, episode: str, tick: int, render: str):
     module = importlib.reload(module)
     func = getattr(module, CONFIG[render].get("func", "render"))
     return gr.update(value=func(eps, tick), visible=True), hidden
+
+
+def try_build_image(trial: str, episode: str, tick: int, render: str):
+    try:
+        return build_image(trial, episode, tick, render)
+    except Exception as e:
+        print(f"Fail to build image at tick {tick} for {render}: {e}")
+        return gr.update(), gr.update()
 
 
 with gr.Blocks() as app:
@@ -121,13 +129,13 @@ with gr.Blocks() as app:
         show_progress="hidden",
     )
     render.change(
-        build_image,
+        try_build_image,
         inputs=[trial, episode, tick, render],
         outputs=[image, markdown],
         show_progress="hidden",
     )
     tick.change(
-        build_image,
+        try_build_image,
         inputs=[trial, episode, tick, render],
         outputs=[image, markdown],
         show_progress="hidden",

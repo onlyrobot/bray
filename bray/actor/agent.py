@@ -119,15 +119,15 @@ def dump(state_path, state, session2path={}):
 
 
 @ray.remote(num_cpus=0, name="StateDumper")
-def StateDumper(name: str):
+def StateDumper(name: str, size: int):
     print("StateDumper started")
     trial_path = ray.get_runtime_context().namespace
     state_path = os.path.join(trial_path, "episode")
     if not os.path.exists(state_path):
         os.makedirs(state_path, exist_ok=True)
-    print("Dump episode to: ", state_path)
+    print("Dump episode state to: ", state_path)
 
-    state_buffer = RemoteBuffer(name)
+    state_buffer = RemoteBuffer(name, size=size)
     for state in state_buffer:
         try:
             dump(state_path, state)
@@ -136,7 +136,7 @@ def StateDumper(name: str):
     print("StateDumper stopped")
 
 
-def RemoteStateDumper(name: str = "state"):
+def RemoteStateDumper(name = "state", size = 1024 * 4):
     from ray.util.scheduling_strategies import (
         NodeAffinitySchedulingStrategy,
     )
@@ -147,7 +147,7 @@ def RemoteStateDumper(name: str = "state"):
     )
     return StateDumper.options(
         scheduling_strategy=scheduling_local,
-    ).remote(name)
+    ).remote(name, size=size)
 
 
 class AgentActor(Actor):
@@ -190,6 +190,10 @@ class AgentActor(Actor):
             self.state_buffer = RemoteBuffer("state")
         AgentActor.actor_start_count += 1
         self.session = session
+        self.game, self.agent = session, ""
+        if len(parts := session.split("-")) >= 3:
+            self.game = parts[0]
+            self.agent = parts[-1]
         self.tick_id = 0
         self.agents: dict[str:Agent] = {
             name: Agent(
@@ -215,6 +219,7 @@ class AgentActor(Actor):
         state = State()
         state.actor_id = self.actor_id
         state.session = self.session
+        state.game, state.agent = self.game, self.agent
         state.tick_id = self.tick_id
         self.tick_id += 1
         state.input = data

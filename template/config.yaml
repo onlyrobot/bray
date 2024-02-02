@@ -14,7 +14,7 @@ model1:
   cpus_per_worker: 0.5  # 每个工作进程分配的CPU数量
   gpus_per_worker: 0.0  # 每个工作进程分配的GPU数量
   memory_per_worker: 1024  # 每个工作进程分配的内存量（以MB为单位）
-  use_onnx: null  # 是否使用ONNX格式，可选值为[train, infer, quantize, null]
+  use_onnx: train  # 是否使用ONNX格式，可选值为[train, infer, quantize, null]
   local_mode: true  # 是否在本地模式下运行，开启后模型将部署在调用方本地
   override_model: true  # 多次实验时，是否覆盖已存在的模型，改为false可以加速启动
   tensorboard_graph: true  # 是否将模型可视化到TensorBoard中

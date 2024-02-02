@@ -449,9 +449,10 @@ class Model:
 
         meta: ModelMeta = self.models[name]
         step, weights = self._get_target_step(name, -1)
+        onnx_step = meta.onnx_step
         if (
-            (self.override_model and meta.onnx_step == -1)
-            or (meta.onnx_step != -1 and meta.onnx_step < step)
+            (self.override_model and onnx_step == -1)
+            or (onnx_step != -1 and onnx_step < step)
             or not os.path.exists(onnx_path)
             or not os.path.exists(outputs_path)
         ):
@@ -472,7 +473,7 @@ class Model:
 
         onnx_train_path = os.path.join(self.trial_path, f"{self.name}/train.onnx")
         if meta.use_onnx != "train" or (
-            not self.override_model
+            (not self.override_model or onnx_step != -1)
             and os.path.exists(onnx_train_path)
             and os.path.exists(outputs_path)
         ):
