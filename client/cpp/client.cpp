@@ -279,7 +279,7 @@ std::string ClientImpl::start(std::string game, std::string agent)
     if (game == "") {
         game = boost::uuids::to_string(gen_uuid());
     }
-    session_ = game + "-agent-" + agent;
+    session_ = agent == "" ? game : game + "-agent-" + agent;
     std::cout << "starting " << session_ << std::endl;
     if (sending_state_.load() != 0 ||
         pending_read_num_.load() != 0)

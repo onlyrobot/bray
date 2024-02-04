@@ -739,6 +739,8 @@ class Model:
         if step == -1 and meta.weights:
             return meta.step, meta.weights
         ckpt_steps = [0] + meta.ckpt_steps
+        if step == -1:
+            return ckpt_steps[-1], None
         index = np.searchsorted(ckpt_steps, step, side="right")
         return ckpt_steps[max(0, index - 1)], None
 
