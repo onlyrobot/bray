@@ -140,6 +140,7 @@ trainer1:
   batch_kind: concate  # 组批次的方式，可选值为["concate", "stack", null]
   prefetch_size: 1  # 预取批次大小，为0表示不预取，一般设为1
   max_reuse: 1  # 样本最大重用次数，和预取批次大小结合使用
+  learning_rate: null  # 优化器的学习率，默认值null代表5e-4
   clip_grad_max_norm: 1.0  # 梯度裁剪的最大范数
   weights_publish_interval: 1  # 权重发布间隔，强化学习的实时性较高
   num_steps: 10000000  # 总训练步数

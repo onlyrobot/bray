@@ -88,6 +88,7 @@ trainer1:
   batch_kind: concate
   prefetch_size: 1
   max_reuse: 1
+  learning_rate: null
   clip_grad_max_norm: 1.0
   weights_publish_interval: 1
   num_steps: 10000000

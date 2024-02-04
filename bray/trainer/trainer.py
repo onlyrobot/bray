@@ -28,6 +28,7 @@ def train(
     batch_kind: ["concate", "stack", None] = "concate",
     prefetch_size: int = 1,
     max_reuse: int = 0,
+    learning_rate: float = None,
     clip_grad_max_norm: float = 1.0,
     weights_publish_interval: int = 1,
     num_steps: int = 100000000,
@@ -49,7 +50,7 @@ def train(
     trainer = Trainer(name, get("config"), model)
     # initialize optimizer
     parameters = model.parameters()
-    optimizer = torch.optim.Adam(parameters, lr=5e-4)
+    optimizer = torch.optim.Adam(parameters, lr=learning_rate or 5e-4)
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     hvd.broadcast_optimizer_state(optimizer, root_rank=0)
     optimizer = hvd.DistributedOptimizer(

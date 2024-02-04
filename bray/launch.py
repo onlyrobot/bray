@@ -101,6 +101,7 @@ for name, c in FILTER_CONFIG("trainer").items():
         batch_kind=c.get("batch_kind"),
         prefetch_size=c.get("prefetch_size"),
         max_reuse=c.get("max_reuse"),
+        learning_rate=c.get("learning_rate"),
         clip_grad_max_norm=c.get("clip_grad_max_norm"),
         weights_publish_interval=c.get("weights_publish_interval"),
         num_steps=c.get("num_steps"),
