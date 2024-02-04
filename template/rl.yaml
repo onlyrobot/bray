@@ -85,3 +85,8 @@ trainer1:
   clip_grad_max_norm: 1.0
   weights_publish_interval: 1
   num_steps: 10000000
+
+network:
+  kind: config
+  state_space: [4, 42, 42]
+  action_space: 9

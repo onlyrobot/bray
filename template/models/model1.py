@@ -70,9 +70,12 @@ def build_model(name, config: dict) -> tuple[torch.nn.Module, tuple]:
         model: PyTorch模型
         forward_args: 保证 model(*forward_args) 可以正常执行
     """
-    model = Model1()
+    cfg = config["network"]
+    model = Model1(cfg["action_space"])
 
-    forward_args = ({"image": torch.randn(1, 4, 42, 42, dtype=torch.float32)},)
+    forward_args = (
+        {"image": torch.randn(1, *cfg["state_space"], dtype=torch.float32)},
+    )
     return model, forward_args
 
 

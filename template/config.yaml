@@ -144,3 +144,9 @@ trainer1:
   clip_grad_max_norm: 1.0  # 梯度裁剪的最大范数
   weights_publish_interval: 1  # 权重发布间隔，强化学习的实时性较高
   num_steps: 10000000  # 总训练步数
+
+# 模型网络配置 - 定义了模型的输入和输出空间
+network:
+  kind: config  # 组件类型：配置
+  state_space: [4, 42, 42]  # 输入空间：[通道数, 高度, 宽度]
+  action_space: 9 # 输出空间：[动作数量]

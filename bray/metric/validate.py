@@ -1,5 +1,5 @@
 import numpy as np
-from bray.metric.metric import merge
+from bray.metric.metric import merge, add_histogram
 
 
 class Metric:
@@ -8,7 +8,7 @@ class Metric:
         name: str = "metric",
         up_bound=float("inf"),
         low_bound=float("-inf"),
-        max_samples=1000,
+        max_samples=2048,
         print_report=False,
     ):
         """
@@ -33,6 +33,9 @@ class Metric:
         self.num_samples = 0
         self.print_report = print_report
 
+    def __del__(self):
+        self.report()
+
     def _merge(self, value: float | np.ndarray):
         if not isinstance(value, np.ndarray):
             self.samples[self.num_samples] = value
@@ -47,7 +50,9 @@ class Metric:
         return None if len(value) > merge_num else value[merge_num:]
 
     def merge(self, value: float | np.ndarray):
-        assert np.all(self.low_bound <= value) and np.all(value <= self.up_bound), (
+        assert np.all(self.low_bound <= value) and np.all(
+            value <= self.up_bound,
+        ), (
             f"Metric {self.name} value {value} out of bound [{self.low_bound}, "
             f"{self.up_bound}]"
         )
@@ -76,6 +81,7 @@ class Metric:
         merge(f"{self.name}/avg", self.avg)
         for i, tile in tiles:
             merge(f"{self.name}/{i}%", tile)
+        add_histogram(self.name, samples)
         if not self.print_report:
             return
         print(

@@ -10,37 +10,27 @@ class MetricsAgent(bray.Agent):
     并且在检测到异常值时，输出到日志文件，为了避免过于频繁，
     随机选择部分episode进行渲染
     """
-
-    reward_metric = bray.Metric("reward")
-    value_metric = bray.Metric("value")
-    logit_metric = bray.Metric("logit")
-
     def __init__(self, name, config: dict, state: bray.State):
         self.name = name
         self.need_metrics = random.random() < 0.01
-        self.trajectory = []
         self.episode_reward = 0.0
+        self.reward_metric = bray.Metric("reward")
+        self.value_metric = bray.Metric("value")
+        self.logit_metric = bray.Metric("logit")
 
     async def on_tick(self, state: bray.State):
         if not self.need_metrics:
             return
         transition = await state.wait("transition")
-        self.trajectory.append(transition)
         reward = transition["reward"]
         value = transition["value"]
         logit = transition["logit"]
         self.episode_reward += transition["raw_reward"]
-        MetricsAgent.reward_metric.merge(reward)
-        MetricsAgent.value_metric.merge(value)
-        MetricsAgent.logit_metric.merge(logit)
+        self.reward_metric.merge(reward)
+        self.value_metric.merge(value)
+        self.logit_metric.merge(logit)
 
     async def on_episode(self, episode: list[State], done: bool):
-        if not done or not self.trajectory:
+        if not done or not episode:
             return
-        rewards = np.array([t["reward"] for t in self.trajectory])
-        bray.add_histogram(f"reward/{self.name}", rewards)
-        values = np.array([t["value"] for t in self.trajectory])
-        bray.add_histogram(f"value/{self.name}", values)
-        logits = np.array([t["logit"] for t in self.trajectory])
-        bray.add_histogram(f"logit/{self.name}", logits)
         bray.merge(f"episode_reward/{self.name}", self.episode_reward)
