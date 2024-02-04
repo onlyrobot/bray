@@ -68,7 +68,8 @@ class Metric:
         self._merge(remain_value)
 
     def report(self):
-        samples = self.samples[: self.cnt]
+        if not (samples := self.samples[: self.cnt]):
+            return
         tiles = [(i, np.percentile(samples, i)) for i in [30, 50, 90, 95, 99]]
         merge(f"{self.name}/max", self.max)
         merge(f"{self.name}/min", self.min)

@@ -121,7 +121,7 @@ def dump(state_path, state, session2path={}):
     path = session2path[state.session]
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
-    path = os.path.join(path, f"tick-{state.tick_id}.pkl")
+    path = os.path.join(path, f"tick-{state.tick}.pkl")
     with open(path, "wb") as f:
         pickle.dump(state, f)
 
@@ -220,13 +220,13 @@ class AgentActor(Actor):
         state.tick = self.tick_id
         self.tick_id += 1
         state.input = data
-        if self.serialize == "proto":
+        if self.serialize == "json":
+            state.input = json.loads(data)
+            state.output = {}
+        elif self.serialize == "proto":
             state.input = self.TickInputProto()
             state.input.ParseFromString(data)
             state.output = self.TickOutputProto()
-        elif self.serialize == "json":
-            state.input = json.loads(data)
-            state.output = {}
         await asyncio.gather(
             *[
                 a.on_tick(

@@ -38,7 +38,7 @@ def build_tensorflow_model(model, forward_args, forward_kwargs):
 
 
 def save_weights(weights: NestedArray, path: str):
-    tensor_weights = handle_nested_array(weights, torch.from_numpy)
+    tensor_weights = handle_nested_array(weights, torch.as_tensor)
     torch.save(tensor_weights, path)
 
 
@@ -316,6 +316,7 @@ class Model:
         forward_args: tuple[np.ndarray] = None,
         forward_kwargs: dict[str : np.ndarray] = None,
         checkpoint_interval: int = None,
+        checkpoint: str | int = None,
         max_batch_size: int = 1,
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
@@ -360,9 +361,12 @@ class Model:
             ThreadPoolExecutor(max_workers=1)
         )
 
-        if not self.override_model or torch_model is None:
+        if isinstance(checkpoint, str):
+            print(f"Model {name} loading checkpoint from {checkpoint}")
+            weights = torch.load(checkpoint)
+        elif not self.override_model or torch_model is None:
             weights = None
-        if isinstance(torch_model, torch.nn.Module):
+        elif isinstance(torch_model, torch.nn.Module):
             weights = get_torch_model_weights(torch_model)
         else:
             tensorflow_model = build_tensorflow_model(
@@ -375,7 +379,7 @@ class Model:
             save_weights(weights, weights_path)
 
         meta = ModelMeta(num_workers, use_onnx, local_mode)
-        self._initialize_model(self.name, max_batch_size, meta)
+        self._initialize_model(self.name, max_batch_size, meta, checkpoint)
 
         self.cpus_per_worker = cpus_per_worker
         self.gpus_per_worker = gpus_per_worker
@@ -398,7 +402,9 @@ class Model:
         if self.checkpoint_interval is None:
             asyncio.create_task(self._save_checkpoint())
 
-    def _build_ckpt_steps(self, name, ckpt_dir):
+    def _build_ckpt_steps(self, name, ckpt_dir, checkpoint):
+        if isinstance(checkpoint, str) or checkpoint and checkpoint <= 0:
+            return []
         clone_steps = [
             int(ckpt.split(".")[0].split("-")[2])
             for ckpt in os.listdir(os.path.join(self.trial_path, f"{name}"))
@@ -409,14 +415,16 @@ class Model:
         ]
         # union of ckpt_steps and clone_steps
         ckpt_steps = list(set(ckpt_steps).union(clone_steps))
-        return sorted(ckpt_steps)
+        ckpt_steps.sort()
+        is_valid = lambda ckpt: checkpoint is None or ckpt < checkpoint
+        return [ckpt for ckpt in ckpt_steps if is_valid(ckpt)]
 
-    def _initialize_model(self, name, max_batch_size, meta: ModelMeta):
+    def _initialize_model(self, name, max_batch_size, meta: ModelMeta, checkpoint=None):
         ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
         try:
-            ckpt_steps = self._build_ckpt_steps(name, ckpt_dir)
+            ckpt_steps = self._build_ckpt_steps(name, ckpt_dir, checkpoint)
             step = ckpt_steps[-1] if ckpt_steps else 0
             meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
         except Exception as e:
@@ -801,6 +809,7 @@ class RemoteModel:
         forward_args: tuple[np.ndarray] = (),
         forward_kwargs: dict[str : np.ndarray] = {},
         checkpoint_interval: int = None,
+        checkpoint: str | int = None,
         max_batch_size: int = 1,
         num_workers: int = None,
         cpus_per_worker: float = 0.5,
@@ -840,6 +849,7 @@ class RemoteModel:
             forward_args,
             forward_kwargs,
             checkpoint_interval,
+            checkpoint,
             max_batch_size,
             num_workers,
             cpus_per_worker,

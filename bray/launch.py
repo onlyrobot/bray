@@ -26,15 +26,13 @@ FILTER_CONFIG = lambda kind: {
 for name, c in FILTER_CONFIG("model").items():
     module = importlib.import_module(c["module"])
     model, forward_args = module.build_model(name, bray.get("config"))
-    if checkpoint := c.get("checkpoint"):
-        print(f"Model {name} loading checkpoint {checkpoint}")
-        model.load_state_dict(torch.load(checkpoint))
     remote_model = MODELS[name] = bray.RemoteModel(
         name=name,
         model=model,
         forward_args=forward_args,
         forward_kwargs={},
         checkpoint_interval=c.get("checkpoint_interval"),
+        checkpoint=c.get("checkpoint"),
         max_batch_size=c.get("max_batch_size"),
         num_workers=c.get("num_workers"),
         cpus_per_worker=c.get("cpus_per_worker"),
