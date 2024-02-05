@@ -26,6 +26,8 @@ class MetricsAgent(bray.Agent):
         value = transition["value"]
         logit = transition["logit"]
         self.episode_reward += transition["raw_reward"]
+        if state.actor != 0:
+            return
         self.reward_metric.merge(reward)
         self.value_metric.merge(value)
         self.logit_metric.merge(logit)

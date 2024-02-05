@@ -21,9 +21,9 @@ class ActorGateway:
         self.actors = {}
         self.auto_actors = None
         self.concurrency = 0
-        self.inactive_actors = [
-            Actor(*args, **kwargs) for _ in range(actors_per_worker)
-        ]
+        self.inactive_actors = list(
+            reversed([Actor(*args, **kwargs) for _ in range(actors_per_worker)])
+        )
         self.is_initialized = False
         self.active_check_interval = 60
 
@@ -63,7 +63,7 @@ class ActorGateway:
         if interval < self.active_check_interval:
             asyncio.create_task(self._check_active(session))
             return
-        # self.inactive_actors.append(actor)
+        self.inactive_actors.append(actor)
         self.actors.pop(session)
         print(f"Actor with session={session} inactive.")
 
