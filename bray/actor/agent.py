@@ -175,12 +175,12 @@ class AgentActor(Actor):
         episode_length: int = 128,
         episode_save_interval: int = None,
         serialize: str = None,
-        TickInputProto: Type[Message] = None,
-        TickOutputProto: Type[Message] = None,
+        TickInput: Type[Message] = None,
+        TickOutput: Type[Message] = None,
     ):
         self.name, self.Agents = name, Agents
         self.config = get("config")
-        self.actor_id = register(self.name)
+        self.actor_id = None
         self.episode_length = episode_length
         if episode_length is None:
             self.episode_length = sys.maxsize
@@ -193,10 +193,12 @@ class AgentActor(Actor):
         )
         self.state_buffer = None
         self.serialize = serialize
-        self.TickInputProto = TickInputProto
-        self.TickOutputProto = TickOutputProto
+        self.TickInput = TickInput
+        self.TickOutput = TickOutput
 
     async def start(self, session, _: bytes) -> bytes:
+        if self.actor_id is None:
+            self.actor_id = register(self.name)
         self.state_buffer = None
         if AgentActor.episode_offset % self.episode_save_interval == 0:
             self.state_buffer = RemoteBuffer("state")
@@ -224,9 +226,9 @@ class AgentActor(Actor):
             state.input = json.loads(data)
             state.output = {}
         elif self.serialize == "proto":
-            state.input = self.TickInputProto()
+            state.input = self.TickInput()
             state.input.ParseFromString(data)
-            state.output = self.TickOutputProto()
+            state.output = self.TickOutput()
         await asyncio.gather(
             *[
                 a.on_tick(

@@ -12,7 +12,7 @@ class MetricsAgent(bray.Agent):
     """
     def __init__(self, name, config: dict, state: bray.State):
         self.name = name
-        self.need_metrics = random.random() < 0.01
+        self.need_metrics = random.random() < 1 / 2 ** state.actor
         self.episode_reward = 0.0
         self.reward_metric = bray.Metric("reward")
         self.value_metric = bray.Metric("value")
@@ -26,8 +26,6 @@ class MetricsAgent(bray.Agent):
         value = transition["value"]
         logit = transition["logit"]
         self.episode_reward += transition["raw_reward"]
-        if state.actor != 0:
-            return
         self.reward_metric.merge(reward)
         self.value_metric.merge(value)
         self.logit_metric.merge(logit)

@@ -143,17 +143,17 @@ for name, c in FILTER_CONFIG("actor").items():
         continue
     if c.get("serialize") == "proto":
         module = c["tick_input_proto"]["module"]
-        TickInputProto = getattr(
+        TickInput = getattr(
             importlib.import_module(module),
             c["tick_input_proto"]["message"],
         )
         module = c["tick_output_proto"]["module"]
-        TickOutputProto = getattr(
+        TickOutput = getattr(
             importlib.import_module(module),
             c["tick_output_proto"]["message"],
         )
     else:
-        TickInputProto = TickOutputProto = None
+        TickInput = TickOutput = None
     remote_actor.serve(
         Actor=bray.AgentActor,
         name=name,
@@ -161,8 +161,8 @@ for name, c in FILTER_CONFIG("actor").items():
         episode_length=c.get("episode_length"),
         episode_save_interval=c.get("episode_save_interval"),
         serialize=c.get("serialize"),
-        TickInputProto=TickInputProto,
-        TickOutputProto=TickOutputProto,
+        TickInput=TickInput,
+        TickOutput=TickOutput,
     )
 
 
