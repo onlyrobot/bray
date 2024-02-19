@@ -12,23 +12,20 @@ class MetricsAgent(bray.Agent):
     """
     def __init__(self, name, config: dict, state: bray.State):
         self.name = name
-        self.need_metrics = random.random() < 1 / 2 ** state.actor
+        self.need_metric = random.random() < 1 / 2 ** state.actor
         self.episode_reward = 0.0
         self.reward_metric = bray.Metric("reward")
         self.value_metric = bray.Metric("value")
         self.logit_metric = bray.Metric("logit")
 
     async def on_tick(self, state: bray.State):
-        if not self.need_metrics:
-            return
         transition = await state.wait("transition")
-        reward = transition["reward"]
-        value = transition["value"]
-        logit = transition["logit"]
         self.episode_reward += transition["raw_reward"]
-        self.reward_metric.merge(reward)
-        self.value_metric.merge(value)
-        self.logit_metric.merge(logit)
+        if not self.need_metric:
+            return
+        self.reward_metric.merge(transition["reward"])
+        self.value_metric.merge(transition["value"])
+        self.logit_metric.merge(transition["logit"])
 
     async def on_episode(self, episode: list[State], done: bool):
         if not done or not episode:
