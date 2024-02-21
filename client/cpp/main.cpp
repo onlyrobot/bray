@@ -13,7 +13,7 @@ void callback(std::string data)
 void test_client(int i)
 {
     std::cout << "test_client " << i << std::endl;
-    Client *client = create_client(HOST, PORT, callback);
+    auto client = create_client(HOST, PORT, callback);
     for (int j = 0; j < 10; j++)
     {
         client->start();
@@ -24,7 +24,6 @@ void test_client(int i)
         }
         client->stop();
     }
-    delete client;
     client = create_client(HOST, PORT);
     client->start();
     for (int j = 0; j < 10; j++)
@@ -33,7 +32,6 @@ void test_client(int i)
         std::cout << client->tick("world") << std::endl;
     }
     std::cout << client->stop() << std::endl;
-    delete client;
 }
 
 int main()

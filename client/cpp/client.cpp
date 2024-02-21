@@ -10,14 +10,15 @@
 using error_code = boost::system::error_code;
 using namespace boost::asio;
 
-class ClientImpl : public Client
+class ClientImpl : public Client, public std::enable_shared_from_this<ClientImpl>
 {
 public:
     ClientImpl(const std::string &host, int port,
                std::function<void(std::string)> callback);
     ~ClientImpl() = default;
 
-    std::string start(std::string game, std::string agent) override;
+    std::string start(std::string game, std::string agent,
+        std::function<void(std::string)> callback) override;
     std::string tick(const std::string &data) override;
     std::string stop() override;
 
@@ -27,20 +28,19 @@ private:
     size_t _read_until(const error_code &, size_t size);
     void _handle_read(const error_code &, size_t size);
     void _connect_to_server();
-    std::string _sync_request(const std::string &send_buf);
+    std::string _sync_request(
+        std::string kind, const std::string &data);
     void _prepare_send_buffer(
         std::string kind, const std::string &data);
     size_t _parse_head(int64_t &session_size, int64_t &body_size);
     void _async_tick(const std::string &data);
 
-    std::function<void(const error_code &, size_t)>
-        handle_read_, handle_write_;
-    std::function<size_t(const error_code &, size_t)> read_until_;
     std::string host_;
     int port_;
     std::atomic<int64_t> pending_read_num_{0};
 
     ip::tcp::socket socket_;
+    std::function<void(std::string)> cur_callback_;
     std::function<void(std::string)> callback_;
     std::string session_;
     const std::string key_;
@@ -51,11 +51,11 @@ private:
     std::atomic<int64_t> sending_state_{0};
 };
 
-Client *create_client(
+std::shared_ptr<Client> create_client(
     std::string host, int port, std::function<void(std::string)> callback,
     std::string key, std::string token)
 {
-    return new ClientImpl(host, port, callback);
+    return std::make_shared<ClientImpl>(host, port, callback);
 }
 
 boost::uuids::random_generator gen_uuid;
@@ -69,18 +69,6 @@ ClientImpl::ClientImpl(const std::string &host, int port,
                        std::function<void(std::string)> callback)
     : host_(host), port_(port), socket_(ioc), callback_(callback)
 {
-    handle_read_ = std::bind(
-        &ClientImpl::_handle_read,
-        this,
-        std::placeholders::_1, std::placeholders::_2);
-    handle_write_ = std::bind(
-        &ClientImpl::_handle_write,
-        this,
-        std::placeholders::_1, std::placeholders::_2);
-    read_until_ = std::bind(
-        &ClientImpl::_read_until,
-        this,
-        std::placeholders::_1, std::placeholders::_2);
     recv_buffer_.resize(1024 * 2);
     try { _connect_to_server(); }
     catch (std::exception &e)
@@ -91,7 +79,10 @@ ClientImpl::ClientImpl(const std::string &host, int port,
 
 void ClientImpl::_try_callback(std::string &&data)
 {
-    try { callback_(data); }    // callback in io thread
+    try
+    {
+        return cur_callback_ ? cur_callback_(data) : void();
+    }
     catch (std::exception &e)
     {
         std::cout << "callback error: " << e.what() << std::endl;
@@ -108,10 +99,28 @@ void ClientImpl::_connect_to_server()
     connect(socket_, endpoints);
 }
 
-std::string ClientImpl::_sync_request(const std::string &send_buf)
+std::string ClientImpl::_sync_request(std::string kind, 
+                                    const std::string &data)
 {
-    write(socket_, buffer(send_buf));
-    size_t n = read(socket_, buffer(recv_buffer_), read_until_);
+    auto interal = std::chrono::milliseconds(10);
+    int remain_retry = 20;
+    while ((sending_state_.load() || pending_read_num_.load()) &&
+           remain_retry-- > 0 && socket_.is_open())
+    {
+        std::cout << "sync request pending" << std::endl;
+        std::this_thread::sleep_for(interal);
+    }
+    if (sending_state_.load() || pending_read_num_.load())
+    {
+        std::cout << "sync before async done" << std::endl;
+        return "";
+    }
+    _prepare_send_buffer(kind, data);
+    write(socket_, buffer(send_buffer_));
+    size_t n = read(socket_, buffer(recv_buffer_), std::bind(
+        &ClientImpl::_read_until,
+        shared_from_this(),
+        std::placeholders::_1, std::placeholders::_2));
     int64_t session_size = 0, body_size = 0;
     size_t total_size = _parse_head(session_size, body_size);
     size_t offset = sizeof(int64_t) * 3 + session_.size();
@@ -197,6 +206,10 @@ void ClientImpl::_handle_read(const error_code &error, size_t size)
         _try_callback("");
         return socket_.close();
     }
+    auto handle_read = std::bind(
+            &ClientImpl::_handle_read,
+            shared_from_this(),
+            std::placeholders::_1, std::placeholders::_2);
     if (total_size != size)
     {
         recv_buffer_.resize(total_size * 2);
@@ -204,13 +217,17 @@ void ClientImpl::_handle_read(const error_code &error, size_t size)
         return async_read(
             socket_, b,
             transfer_exactly(total_size - size),
-            handle_read_);
+            handle_read);
     }
     size_t offset = sizeof(int64_t) * 3 + session_.size();
     _try_callback(std::string(&recv_buffer_[0] + offset, body_size));
     if (pending_read_num_.fetch_sub(1) == 1)
         return;
-    async_read(socket_, buffer(recv_buffer_), read_until_, handle_read_);
+    auto read_until = std::bind(
+        &ClientImpl::_read_until,
+        shared_from_this(),
+        std::placeholders::_1, std::placeholders::_2);
+    async_read(socket_, buffer(recv_buffer_), read_until, handle_read);
 }
 
 size_t ClientImpl::_read_until(const error_code &error, size_t size)
@@ -245,10 +262,18 @@ void ClientImpl::_handle_write(const error_code &error, size_t size)
         _try_callback("");
         return socket_.close();
     }
+    auto handle_read = std::bind(
+        &ClientImpl::_handle_read,
+        shared_from_this(),
+        std::placeholders::_1, std::placeholders::_2);
+    auto read_until = std::bind(
+        &ClientImpl::_read_until,
+        shared_from_this(),
+        std::placeholders::_1, std::placeholders::_2);
     if (pending_read_num_.fetch_add(1) == 0)
     {
         async_read(socket_, buffer(recv_buffer_),
-                   read_until_, handle_read_);
+                   read_until, handle_read);
     }
     int64_t before_state = 1;
     if (sending_state_.compare_exchange_strong(before_state, 0))
@@ -257,7 +282,11 @@ void ClientImpl::_handle_write(const error_code &error, size_t size)
         return;
     send_buffer_.swap(sending_buffer_);
     sending_state_.store(1);
-    async_write(socket_, buffer(sending_buffer_), handle_write_);
+    auto handle_write = std::bind(
+        &ClientImpl::_handle_write,
+        shared_from_this(),
+        std::placeholders::_1, std::placeholders::_2);
+    async_write(socket_, buffer(sending_buffer_), handle_write);
 }
 
 void ClientImpl::_async_tick(const std::string &data)
@@ -271,27 +300,26 @@ void ClientImpl::_async_tick(const std::string &data)
     if (sending_state_.fetch_add(1) == 1) // sending w/o pending
         return;
     sending_buffer_.swap(send_buffer_);
-    async_write(socket_, buffer(sending_buffer_), handle_write_);
+    auto handle_write = std::bind(
+        &ClientImpl::_handle_write,
+        shared_from_this(),
+        std::placeholders::_1, std::placeholders::_2);
+    async_write(socket_, buffer(sending_buffer_), handle_write);
 }
 
-std::string ClientImpl::start(std::string game, std::string agent)
+std::string ClientImpl::start(std::string game, std::string agent,
+    std::function<void(std::string)> callback)
 {
-    if (game == "") {
+    if (game == "")
+    {
         game = boost::uuids::to_string(gen_uuid());
     }
     session_ = agent == "" ? game : game + "-agent-" + agent;
+    cur_callback_ = callback_ = callback ? callback : callback_;
     std::cout << "starting " << session_ << std::endl;
-    if (sending_state_.load() != 0 ||
-        pending_read_num_.load() != 0)
-    {
-        std::cout << "start before stop" << std::endl;
-        socket_.close();
-        sending_state_ = pending_read_num_ = 0;
-    }
-    _prepare_send_buffer("start", "");
     try
     {
-        return _sync_request(send_buffer_);
+        return _sync_request("start", "");
     }
     catch (std::exception &e)
     {
@@ -302,7 +330,8 @@ std::string ClientImpl::start(std::string game, std::string agent)
     try
     {
         _connect_to_server();
-        return _sync_request(send_buffer_);
+        pending_read_num_ = sending_state_ = 0;
+        return _sync_request("start", "");
     }
     catch (std::exception &e)
     {
@@ -313,15 +342,14 @@ std::string ClientImpl::start(std::string game, std::string agent)
 
 std::string ClientImpl::tick(const std::string &data)
 {
-    if (callback_) // async mode, return immediately
+    if (cur_callback_) // async mode, return immediately
     {
         _async_tick(data);
         return "";
     }
-    _prepare_send_buffer("tick", data);
     try
     {
-        return _sync_request(send_buffer_);
+        return _sync_request("tick", data);
     }
     catch (std::exception &e)
     {
@@ -332,25 +360,10 @@ std::string ClientImpl::tick(const std::string &data)
 
 std::string ClientImpl::stop()
 {
-    auto interal = std::chrono::milliseconds(10);
-    int remain_retry = 20;
-    while ((sending_state_.load() != 0 || pending_read_num_.load() != 0) &&
-           remain_retry-- > 0 && socket_.is_open())
-    {
-        std::this_thread::sleep_for(interal);
-    }
-    if (sending_state_.load() != 0 ||
-        pending_read_num_.load() != 0)
-    {
-        std::cout << "stop before callback done" << std::endl;
-        socket_.close();
-        sending_state_ = pending_read_num_ = 0;
-        return "";
-    }
-    _prepare_send_buffer("stop", "");
     try
     {
-        return _sync_request(send_buffer_);
+        cur_callback_ = nullptr; // stop callback
+        return _sync_request("stop", "");
     }
     catch (std::exception &e)
     {
