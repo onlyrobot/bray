@@ -94,7 +94,7 @@ actor1:
   agents:  # 包含的智能体
     - agent1
     - metrics_agent
-  episode_length: null  # 单次轨迹的长度，null表示不限制，取决于游戏何时结束
+  episode_length: 128  # 单次轨迹的长度，null表示不限制，取决于游戏何时结束
   episode_save_interval: 1000 # 轨迹的保存间隔，单位次，null表示不保存
   serialize: json  # 序列化器，null表示不使用，可选值为["proto", "json"]
   tick_input_proto:  # Actor的tick输入protobuf数据定义

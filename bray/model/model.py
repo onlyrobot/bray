@@ -261,17 +261,25 @@ class ModelWorker:
             )
         except Exception as e:
             print(f"Fail to subscribe weights from {self.name}.", e)
-            return
+            return await asyncio.sleep(0.1)
         if step <= self.current_step:
-            # print(f"Skip weights from {self.name}.")
+            print(f"Skip weights from {self.name}.")
             return
         self.current_step = step
         try:
-            weights = await weights
+            weights = await asyncio.wait_for(
+                weights, timeout=1,
+            )
+        except asyncio.TimeoutError:
+            print("Wait for weights timeout")
+            return
         except Exception as e:
             print(f"Fail to get weights from {self.name}.", e)
             return
         merge_time_ms(f"subscribe weights/{self.name}", beg)
+        merge(f"step/{self.name}/subscribe", step, desc={
+            "time_window_avg": "smoothed subscribe step"
+        })
         if not self.use_onnx:
             self.set_model_weights(self.torch_model, weights)
         elif self.use_onnx == "train":
@@ -298,12 +306,13 @@ class ModelMeta:
         self.num_workers, self.workers = num_workers, []
         self.max_batch_size = 1
         self.weights, self.step, self.ckpt_step = None, 0, 0
-        self.cached_weights_refs = [None for _ in range(1)]
         self.use_onnx, self.onnx_step = use_onnx, -1
         self.local_mode = local_mode
         self.pending_create_workers = 0
         self.ckpt_steps = []
         self.step_cond = asyncio.Condition()
+        self.last_sub_weights, self.last_sub_step = None, -1
+        self.cached_weights = self.cached_cached_weights = None
         self.worker_cond = asyncio.Condition()
 
 
@@ -523,9 +532,6 @@ class Model:
 
     async def set_weights(self, name, weights: list[ray.ObjectRef], step):
         meta: ModelMeta = self.models[name]
-        meta.cached_weights_refs[
-            meta.step % len(meta.cached_weights_refs)
-        ] = meta.weights  # 保存上一次的权重，避免权重发布过程中引用失效
         meta.weights = weights[0]
         meta.step = meta.step + 1 if step == -1 else step
         merge(
@@ -601,15 +607,13 @@ class Model:
                 )
             except asyncio.TimeoutError:
                 return None, meta.step
-        if meta.weights:
-            return meta.weights, meta.step
-        step, weights = self._get_target_step(name, -1)
-        if weights:
-            return weights, step
-        weights = await asyncio.get_running_loop().run_in_executor(
-            None, self._load_checkpoint, name, step
-        )
-        return ray.put(weights), step
+        if meta.last_sub_step > current_step:
+            return meta.last_sub_weights, meta.last_sub_step
+        meta.cached_cached_weights = meta.cached_weights
+        meta.cached_weights = meta.last_sub_weights
+        step = meta.last_sub_step = meta.step
+        weights = meta.last_sub_weights = meta.weights
+        return weights, step
 
     async def subscribe_workers(self, name, node_id: str = None):
         meta: ModelMeta = self.models[name]

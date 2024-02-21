@@ -49,7 +49,7 @@ actor1:
   agents:
     - agent1
     - metrics_agent
-  episode_length: null
+  episode_length: 128
   episode_save_interval: 1000
   serialize: json
   tick_input_proto:
