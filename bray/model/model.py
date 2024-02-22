@@ -73,13 +73,13 @@ class ModelWorker:
         self.forward_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
         )
+        self.subscribe_weights_interval = 0
         self.subscribe_task = asyncio.create_task(self._subscribe_weights())
         self.subscribe_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
         )
         self.is_initialized = True
         asyncio.create_task(self.finalize_async_context())
-        self.subscribe_weights_interval = 0
 
     async def finalize_async_context(self):
         while self.is_initialized:
@@ -278,6 +278,7 @@ class ModelWorker:
                 weights, timeout=1,
             )
         except asyncio.TimeoutError:
+            self.subscribe_weights_interval += 0.01
             print("Wait for weights timeout")
             return
         except Exception as e:
@@ -896,6 +897,7 @@ class RemoteModel:
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
             checkpoint_interval: 模型的checkpoint间隔，单位step，默认10分钟保存一次
+            checkpoint: 加载的检查点路径或者step编号，默认加载最新的检查点
             max_batch_size: 模型的max_batch_size
             num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
             cpus_per_worker: 每个worker的CPU核心数
