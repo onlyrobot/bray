@@ -219,9 +219,9 @@ class AgentActor(Actor):
 
     async def tick(self, data: bytes) -> bytes:
         state = State(self.session, self.actor_id)
+        state.input = data
         state.tick = self.tick_id
         self.tick_id += 1
-        state.input = data
         if self.serialize == "json":
             state.input = json.loads(data)
             state.output = {}

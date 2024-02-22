@@ -78,12 +78,17 @@ class ModelWorker:
             lambda t: None if t.cancelled() else t.result()
         )
         self.is_initialized = True
+        asyncio.create_task(self.finalize_async_context())
+        self.subscribe_weights_interval = 0
 
-    def finalize_async_context(self):
-        if not self.is_initialized:
-            return
+    async def finalize_async_context(self):
+        while self.is_initialized:
+            await asyncio.sleep(10)
+        async with self.forward_cond:
+            self.forward_cond.notify_all()
         self.forward_task.cancel()
         self.subscribe_task.cancel()
+        self.forward_task = self.subscribe_task = None
 
     def _build_ort_session(self, onnx_model):
         provider = ["CUDAExecutionProvider"] if self.num_gpus else []
@@ -231,7 +236,7 @@ class ModelWorker:
 
     async def _forward_coro(self):
         forward_cond = asyncio.Condition()
-        while True:
+        while self.is_initialized:
             await self.__forward_coro(forward_cond)
 
     async def forward(self, args, kwargs, pending=True) -> NestedArray:
@@ -254,6 +259,8 @@ class ModelWorker:
         return previous_ready_forwards[forward_index]
 
     async def __subscribe_weights(self):
+        if self.subscribe_weights_interval:
+            await asyncio.sleep(self.subscribe_weights_interval)
         beg = time.time()
         try:
             weights, step = await self.model.subscribe_weights.remote(
@@ -290,7 +297,7 @@ class ModelWorker:
     async def _subscribe_weights(self):
         if len(self.name.split("/")) != 1:
             return
-        while True:
+        while self.is_initialized:
             await self.__subscribe_weights()
 
     def get_model_step(self) -> int:
@@ -312,7 +319,6 @@ class ModelMeta:
         self.ckpt_steps = []
         self.step_cond = asyncio.Condition()
         self.last_sub_weights, self.last_sub_step = None, -1
-        self.cached_weights = self.cached_cached_weights = None
         self.worker_cond = asyncio.Condition()
 
 
@@ -447,9 +453,10 @@ class Model:
 
         if meta.use_onnx:
             onnx_model, forward_outputs = self._get_onnx_model(name)
-            print(f"Using onnx model for {name} {meta.use_onnx}.")
         else:
             onnx_model, forward_outputs = None, None
+        if meta.use_onnx and name == self.name:
+            print(f"Using onnx model for {name} {meta.use_onnx}.")
         if name != self.name:
             return
         self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
@@ -467,11 +474,11 @@ class Model:
         meta: ModelMeta = self.models[name]
         step, weights = self._get_target_step(name, -1)
         onnx_step = meta.onnx_step
-        if (
+        if (meta.use_onnx != "train" and (
             (self.override_model and onnx_step == -1)
-            or (onnx_step < step and meta.use_onnx != "train")
+            or onnx_step < step
             or not os.path.exists(onnx_path)
-            or not os.path.exists(outputs_path)
+            or not os.path.exists(outputs_path))
         ):
             weights = ray.get(weights) if weights else self._load_checkpoint(name, step)
             torch_model = torch.load(self.torch_path)
@@ -489,8 +496,9 @@ class Model:
             torch.save(forward_outputs, outputs_path)
 
         onnx_train_path = os.path.join(self.trial_path, f"{self.name}/train.onnx")
+        meta: ModelMeta = self.models[self.name]
         if meta.use_onnx != "train" or (
-            (not self.override_model or onnx_step != -1)
+            (not self.override_model or meta.onnx_step != -1)
             and os.path.exists(onnx_train_path)
             and os.path.exists(outputs_path)
         ):
@@ -509,6 +517,8 @@ class Model:
             self.forward_kwargs,
             export_params=False,
         )
+        meta.onnx_step = 0
+        torch.save(forward_outputs, outputs_path)
         with open(onnx_train_path, "rb") as f:
             onnx_model = f.read()
         return onnx_model, forward_outputs
@@ -609,7 +619,6 @@ class Model:
                 return None, meta.step
         if meta.last_sub_step > current_step:
             return meta.last_sub_weights, meta.last_sub_step
-        meta.cached_cached_weights = meta.cached_weights
         meta.cached_weights = meta.last_sub_weights
         step = meta.last_sub_step = meta.step
         weights = meta.last_sub_weights = meta.weights
@@ -902,8 +911,9 @@ class RemoteModel:
 
     def __del__(self):
         self.subscribe_task.cancel() if self.subscribe_task else None
-        if self.local_worker:
-            self.local_worker.finalize_async_context()
+        if not self.local_worker:
+            return
+        self.local_worker.is_initialized = False
 
     async def subscribe_workers(cls, model, name, workers):
         # 定义为类方法，避免引用self阻止RemoteModel被回收
@@ -984,11 +994,7 @@ class RemoteModel:
 
     @property
     def step(self) -> int:
-        """
-        获取模型的最新版本号，每次调用 `remote_model.publish_weights` 会增加版本号
-        Returns:
-            模型的版本号
-        """
+        """获取模型的最新版本号，每次调用 publish weights 会增加版本号"""
         if self.local_worker and self.local_worker.is_initialized:
             return self.local_worker.get_model_step()
         if not self.workers:
@@ -1053,9 +1059,8 @@ class RemoteModel:
             weights: 模型的权重，为一个NestedArray数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
-        # 保持权重引用，避免权重发布过程中引用失效
-        self.last_publish_weights = [ray.put(weights, _owner=self.model)]
-        self.model.set_weights.remote(self.name, self.last_publish_weights, step)
+        weights = [ray.put(weights, _owner=self.model)]
+        self.model.set_weights.remote(self.name, weights, step)
 
     async def sync(self):
         self.workers[:] = await self.model.get_workers.remote(
