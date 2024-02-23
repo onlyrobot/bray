@@ -73,7 +73,6 @@ class ModelWorker:
         self.forward_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
         )
-        self.subscribe_weights_interval = 0
         self.subscribe_task = asyncio.create_task(self._subscribe_weights())
         self.subscribe_task.add_done_callback(
             lambda t: None if t.cancelled() else t.result()
@@ -217,12 +216,8 @@ class ModelWorker:
     async def __forward_coro(self, forward_cond):
         pending_forwards = self.pending_forwards
         cond = self.forward_cond
-        try:
-            async with cond:
-                await cond.wait_for(lambda: pending_forwards)
-        except GeneratorExit:
-            # maybe python's bug when canceling a task
-            return
+        async with cond:
+            await cond.wait_for(lambda: pending_forwards)
         self.pending_forwards = []
         ready_forwards = self.ready_forwards
         self.ready_forwards = []
@@ -259,8 +254,6 @@ class ModelWorker:
         return previous_ready_forwards[forward_index]
 
     async def __subscribe_weights(self):
-        if self.subscribe_weights_interval:
-            await asyncio.sleep(self.subscribe_weights_interval)
         beg = time.time()
         try:
             weights, step = await self.model.subscribe_weights.remote(
@@ -278,7 +271,6 @@ class ModelWorker:
                 weights, timeout=1,
             )
         except asyncio.TimeoutError:
-            self.subscribe_weights_interval += 0.01
             print("Wait for weights timeout")
             return
         except Exception as e:
@@ -541,8 +533,9 @@ class Model:
         async with meta.worker_cond:
             meta.worker_cond.notify_all()
 
-    async def set_weights(self, name, weights: list[ray.ObjectRef], step):
+    async def set_weights(self, name, weights, step):
         meta: ModelMeta = self.models[name]
+        # meta.weights = ray.put(weights)
         meta.weights = weights[0]
         meta.step = meta.step + 1 if step == -1 else step
         merge(
@@ -897,7 +890,6 @@ class RemoteModel:
             forward_args: 模型forward的位置参数输入，用于初始化模型
             forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
             checkpoint_interval: 模型的checkpoint间隔，单位step，默认10分钟保存一次
-            checkpoint: 加载的检查点路径或者step编号，默认加载最新的检查点
             max_batch_size: 模型的max_batch_size
             num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
             cpus_per_worker: 每个worker的CPU核心数
@@ -1061,6 +1053,7 @@ class RemoteModel:
             weights: 模型的权重，为一个NestedArray数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
+        # self.model.set_weights.remote(self.name, weights, step)
         weights = [ray.put(weights, _owner=self.model)]
         self.model.set_weights.remote(self.name, weights, step)
 
@@ -1070,9 +1063,7 @@ class RemoteModel:
         )
 
     def warmup(self):
-        """
-        预热模型，避免第一次forward的时候耗时过长
-        """
+        """预热模型，避免第一次forward的时候耗时过长"""
         if self._forward != self._local_forward or self.local_worker:
             return
         self.local_worker = ModelWorker(self.name, self.model)
