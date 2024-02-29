@@ -200,7 +200,7 @@ async def handle_client(reader: StreamReader, writer: StreamWriter):
             ConnectionResetError,
             asyncio.exceptions.IncompleteReadError,
         ):
-            print("Client disconnected")
+            # print("Client disconnected")
             writer.close()
             await writer.wait_closed()
             return
@@ -352,5 +352,5 @@ class RemoteActor:
             for node_id, gateway in zip(self.node_ids, self.gateways)
             for i in range(self.num_workers)
         ]
-        ray.get([gateway.serve.remote() for gateway in self.gateways])
+        ray.get([gateway.serve.remote() for gateway in self.gateways if gateway])
         print(f"Actor {self.name} started at port {self.port}.")

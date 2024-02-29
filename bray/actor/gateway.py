@@ -45,7 +45,8 @@ class Gateway:
                 ConnectionResetError,
                 asyncio.exceptions.IncompleteReadError,
             ):
-                print("Client disconnected")
+                pass
+                # print("Client disconnected")
             except:
                 traceback.print_exc()
             finally:

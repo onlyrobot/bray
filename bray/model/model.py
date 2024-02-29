@@ -263,7 +263,7 @@ class ModelWorker:
             print(f"Fail to subscribe weights from {self.name}.", e)
             return await asyncio.sleep(0.1)
         if step <= self.current_step:
-            print(f"Skip weights from {self.name}.")
+            # print(f"Skip weights from {self.name}.")
             return
         self.current_step = step
         try:

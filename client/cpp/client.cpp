@@ -51,19 +51,20 @@ private:
     std::atomic<int64_t> sending_state_{0};
 };
 
+boost::uuids::random_generator gen_uuid;
+io_context ioc;
+std::thread io_thread;
+std::atomic<bool> is_initialized{false};
+
 std::shared_ptr<Client> create_client(
     std::string host, int port, std::function<void(std::string)> callback,
     std::string key, std::string token)
 {
+    if (!is_initialized.exchange(true)) {
+        io_thread = std::thread([] { io_context::work work(ioc); ioc.run(); });
+    }
     return std::make_shared<ClientImpl>(host, port, callback);
 }
-
-boost::uuids::random_generator gen_uuid;
-io_context ioc;
-std::thread io_thread([]
-                      {
-    io_context::work work(ioc);
-    ioc.run(); });
 
 ClientImpl::ClientImpl(const std::string &host, int port,
                        std::function<void(std::string)> callback)
@@ -96,6 +97,8 @@ void ClientImpl::_connect_to_server()
     auto endpoints = resolver.resolve(query);
     if (!socket_.is_open())
         socket_ = ip::tcp::socket(ioc);
+    socket_.open(ip::tcp::v4());
+    socket_.set_option(ip::tcp::no_delay(true));
     connect(socket_, endpoints);
 }
 
@@ -151,28 +154,28 @@ void ClientImpl::_prepare_send_buffer(std::string kind,
 
     // 报头第一组 gameid长度的b64编码
     int64_t offset = 0;
-    int64_t head_size = native_to_big(session_.size());
+    int64_t head_size = native_to_big(int64_t(session_.size()));
     memcpy(head_buffer, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
     // 报头第二组 kind长度的b64编码
-    head_size = native_to_big(kind.size());
+    head_size = native_to_big(int64_t(kind.size()));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
     // 报头第三组 key长度的b64编码
-    head_size = native_to_big(key_.size());
+    head_size = native_to_big(int64_t(key_.size()));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
     // 报头第四组 token长度的b64编码
-    head_size = native_to_big(token_.size());
+    head_size = native_to_big(int64_t(token_.size()));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
     // 报头第五组 正文内容长度的b64编码
-    head_size = native_to_big(data.size());
+    head_size = native_to_big(int64_t(data.size()));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
     // 报头第六组 时间戳长度的b64编码
     int64_t time = 0;
-    head_size = native_to_big(sizeof(time));
+    head_size = native_to_big(int64_t(sizeof(time)));
     memcpy(head_buffer + offset, &head_size, sizeof(int64_t));
     offset += sizeof(int64_t);
 
@@ -291,7 +294,8 @@ void ClientImpl::_handle_write(const error_code &error, size_t size)
 
 void ClientImpl::_async_tick(const std::string &data)
 {
-    if (sending_state_.load() == 2)
+    if (sending_state_.load() == 2 || pending_read_num_.load() > 1)
+    // if (sending_state_.load() || pending_read_num_.load())
     {
         std::cout << "tick before callback done" << std::endl;
         return _try_callback("");
