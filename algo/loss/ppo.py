@@ -84,7 +84,7 @@ def loss(model: torch.nn.Module, replay: bray.NestedArray):
         replay["advantage"],
     )
     target_value = advantage + value
-
+    
     outputs = model(obs, action)
     value_loss = cal_value(outputs["value"], target_value)
     bray.merge("loss/value", value_loss)
@@ -92,13 +92,14 @@ def loss(model: torch.nn.Module, replay: bray.NestedArray):
     for name in valid_action.keys():
         logit = name + "_logit"
         action_loss = cal_action(
-            name, 
-            outputs[logit], 
-            action[logit], 
-            action[name], 
-            advantage, 
-            valid_action[name]
+            name,
+            outputs[logit],
+            action[logit],
+            action[name],
+            advantage,
+            valid_action[name],
         )
         loss += action_loss
     bray.merge("loss/total", loss)
     return loss
+

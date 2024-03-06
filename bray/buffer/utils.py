@@ -48,7 +48,7 @@ class TorchTensorBuffer:
         self.buffer, self.device = buffer, device
 
     def handle(self, array):
-        tensor = torch.from_numpy(array)
+        tensor = torch.tensor(array, pin_memory=True)
         if self.device:
             tensor = tensor.to(self.device)
         return tensor
