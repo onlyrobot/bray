@@ -2,8 +2,6 @@
 
 Bray for based on ray and better than ray
 
-[项目文档](https://docs.popo.netease.com/lingxi/cdaee1b197bb457fa8d99287c9a9de25)
-
 ## 定位
 
 针对分布式强化学习在游戏场景下的落地进行优化，主要解决以下几个痛点问题：
@@ -18,13 +16,13 @@ Bray for based on ray and better than ray
 
 架构图：
 
-![架构图](./docs/img/structure.jpg)
+![架构图](./docs/img/structure.png)
 
 ## 环境依赖
 
-训练请使用镜像： `hub.fuxi.netease.com/zhiqi-gameai/bray/bray:dev`
+训练请使用镜像： [开发镜像](./docker/dev.dockerfile)
 
-部署请使用镜像：
+部署请使用镜像： [部署镜像](./docker/cpu.dockerfile)
 
 新的游戏项目接入时，在根目录下以项目名创建文件夹，文件组织形式参考 [Atari Example](./benchmark/atari/)
 
