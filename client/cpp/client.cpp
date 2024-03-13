@@ -28,6 +28,8 @@ private:
     size_t _read_until(const error_code &, size_t size);
     void _handle_read(const error_code &, size_t size);
     void _connect_to_server();
+    std::string _try_sync_request(
+        std::string kind, const std::string& data);
     std::string _sync_request(
         std::string kind, const std::string &data);
     void _prepare_send_buffer(
@@ -100,6 +102,18 @@ void ClientImpl::_connect_to_server()
     socket_.open(ip::tcp::v4());
     socket_.set_option(ip::tcp::no_delay(true));
     connect(socket_, endpoints);
+}
+
+std::string ClientImpl::_try_sync_request(std::string kind,
+                                          const std::string &data)
+{
+    try { return _sync_request(kind, data); }
+    catch (std::exception &e)
+    {
+        socket_.close();
+        std::cout << kind << " error: " << e.what() << std::endl;
+        return "";
+    }
 }
 
 std::string ClientImpl::_sync_request(std::string kind, 
@@ -314,8 +328,7 @@ void ClientImpl::_async_tick(const std::string &data)
 std::string ClientImpl::start(std::string game, std::string agent,
     std::function<void(std::string)> callback)
 {
-    if (game == "")
-    {
+    if (game == "") {
         game = boost::uuids::to_string(gen_uuid());
     }
     session_ = agent == "" ? game : game + "-agent-" + agent;
@@ -331,17 +344,14 @@ std::string ClientImpl::start(std::string game, std::string agent,
         socket_.close();
     }
     std::cout << "recovering " << session_ << std::endl;
-    try
-    {
-        _connect_to_server();
-        pending_read_num_ = sending_state_ = 0;
-        return _sync_request("start", "");
-    }
+    try { _connect_to_server(); }
     catch (std::exception &e)
     {
-        std::cout << "start error: " << e.what() << std::endl;
+        std::cout << "connect error: " << e.what() << std::endl;
         return "";
     }
+    pending_read_num_ = sending_state_ = 0;
+    return _try_sync_request("start", "");
 }
 
 std::string ClientImpl::tick(const std::string &data)
@@ -351,27 +361,11 @@ std::string ClientImpl::tick(const std::string &data)
         _async_tick(data);
         return "";
     }
-    try
-    {
-        return _sync_request("tick", data);
-    }
-    catch (std::exception &e)
-    {
-        std::cout << "tick error: " << e.what() << std::endl;
-        return "";
-    }
+    return _try_sync_request("tick", data);
 }
 
 std::string ClientImpl::stop()
 {
-    try
-    {
-        cur_callback_ = nullptr; // stop callback
-        return _sync_request("stop", "");
-    }
-    catch (std::exception &e)
-    {
-        std::cout << "stop error: " << e.what() << std::endl;
-        return "";
-    }
+    cur_callback_ = nullptr; // stop callback
+    return _try_sync_request("stop", "");
 }
