@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import copy
 from typing import Callable
+from bray.master.master import Master
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,8 +25,9 @@ class Metric:
 
 
 @ray.remote(num_cpus=0)
-class Metrics:
+class Metrics(Master):
     def __init__(self, time_window):
+        super().__init__(time_window)
         self.metrics, self.last_metrics = {}, {}
         self.diff_metrics = {}
         self.descs = {}
@@ -446,3 +448,4 @@ if __name__ == "__main__":
         add_image("test_image2", np.random.rand(3, 32, 32))
         time.sleep(0.1)
     ray.get(get_metrics_worker().flush_and_reset_merge_interval())
+    print("Test success!")
