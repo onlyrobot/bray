@@ -44,6 +44,7 @@ from bray.metric.metric import (
 )
 from bray.metric.validate import Metric
 from bray.master.master import (
+    get_master,
     set,
     get,
     register,
@@ -74,7 +75,8 @@ def init(project: str, trial: str, **kwargs):
 
     # 启动 Metrics 保证指标输出到Driver节点
     get_metrics_worker()
-
+    # 启动 Master 保证日志写入到Driver节点
+    get_master()
     print("bray init success with path: ", trial_path)
 
 

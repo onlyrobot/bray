@@ -75,7 +75,7 @@ def cal_action(
     loss += 0.5 * kl_loss
 
 
-def loss(model: torch.nn.Module, replay: bray.NestedArray):
+def loss(model: torch.nn.Module, replay: dict):
     obs, value, action, valid_action, advantage = (
         replay["obs"],
         replay["value"],
@@ -102,4 +102,3 @@ def loss(model: torch.nn.Module, replay: bray.NestedArray):
         loss += action_loss
     bray.merge("loss/total", loss)
     return loss
-
