@@ -1,4 +1,4 @@
-from typing import Iterator, Callable
+from typing import Iterator, Callable, List
 import torch
 import numpy as np
 from threading import Thread, Condition
@@ -9,48 +9,73 @@ from bray.utils.nested_array import (
     handle_nested_array,
 )
 
-from bray.metric.metric import merge
+from bray.master.master import merge
 
 
-class BatchBuffer:
-    def __init__(
-        self,
-        buffer: Iterator[NestedArray],
-        batch_size: int,
-        kind: ["stack", "concate", None] = "stack",
-    ):
-        """
-        Args:
-            buffer: 迭代器，样本的shape和dtype要求参考kind参数
-            batch_size: batch大小
-            kind: batch的拼接方式，可选：
-                1. "stack": 表示堆叠，要求每个样本的shape和dtype相同
-                2. "concate": 表示拼接，样本除了第一维度外，其他维度必须相同
-                3. None: 表示直接返回样本的list
-        """
-        self.buffer = buffer
-        self.batch_size, self.kind = batch_size, kind
+class ListBuffer:
+    def __init__(self, buffer: Iterator[NestedArray], size):
+        self.buffer, self.size = buffer, size
 
     def __next__(self) -> NestedArray:
-        batch = []
-        for _ in range(self.batch_size):
-            batch.append(next(self.buffer))
-        if self.kind is None:
-            return batch
-        return make_batch(batch, concate=self.kind != "stack")
+        return [next(self.buffer) for _ in range(self.size)]
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        return self
+
+
+def to_paged_memory(nested_array: NestedArray):
+    return handle_nested_array(
+        nested_array, 
+        lambda x: torch.as_tensor(x).pin_memory().numpy())
+
+
+class StackBuffer:
+    def __init__(self, buffer: Iterator[NestedArray], size):
+        self.last_batch = None
+        self.buffer = ListBuffer(buffer, size)
+
+    def __next__(self) -> NestedArray:
+        batch = make_batch(
+            next(self.buffer), out=self.last_batch
+        )
+        if self.last_batch is None:
+            self.last_batch = (to_paged_memory(batch) if 
+                torch.cuda.is_available() else batch)
+        self.last_batch = batch
+        return self.last_batch
+
+    def __iter__(self) -> Iterator[NestedArray]:
+        return self
+
+
+class ConcateBuffer:
+    def __init__(self, buffer: Iterator[NestedArray], size):
+        self.last_batch = None
+        self.buffer = ListBuffer(buffer, size)
+
+    def __next__(self) -> NestedArray:
+        batch = make_batch(
+            next(self.buffer), concate=True, out=self.last_batch
+        )
+        if self.last_batch is None:
+            self.last_batch = (to_paged_memory(batch) if 
+                torch.cuda.is_available() else batch)
+        return self.last_batch
 
     def __iter__(self) -> Iterator[NestedArray]:
         return self
 
 
 class TorchTensorBuffer:
-    def __init__(self, buffer: Iterator[NestedArray], device=None):
+    def __init__(
+        self, buffer: Iterator[NestedArray], device=None
+    ):
         self.buffer, self.device = buffer, device
 
     def handle(self, array):
-        tensor = torch.tensor(array, pin_memory=True)
+        tensor = torch.as_tensor(array)
         if self.device:
-            tensor = tensor.to(self.device)
+            tensor = tensor.to(self.device, non_blocking=True)
         return tensor
 
     def __next__(self) -> NestedArray:
@@ -60,23 +85,9 @@ class TorchTensorBuffer:
         return self
 
 
-class TensorFlowTensorBuffer:
-    def __init__(self, buffer: Iterator[NestedArray]):
-        self.buffer = buffer
-
-    def __next__(self) -> NestedArray:
-        import tensorflow as tf
-
-        return handle_nested_array(next(self.buffer), tf.identity)
-
-    def __iter__(self) -> Iterator[NestedArray]:
-        return self
-
-
 class CallbackBuffer:
     def __init__(
-        self,
-        buffer: Iterator[NestedArray],
+        self, buffer: Iterator[NestedArray],
         callback: Callable[[NestedArray], NestedArray],
     ):
         self.buffer, self.callback = buffer, callback
@@ -88,30 +99,11 @@ class CallbackBuffer:
         return self
 
 
-class ReuseBuffer:
-    def __init__(self, buffer: Iterator[NestedArray]):
-        self.buffer = buffer
-        self.iterator = None
-
-    def __next__(self, reuse=False) -> NestedArray:
-        try:
-            return next(self.iterator)
-        except StopIteration:
-            if reuse:
-                raise f"Reuse buffer is not reusable {self.buffer}"
-            self.iterator = iter(self.buffer)
-            return self.__next__(True)
-
-    def __iter__(self) -> Iterator[NestedArray]:
-        self.iterator = iter(self.buffer)
-        return self
-
-
 class PrefetchBuffer:
+    is_reuse: bool = False
     def __init__(self, buffer: Iterator[NestedArray], size=1, max_reuse=0, name=""):
         """
         Args:
-            buffer: 迭代器
             size: 缓冲区大小，即预取的样本数量，最小为1
             max_reuse: 样本的最大重用次数，设为0关闭重用
             name: buffer名称，用于reuse指标的统计
@@ -144,6 +136,7 @@ class PrefetchBuffer:
             and self.remain_reuse > 0
         ):
             self.remain_reuse -= 1
+            PrefetchBuffer.is_reuse = True
             return self.last_replay
         with self.cond:
             self.cond.wait_for(lambda: len(self.replays) > 0)
@@ -151,6 +144,7 @@ class PrefetchBuffer:
             self.last_reuse = self.max_reuse - self.remain_reuse
             self.remain_reuse = self.max_reuse
             self.cond.notify()
+        PrefetchBuffer.is_reuse = False
         return self.last_replay
 
     def __iter__(self) -> Iterator[NestedArray]:
@@ -158,7 +152,7 @@ class PrefetchBuffer:
 
 
 class SampleBuffer:
-    def __init__(self, buffers: list[Iterator], weights=None):
+    def __init__(self, buffers: List[Iterator], weights=None):
         """
         Args:
             buffers: 迭代器列表

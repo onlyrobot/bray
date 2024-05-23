@@ -1,4 +1,4 @@
-from typing import NewType, Callable
+from typing import NewType, Callable, List
 import numpy as np
 
 # 可以是单个 numpy.ndarray，也可以是 numpy.ndarray 的列表，
@@ -47,7 +47,7 @@ def handle_nested_array(inputs, handler: Callable, type_check=False, sort_keys=F
         return handler(inputs)
 
 
-def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> list[np.ndarray]:
+def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> List[np.ndarray]:
     flatten_arrays = []
 
     def flatten(array):
@@ -58,7 +58,7 @@ def flatten_nested_array(inputs: NestedArray, sort_keys=False) -> list[np.ndarra
 
 
 def unflatten_nested_array(
-    inputs: NestedArray, flatten_arrays: list[NestedArray], index=-1, sort_keys=False
+    inputs: NestedArray, flatten_arrays: List[NestedArray], index=-1, sort_keys=False
 ) -> NestedArray:
     def unflatten(_):
         nonlocal index
@@ -69,7 +69,7 @@ def unflatten_nested_array(
 
 
 def make_batch(
-    nested_arrays: list[NestedArray], concate=False, parts: list[int] = None
+    nested_arrays: List[NestedArray], concate=False, parts: List[int] = None, out=None
 ) -> NestedArray:
     """
     Args:
@@ -78,15 +78,16 @@ def make_batch(
         parts: 如果是concate，这里输出了每个数组的维度，用于拆分
     """
     flatten_arrays = [flatten_nested_array(arrays) for arrays in nested_arrays]
-    arrays = zip(*flatten_arrays)
+    arrays = list(zip(*flatten_arrays))
+    flatten_out = flatten_nested_array(out) if out else [None] * len(arrays)
     try:
         batch = np.concatenate if concate else np.stack
-        batch_arrays = [batch(a) for a in arrays]
+        batch_arrays = [batch(a, out=o) for a, o in zip(arrays, flatten_out)]
     except ValueError:
         print("Error: the arrays have different shapes or dtypes.")
         print("Batch signatures: ")
         for signature in handle_nested_array(
-            nested_arrays, lambda x: (x.shape, x.dtype)
+            nested_arrays, lambda x: (x.shape, x.dtype) if isinstance(x, np.ndarray) else x
         ):
             print(signature)
         raise
@@ -97,7 +98,7 @@ def make_batch(
     )
 
 
-def split_batch(batch: NestedArray, parts: list[int] = None) -> list[NestedArray]:
+def split_batch(batch: NestedArray, parts: List[int] = None) -> List[NestedArray]:
     flatten_arrays = flatten_nested_array(batch)
     if parts is not None:
         indices = np.cumsum(parts)
@@ -135,6 +136,7 @@ if __name__ == "__main__":
     split_array = split_batch(batch)
     np.testing.assert_array_equal(split_array[0][0], nested_arrays[0][0])
     batch2 = make_batch(nested_arrays, concate=True)
+    batch3 = make_batch(nested_arrays, concate=True, out=batch2)
     split_array2 = split_batch(batch2)
     np.testing.assert_array_equal(split_array2[0][0], nested_arrays[0][0][0])
     np.testing.assert_array_equal(split_array2[0][1], nested_arrays[0][1][0])

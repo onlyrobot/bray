@@ -1,3 +1,4 @@
+from typing import Tuple, Dict
 import torch
 import onnxruntime as ort
 import numpy as np
@@ -11,8 +12,8 @@ from bray.utils.nested_array import (
 def export_onnx(
     model: torch.nn.Module,
     path: str,
-    forward_args: tuple[np.ndarray] = (),
-    forward_kwargs: dict[str, np.ndarray] = {},
+    forward_args: Tuple[np.ndarray] = (),
+    forward_kwargs: Dict[str, np.ndarray] = {},
     export_params: bool = False,
     check_consistency: bool = True,
     relative_diff: float = 1e-5,
