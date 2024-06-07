@@ -22,6 +22,13 @@ from ray.train import (
     RunConfig, ScalingConfig, get_context, CheckpointConfig
 )
 
+# from ray.air.config import (
+#     RunConfig, ScalingConfig, CheckpointConfig
+# )
+# from ray.air import session
+
+# get_context = lambda: session
+
 def train_loop_per_worker(
     name: str,
     Trainer: Type[Trainer],
@@ -86,8 +93,7 @@ def train_loop_per_worker(
     buffers = [
         TorchTensorBuffer(b, device=device) for b in buffers
     ]
-    buffers = [
-        PrefetchBuffer(
+    buffers = [PrefetchBuffer(
             buffers[i],
             size=max(1, prefetch_size),
             max_reuse=max_reuse,
@@ -131,9 +137,9 @@ def train_loop_per_worker(
         if remote_eval_buffer and i % eval_interval == 0:
             eval_at_step(i)
         next_beg, replay = time.time(), next(buffer)
-        merge_time_ms(f"replay/{name}", next_beg)
-        if not PrefetchBuffer.is_reuse:
-            model_step += world_size * batch_size * buffer_batch_size
+        if world_rank == 0:
+            merge_time_ms(f"replay/{name}", next_beg)
+        model_step += world_size * batch_size * buffer_batch_size
         forward_beg = time.time()
         # zero grad, loss backward and optimizer step
         optimizer.zero_grad()
@@ -144,27 +150,26 @@ def train_loop_per_worker(
             model.parameters(), max_norm=clip_grad_max_norm
         )
         optimizer.step()
-        if world_rank != 0:
-            continue
+        if world_rank != 0: continue
         merge_time_ms(f"train/{name}", forward_beg)
         if i % 10 == 0:
             print(f"Trainer {name} step {i}, loss: {loss.item()}")
         if i % weights_publish_interval != 0:
             continue
+        publish_beg = time.time()
         module = model.module if world_size > 1 else model
         remote_model.publish_weights(
             get_torch_model_weights(module), model_step
         )
+        merge_time_ms(f"publish/{name}", publish_beg)
     print(f"Trainer {name} train all {num_steps} steps done!")
 
 
 def train(name: str, torch_trainer: TorchTrainer):
     @ray.remote(num_cpus=0)
     def Trainer():
-        try:
-            return torch_trainer.fit()
-        except Exception as e:
-            pass
+        try: return torch_trainer.fit()
+        except Exception as e: pass
         print(f"Fail to fit Trainer {name}: {e}")
         raise e
     return Trainer.options(
@@ -184,8 +189,7 @@ def RemoteTrainer(
     """
     total_gpus = ray.available_resources().get("GPU", 0)
 
-    if use_gpu is None:
-        use_gpu = total_gpus > 0
+    if use_gpu is None: use_gpu = total_gpus > 0
 
     num_workers = num_workers if num_workers else total_gpus
 

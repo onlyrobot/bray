@@ -43,13 +43,13 @@ class Master:
                 self.data = pickle.load(f)
         self.flush_cond = asyncio.Condition()
 
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1))
         asyncio.create_task(self.flush())
 
         self.time_window = time_window
-        self.metrics, self.last_metrics = {}, {}
-        # diff metrics used for time window query
+        self.metrics = self.get("metrics", {})
+        self.last_metrics = copy.deepcopy(self.metrics)
         self.diff_metrics = {}
         self.step, self._get_global_step = self.get("step", -1), None
         self.descs = {}
@@ -59,8 +59,7 @@ class Master:
         self.writer = None
         asyncio.create_task(self.start_tensorboard())
 
-    def get_trial_launch_path(self) -> str:
-        return self.launch_path
+    def get_trial_launch_path(self) -> str: return self.launch_path
 
     def _init_writer(self):
         from torch.utils.tensorboard import SummaryWriter
@@ -79,8 +78,7 @@ class Master:
             self.descs[name] = desc
         if m := self.metrics.get(name, None):
             m.merge(metric)
-        else:
-            self.metrics[name] = metric
+        else: self.metrics[name] = metric
 
     async def batch_merge(self, metrics: Dict):
         for name, metric in metrics.items():
@@ -120,8 +118,8 @@ class Master:
 
     async def add_graph(self, model, input_to_model):
         writer, _ = await self._get_writer_and_step()
-        writer.add_graph(
-            model.eval(), input_to_model, use_strict_trace=False)
+        writer.add_graph(model.requires_grad_(False).eval(), 
+            input_to_model, use_strict_trace=False)
 
     def _dump_metric(self, name, metric):
         last = self.last_metrics.get(name, Metric())
@@ -129,32 +127,32 @@ class Master:
         step = self.step if diff.step is None else diff.step
         self.diff_metrics[name] = diff
 
+        writer = self.writer
         if (desc := self.descs.get(name)) is None:
-            if diff.cnt == 0:
-                return
+            if diff.cnt == 0: return
             avg = diff.sum / diff.cnt
-            return self.writer.add_scalar(name, avg, step)
+            return writer.add_scalar(name, avg, step)
         if d := desc.get("sum"):
-            self.writer.add_scalar(
+            writer.add_scalar(
                 f"{name} -- {d}", metric.sum, step)
         if d := desc.get("cnt"):
-            self.writer.add_scalar(
+            writer.add_scalar(
                 f"{name} -- {d}", metric.cnt, step)
         if (d := desc.get("avg")) and metric.cnt:
             avg = metric.sum / metric.cnt
-            self.writer.add_scalar(
+            writer.add_scalar(
                 f"{name} -- {d}", avg, step)
         if d := desc.get("time_window_sum"):
-            self.writer.add_scalar(
+            writer.add_scalar(
                 f"{name} -- {d}", diff.sum, step
             )
         if d := desc.get("time_window_cnt"):
-            self.writer.add_scalar(
+            writer.add_scalar(
                 f"{name} -- {d}", diff.cnt, step
             )
         if (d := desc.get("time_window_avg")) and diff.cnt:
             avg = diff.sum / diff.cnt
-            self.writer.add_scalar(f"{name} -- {d}", avg, step)
+            writer.add_scalar(f"{name} -- {d}", avg, step)
 
     async def dump_to_tensorboard(self):
         cur_metrics = copy.deepcopy(self.metrics)
@@ -164,6 +162,7 @@ class Master:
         for name, cur in cur_metrics.items():
             self._dump_metric(name, cur)
         self.last_metrics = cur_metrics
+        self.set("metrics", cur_metrics)
 
         await asyncio.sleep(self.time_window)
         asyncio.create_task(self.dump_to_tensorboard())
@@ -182,7 +181,7 @@ class Master:
     async def set_tensorboard_step(self, get_global_step):
         self._get_global_step = get_global_step
 
-    def set(self, key: str, value: object):
+    def set(self, key: str, value: object): 
         self.data[key] = value
 
     def get(self, key: str, default: object) -> object:
@@ -197,10 +196,8 @@ class Master:
             '%Y-%m-%d %H:%M:%S', time.localtime()
         )
         self.msgs.append(f"{timestamp} {msg}\n")
-        if not flush:
-            return
-        async with self.flush_cond:
-            self.flush_cond.notify()
+        if not flush: return
+        async with self.flush_cond: self.flush_cond.notify()
 
     def _flush_log_and_data(self):
         self.msgs, msgs = [], self.msgs
@@ -210,28 +207,16 @@ class Master:
             f.writelines(msgs)
         
     async def wait_flush(self):
-        try:
-            await asyncio.wait_for(
-                self.flush_cond.wait(), self.time_window,
-            )
-        except asyncio.TimeoutError:
-            pass
+        try: await asyncio.wait_for(
+            self.flush_cond.wait(), self.time_window)
+        except asyncio.TimeoutError: pass
     
     async def flush(self):
-        loop = asyncio.get_running_loop()
         async with self.flush_cond: await self.wait_flush()
-        
-        def flush_log_and_data():
-            self.msgs, msgs = [], self.msgs
-            with open(self.data_path, "wb") as f:
-                pickle.dump(self.data, f)
-            with open(self.log_path, "+a") as f:
-                f.writelines(msgs)
-        try:
-            await loop.run_in_executor(
-                None,
-                flush_log_and_data,
-            )
+        loop = asyncio.get_running_loop()
+        try: await loop.run_in_executor(
+            None, self._flush_log_and_data,
+        )
         except Exception as e:
             print(f"Log to {self.log_path} error: {e}")
         asyncio.create_task(self.flush())
@@ -248,7 +233,6 @@ class Worker:
     def __new__(cls, time_window: int = 60):
         if cls.global_cached_worker:
             return cls.global_cached_worker
-
         self = super().__new__(cls)
         scheduling_local = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(), soft=False)
@@ -271,9 +255,11 @@ class Worker:
         merge_time = time.time()
         merge_time_interval = merge_time - self.last_merge_time
 
+        merge_remote_interval = int((self.merge_count - 1) * 60 
+            / merge_time_interval / 2)
         self.merge_remote_interval = 2 + min(
             self.merge_count + self.merge_count // 3,
-            int((self.merge_count - 1) * 60 / merge_time_interval / 2),
+            merge_remote_interval,
         )
         self.merge_count = 0
         self.last_merge_time = merge_time
@@ -283,14 +269,12 @@ class Worker:
 
     def merge(self, name, metric, desc, **kwargs):
         self.merge_count += 1
-        if kwargs:
-            name = build_name(name, **kwargs)
+        if kwargs: name = build_name(name, **kwargs)
         m = self.cached_metrics.get(name, None)
         if not m:
             self.master.merge.remote(name, metric, desc)
             self.cached_metrics[name] = Metric()
-        else:
-            m.merge(metric)
+        else: m.merge(metric)
         if self.merge_count < self.merge_remote_interval:
             return
         self.flush_and_reset_merge_interval()
@@ -373,7 +357,7 @@ def add_histogram(
     Worker().master.add_histogram.remote(name, values, step, bins)
 
 
-def add_graph(model, input_to_model):
+def add_graph(model, input_to_model) -> ray.ObjectRef:
     """
     输出模型到TensorBoard，支持在集群任何地方调用，
     内部实现调用TensorBoard的add_graph方法
@@ -381,7 +365,7 @@ def add_graph(model, input_to_model):
         model: torch.nn.Module模型
         input_to_model: 模型的输入torch.Tensor或list of torch.Tensor
     """
-    Worker().master.add_graph.remote(model, input_to_model)
+    return Worker().master.add_graph.remote(model, input_to_model)
 
 
 def get_global_step() -> int:
@@ -403,15 +387,13 @@ def query(
      - avg: 所有merge value的平均值，等于sum/cnt
         time_window: 是否启用时间窗口，启用后查询的是最近一分钟的指标
     """
-    if kwargs:
-        name = build_name(name, **kwargs)
+    if kwargs: name = build_name(name, **kwargs)
     metric = ray.get(
         Worker().master.query.remote(name, time_window)
     )
     if kind == "avg":
-        if metric.cnt != 0:
-            return metric.sum / metric.cnt
-        return float("nan")
+        if metric.cnt == 0: return float("nan")
+        return metric.sum / metric.cnt
     return metric.sum if kind == "sum" else metric.cnt
 
 
@@ -424,16 +406,19 @@ def merge_time_ms(name, beg, step=None, **kwargs):
     merge(name, value, step=step, desc=desc, **kwargs)
 
 
-def set_tensorboard_step(remote_model=None, get_global_step=None):
+def set_tensorboard_step(
+    remote_model=None, remote_buffer=None, get_global_step=None):
     """
     设置 TensorBoard 的全局 step，用于自定义 TensorBoard 的横坐标
     Args:
         remote_model: 绑定到指定RemoteModel的step
         get_global_step: 动态获取当前step的函数
     """
+    if remote_model: get_global_step = lambda: remote_model.step
+    if remote_buffer: 
+        get_global_step = lambda: query(
+            f"pop/{remote_buffer.name}", "sum", time_window=False)
     master = Worker().master
-    if remote_model:
-        get_global_step = lambda: remote_model.step
     ray.get(master.set_tensorboard_step.remote(get_global_step))
 
 
@@ -462,7 +447,7 @@ def log(msg: str, flush: bool=False):
 
 
 if __name__ == "__main__":
-    ray.init(namespace="master")
+    ray.init(namespace="master", address="local")
 
     if not os.path.exists("master"):
         os.makedirs("master")

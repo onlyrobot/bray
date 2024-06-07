@@ -4,9 +4,7 @@ class WorkerLoadBalance:
     def __init__(self, name, service):
         """服务发现和Worker负载均衡，指定的service需要满足接口要求"""
         self.name, self.service = name, service
-        self.node_id = ray.get_runtime_context().get_node_id()
-        self.workers = ray.get(self.get_workers())
-        self.worker_index = random.randint(0, 100000)
+        self.node_id, self.workers, self.worker_index = None, [], 0
         self.is_initialized = False
 
     async def select(self, retry=60) -> "Worker":
@@ -25,16 +23,17 @@ class WorkerLoadBalance:
         retry, interval = retry, 1
         while not self.workers and (retry := retry - 1):
             await asyncio.sleep(interval)
-        assert self.workers, f"No worker for {self.name}"
         self.workers = await self.get_workers()
+        assert self.workers, f"No worker for {self.name}"
+
+    def get_workers(self) -> ray.ObjectRef:
+        return self.service.get_workers.remote(self.name, self.node_id)
 
     async def subscribe_workers(self):
-        coro = self.service.subscribe_workers.remote(
-            self.name, self.node_id, len(self.workers))
-        try:
-            self.workers = await asyncio.wait_for(
-                coro, timeout=10 * 60,
-            )
+        coro = self.service.subscribe_workers.remote(self.name, 
+            self.node_id, len(self.workers))
+        try: self.workers = await asyncio.wait_for(
+            coro, timeout=random.randint(0, 10 * 60))
         except asyncio.TimeoutError: pass
         except Exception as e:
             await asyncio.sleep(0.1)
@@ -42,5 +41,4 @@ class WorkerLoadBalance:
         if not self.is_initialized: return
         asyncio.create_task(self.subscribe_workers())
 
-    def get_workers(self) -> ray.ObjectRef:
-        return self.service.get_workers.remote(self.name, self.node_id)
+    async def sync(self): self.workers = await self.get_workers()

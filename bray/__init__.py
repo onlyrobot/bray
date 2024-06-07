@@ -27,6 +27,8 @@ from bray.utils.nested_array import (
     NestedArray,
     handle_nested_array,
     make_batch,
+    serialize_nested_array,
+    deserialize_nested_array,
 )
 from bray.master.master import (
     Worker,

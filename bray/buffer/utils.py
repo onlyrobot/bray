@@ -100,7 +100,6 @@ class CallbackBuffer:
 
 
 class PrefetchBuffer:
-    is_reuse: bool = False
     def __init__(self, buffer: Iterator[NestedArray], size=1, max_reuse=0, name=""):
         """
         Args:
@@ -136,7 +135,6 @@ class PrefetchBuffer:
             and self.remain_reuse > 0
         ):
             self.remain_reuse -= 1
-            PrefetchBuffer.is_reuse = True
             return self.last_replay
         with self.cond:
             self.cond.wait_for(lambda: len(self.replays) > 0)
@@ -144,7 +142,6 @@ class PrefetchBuffer:
             self.last_reuse = self.max_reuse - self.remain_reuse
             self.remain_reuse = self.max_reuse
             self.cond.notify()
-        PrefetchBuffer.is_reuse = False
         return self.last_replay
 
     def __iter__(self) -> Iterator[NestedArray]:
