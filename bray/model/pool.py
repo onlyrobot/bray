@@ -2,9 +2,9 @@ from typing import Union
 import asyncio
 
 from bray.master.master import (
-    set, get, merge, Worker,
-    add_histogram,
+    get, merge, Worker, add_histogram,
 )
+from bray.master.master import set as bray_set
 from bray.model.model import RemoteModel
 
 import ray
@@ -17,13 +17,16 @@ class ModelPool:
         RemoteModel.max_cached_remote_model = 100000000
         self.name = ray.get_runtime_context().get_actor_name()
         self.remote_model, self.pool = remote_model, pool
+        self.metric, self.all_names = metric, []
+        self.pool_names = set([m.name for m in self.pool or []])
         self.explore_rate, self.pool_update_rate = 0.3, 0.2
-        self.metrics = get("ModelPoolMetrics", {})
+        self.metrics, self.last_metrics = get("ModelPoolMetrics", {}), {}
         self.is_initialized = False
-        asyncio.create_task(self.update())
+        if self.remote_model: asyncio.create_task(self.update())
 
     async def sample(self) -> RemoteModel:
-        while not self.is_initialized: await asyncio.sleep(0.001)
+        while self.remote_model and not self.is_initialized: 
+            await asyncio.sleep(0.001)
         if self.pool: model = np.random.choice(self.pool)
         else:
             model = RemoteModel(await self.sample_name())
@@ -43,21 +46,31 @@ class ModelPool:
         weights = await model.model.get_weights.remote(model.name)
         remote_model.current_name = model.name
         await remote_model.publish_weights(weights)
-        
+
+    def is_valid_name(self, name) -> bool:
+        if name in self.all_names: return True
+        if not name.startswith(self.remote_model.name): return False
+        return name not in self.pool_names
+
     async def update(self, time_window=60):
         model = self.remote_model.model
         ckpt_steps = await model.get_ckpt_steps.remote()
-        self.all_names = [f"{name}/clone-step-{s}" 
-            for name, steps in ckpt_steps.items() for s in steps if s]
+        self.all_names = [f"{n}/clone-step-{s}" 
+            for n, steps in ckpt_steps.items() for s in steps 
+            if s and self.is_valid_name(n)]
+        # self.all_names = list(set(self.all_names))
         metric_names = [
-            f"win/{name}" for name in self.all_names]
+            f"{self.metric}/{name}" for name in self.all_names]
         master = Worker().master
         metrics = await master.batch_query.remote(metric_names)
-        self.metrics.clear()
+        if self.last_metrics: self.metrics.clear()
         for n, m in zip(self.all_names, metrics):
             if not m.cnt: continue
-            self.metrics[n] = m.sum / m.cnt - 0.5
-        set("ModelPoolMetrics", self.metrics)
+            avg = m.sum / m.cnt
+            last_avg = self.last_metrics.get(n, avg)
+            avg = last_avg * 7 / 8 + avg / 8
+            self.last_metrics[n] = self.metrics[n] = avg
+        bray_set("ModelPoolMetrics", self.metrics)
         self.names = list(self.metrics.keys())
         weights = np.array(list(self.metrics.values()))
         weights -= self.metrics.get(self.remote_model.name, 0.5)
@@ -93,20 +106,20 @@ if __name__ == "__main__":
     print([ray.get(model_pool.sample.remote()).name for _ in range(10)])
 
     for i in range(10):
-        merge(f"win/{remote_model.name}/clone-step-{i}", i)
+        merge(f"win/{remote_model.name}/clone-step-{i}", i / 10)
     ray.get(Worker().flush_and_reset_merge_interval())
     ray.get(model_pool.update.remote(time_window=1))
     print("Sample after:")
     print([ray.get(model_pool.sample.remote()).name for _ in range(10)])
 
-    pool = [RemoteModel(f"model_{i}", model=model, 
-        forward_args=forward_args) for i in range(3)]
+    pool = [remote_model.clone(step=0, name=f"clone_{i}") for i in range(3)]
     model_pool = ModelPool.options(name="model_pool2").remote(
         remote_model, pool, metric="win")
     for _ in range(30):
         ray.get(model_pool.update.remote(time_window=1))
     print("Sample pool:")
-    print([ray.get(model_pool.sample.remote()).name for _ in range(10)])
+    print([ray.get(model_pool.sample.remote()).current_name 
+        for _ in range(10)])
 
     @ray.remote
     def update_weights():
@@ -125,7 +138,8 @@ if __name__ == "__main__":
     update_metrics.remote()
 
     for _ in range(100000000):
-        print(ray.get(model_pool.sample.remote()).current_name, end=" ")
+        ray.get(model_pool.sample.remote()).current_name
+        # print(ray.get(model_pool.sample.remote()).current_name, end=" ")
 
     print("Check the result for test")
     

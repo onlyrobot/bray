@@ -48,6 +48,7 @@ def train_loop_per_worker(
     remote_eval_buffer: RemoteBuffer = None,
     eval_interval: int = 1000,
     eval_steps: int = 10,
+    optimizer_step_interval: int = 1,
 ):
     # initialize torch trainer worker and train loop
     world_size = get_context().get_world_size()
@@ -67,9 +68,7 @@ def train_loop_per_worker(
     trainer = Trainer(name, config, model, optimizer)
     # initialize buffer
     # total batch size = buffer batch size * batch_size * horovod size
-    if remote_buffer:
-        assert remote_buffers is None, "remote_buffers should be None"
-        buffers = [remote_buffer]
+    if remote_buffer: buffers = [remote_buffer]
     else:
         assert remote_buffers, "remote_buffers is None"
         buffers = list(remote_buffers.values())
@@ -78,43 +77,29 @@ def train_loop_per_worker(
     buffer_batch_size = buffers[0].batch_size or 1
     names = [buffer.name for buffer in buffers]
     
-    BatchBuffer = StackBuffer if batch_kind else lambda b, size: b
-    if batch_kind == "list":
-        BatchBuffer = ListBuffer
+    BatchBuffer = lambda b, size: b
+    if batch_kind == "stack": BatchBuffer = StackBuffer
+    if batch_kind == "list": BatchBuffer = ListBuffer
     if batch_kind == "concate":
         BatchBuffer = ConcateBuffer
-    buffers = [
-        BatchBuffer(b, size=batch_size) for b in buffers
-    ]
-    buffers = [
-        CallbackBuffer(b, callback=trainer.handle) 
-        for b in buffers
-    ]
-    buffers = [
-        TorchTensorBuffer(b, device=device) for b in buffers
-    ]
-    buffers = [PrefetchBuffer(
-            buffers[i],
-            size=max(1, prefetch_size),
-            max_reuse=max_reuse,
-            name=names[i],
-        )
+    buffers = [BatchBuffer(b, size=batch_size) for b in buffers]
+    buffers = [CallbackBuffer(b, callback=trainer.handle) 
+        for b in buffers]
+    buffers = [TorchTensorBuffer(b, device=device) 
+        for b in buffers]
+    buffers = [PrefetchBuffer(buffers[i], 
+            max(1, prefetch_size), max_reuse, names[i])
         if prefetch_size > 0 or max_reuse > 0
         else buffers[i]
-        for i in range(len(buffers))
-    ]
-    if remote_eval_buffer:
-        eval_buffer = buffers.pop()
-    if remote_buffer:
-        buffer = buffers.pop()
+        for i in range(len(buffers))]
+    if remote_eval_buffer: eval_buffer = buffers.pop()
+    if remote_buffer: buffer = buffers.pop()
     elif len(buffers) > 1:
         buffer = SampleBuffer(buffers, buffer_weights)
-    else:
-        buffer = buffers[0]
+    else: buffer = buffers[0]
 
     def eval_with_metric():
-        next_beg = time.time()
-        replay = next(eval_buffer)
+        next_beg, replay = time.time(), next(eval_buffer)
         merge_time_ms(f"eval/replay/{name}", next_beg)
         eval_beg = time.time()
         trainer.eval(replay)
@@ -124,8 +109,7 @@ def train_loop_per_worker(
         print(f"Trainer {name} eval at step {step}")
         model.eval()
         with torch.no_grad():
-            for _ in range(eval_steps):
-                eval_with_metric()
+            for _ in range(eval_steps): eval_with_metric()
         model.train()
         print(f"Trainer {name} eval done")
 
@@ -133,6 +117,8 @@ def train_loop_per_worker(
     if world_rank == 0:
         print(f"Trainer {name} start with {remote_model.name}" + 
             f"at step {model_step}")
+    optimizer.zero_grad()
+    train_step_beg = time.time()
     for i in range(1, 1 + num_steps):
         if remote_eval_buffer and i % eval_interval == 0:
             eval_at_step(i)
@@ -140,21 +126,24 @@ def train_loop_per_worker(
         if world_rank == 0:
             merge_time_ms(f"replay/{name}", next_beg)
         model_step += world_size * batch_size * buffer_batch_size
-        forward_beg = time.time()
         # zero grad, loss backward and optimizer step
-        optimizer.zero_grad()
-        loss = trainer.loss(replay)
+        loss = trainer.loss(replay, model_step)
+        if optimizer_step_interval > 1:
+            loss /= optimizer_step_interval
         loss.backward()
+        if i % optimizer_step_interval != 0: continue
         # TODO(pengyao): is clip in ddp ok?
         torch.nn.utils.clip_grad_norm_(
-            model.parameters(), max_norm=clip_grad_max_norm
-        )
+            model.parameters(), max_norm=clip_grad_max_norm)
         optimizer.step()
+        optimizer.zero_grad()
         if world_rank != 0: continue
-        merge_time_ms(f"train/{name}", forward_beg)
-        if i % 10 == 0:
+        merge_time_ms(f"train/{name}", train_step_beg)
+        train_step_beg = time.time()
+        optimizer_step = i // optimizer_step_interval
+        if optimizer_step % 10 == 0:
             print(f"Trainer {name} step {i}, loss: {loss.item()}")
-        if i % weights_publish_interval != 0:
+        if optimizer_step % weights_publish_interval != 0:
             continue
         publish_beg = time.time()
         module = model.module if world_size > 1 else model
@@ -162,6 +151,7 @@ def train_loop_per_worker(
             get_torch_model_weights(module), model_step
         )
         merge_time_ms(f"publish/{name}", publish_beg)
+        train_step_beg = time.time()
     print(f"Trainer {name} train all {num_steps} steps done!")
 
 

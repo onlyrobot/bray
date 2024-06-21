@@ -10,6 +10,7 @@ from bray.buffer.utils import (
 )
 from bray.model.model import (
     RemoteModel,
+    RemoteTorchModel,
     get_torch_model_weights,
     set_torch_model_weights,
 )

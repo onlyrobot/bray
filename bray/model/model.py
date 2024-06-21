@@ -179,14 +179,14 @@ class OnnxModelWorker:
 
     def get_cached_onnx_session(self):
         if self.use_onnx != "train": return None, None
-        base_name = self.name.split("/")[0]
+        base_name = self.name.split("/clone")[0]
         if base_name not in OnnxModelWorker.cached_onnx_session:
             return None, None
         return OnnxModelWorker.cached_onnx_session[base_name]
 
     def set_cached_onnx_session(self, sess, outputs):
         if self.use_onnx != "train": return
-        base_name = self.name.split("/")[0]
+        base_name = self.name.split("/clone")[0]
         OnnxModelWorker.cached_onnx_session[base_name] = (sess, outputs)
 
     def initialize_runtime(self):
@@ -324,7 +324,8 @@ class ModelWorker(ModelForwardProxy, ModelWeightsSubscriber):
         super().__init__(max_batch_size, parallel=1)
 
         self.name, self.model = name, model or ray.get_actor(
-            name.split("/")[0])
+            name.split("/clone")[0])
+        self.is_initialized = False
         use_onnx, raw_model = ray.get(self.model.get_model.remote(
             self.name, use_onnx))
         if not use_onnx: raw_model = ray.get(raw_model)
@@ -353,10 +354,10 @@ class ModelWorker(ModelForwardProxy, ModelWeightsSubscriber):
         return outputs
 
     async def forward(self, args, kwargs, pending=True):
-        self.forward = super().forward
-        await self.initialize_subscriber(self.name, self.model)
-        self.is_initialized = True
-        return await self.forward(args, kwargs, pending)
+        is_initialized, self.is_initialized = self.is_initialized, True
+        if not is_initialized:
+            await self.initialize_subscriber(self.name, self.model)
+        return await super().forward(args, kwargs, pending)
 
     def get_host_and_node_id(self):
         node_id = ray.get_runtime_context().get_node_id()
@@ -373,17 +374,17 @@ class ModelWorker(ModelForwardProxy, ModelWeightsSubscriber):
         import requests
         self.sess = requests.Session()
 
-    async def http_forward(self, *args, **kwargs):
+    async def http_forward(self, args, kwargs, pending=True):
         if not hasattr(self, "sess"): self.initialize_http_session()
-        data = pickle.dumps((args, kwargs))
+        data = pickle.dumps((args, kwargs, pending))
         res = await asyncio.get_running_loop().run_in_executor(
             None, self.sess.post, self.url, data)
         if res.status_code != 200: raise Exception(res.text)
         return pickle.loads(res.content)
 
     async def _http_forward(self, data: bytes) -> bytes:
-        args, kwargs = pickle.loads(data)
-        return pickle.dumps(await self.forward(*args, **kwargs))
+        args, kwargs, pending = pickle.loads(data)
+        return pickle.dumps(await self.forward(args, kwargs, True))
 
 
 class ModelWorkerManagerMeta:
@@ -490,9 +491,11 @@ class ModelWorkerManager:
 
 class ModelCheckpointManager(ModelWeightsPublisher):
     def __init__(
-        self, name, trial_path, checkpoint, checkpoint_interval):
+        self, name, ckpt_name, trial_path, checkpoint, checkpoint_interval
+    ):
         ModelWeightsPublisher.__init__(self, name)
         self.name, self.trial_path, self.ckpt_steps = name, trial_path, {}
+        self.ckpt_name = ckpt_name
         self.checkpoint = checkpoint
         if not checkpoint_interval:
             asyncio.create_task(self._save_checkpoint())
@@ -501,20 +504,28 @@ class ModelCheckpointManager(ModelWeightsPublisher):
     async def _save_checkpoint(self, interval=10 * 60):
         await asyncio.sleep(interval)
         for name, meta in list(self.pubs.items()):
-            if self.get_ckpt_steps(name)[-1] == meta.step: continue
+            ckpt_steps = self.get_ckpt_steps(name)
+            if not meta.step or meta.step <= ckpt_steps[-1]: 
+                continue
+            ckpt_steps.append(meta.step)
             await self.save_checkpoint(
             name, meta.weights, meta.step)
         asyncio.create_task(self._save_checkpoint(interval))
 
     async def on_set_weights(self, name, weights, step):
         ckpt_step = self.get_ckpt_steps(name)[-1]
-        interval = self.checkpoint_interval
+        if isinstance(interval:=self.checkpoint_interval, float):
+            base = int(interval)
+            s, interval = step // 10, interval - base
+            while s: interval, s = interval * 10, s // 10
+            interval = max(base, int(interval))
         if not interval or (step - ckpt_step) // interval < 1:
             return
+        self.get_ckpt_steps(name).append(step)
         await self.save_checkpoint(name, weights, step)
 
     def build_ckpt_steps(self, name) -> List[int]:
-        checkpoint = None if name != self.name else self.checkpoint
+        checkpoint = None if name != self.ckpt_name else self.checkpoint
         if isinstance(checkpoint, str): return [0]
         root_path = os.path.join(self.trial_path, name)
         ckpt_dir = os.path.join(root_path, "checkpoint")
@@ -526,7 +537,7 @@ class ModelCheckpointManager(ModelWeightsPublisher):
             for ckpt in os.listdir(root_path) 
             if ckpt.startswith("clone-step")]
         ckpt_steps = sorted(set(ckpt_steps).union(clone_steps))
-        is_valid = lambda c: checkpoint is None or c < checkpoint
+        is_valid = lambda c: checkpoint is None or c <= checkpoint
         return [c for c in ckpt_steps if is_valid(c)]
 
     def get_ckpt_steps(self, name=None) -> List[int]:
@@ -554,10 +565,8 @@ class ModelCheckpointManager(ModelWeightsPublisher):
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
         ckpt_path = os.path.join(ckpt_dir, f"step-{step}.pt")
-        await asyncio.get_running_loop().run_in_executor(
-            None, torch.save, 
-            handle_nested_array(weights, torch.as_tensor), ckpt_path)
-        self.get_ckpt_steps(name).append(step)
+        await asyncio.get_running_loop().run_in_executor(None, torch.save, 
+        handle_nested_array(weights, torch.as_tensor), ckpt_path)
         
 
 class ModelOnnxManager:
@@ -642,6 +651,8 @@ class Model(
     ):
         self.trial_path = ray.get_runtime_context().namespace
         root_path = os.path.join(self.trial_path, f"{name}")
+        if name[0] == "." or name[0] == "/":
+            self.trial_path, root_path = "./", name.split("/clone")[0]
         if not os.path.exists(root_path):
             os.makedirs(root_path, exist_ok=True)
         asyncio.get_running_loop().set_default_executor(
@@ -649,15 +660,18 @@ class Model(
 
         ModelWorkerManager.__init__(self, cpus_per_worker, 
             gpus_per_worker, memory_per_worker, port)
-        ModelCheckpointManager.__init__(self, name, 
+        self.name = name.split("/clone")[0]
+        ModelCheckpointManager.__init__(self, self.name, name,
             self.trial_path, checkpoint, checkpoint_interval)
 
-        self.name, self.model, self.weights_publishers = name, None, {}
-        self.torch_path = os.path.join(root_path, f"{name}.pt")
+        self.model, self.weights_publishers = None, {}
+        self.torch_path = os.path.join(root_path, f"model.pt")
 
         if override_model := raw_model and (override_model or 
             not os.path.exists(self.torch_path)):
             torch.save(raw_model, self.torch_path)
+        else:
+            assert os.path.exists(self.torch_path), "Missing model"
         args_path = os.path.join(root_path, "forward_inputs.pt")
         if override_model and (forward_args or forward_kwargs):
             forward_inputs = handle_nested_array(
@@ -670,7 +684,7 @@ class Model(
 
         weights_path = os.path.join(root_path, "weights.pt")
         if isinstance(checkpoint, str):
-            print(f"{name} loading checkpoint from {checkpoint}")
+            print(f"{self.name} loading checkpoint from {checkpoint}")
             weights = torch.load(checkpoint)
         elif not override_model: weights = None
         else: weights = get_torch_model_weights(raw_model)
@@ -679,7 +693,7 @@ class Model(
         ModelOnnxManager.__init__(self, self.name, self.torch_path)
         self.use_onnxs[self.name] = use_onnx
         asyncio.create_task(self.initialize_workers(
-        name, num_workers, max_batch_size, local_mode))
+        self.name, num_workers, max_batch_size, local_mode))
 
     async def get_weights_publisher(self, name, node_id):
         if node_id == ray.get_runtime_context().get_node_id():
@@ -740,8 +754,8 @@ class Model(
         return cloned_name
 
     async def _clone(self, names: List[str]):
-        if "/".join(names) in self.use_onnxs: return
         base_name, parts = "/".join(names[:-1]), names[-1].split("-")
+        if "/".join(names) in self.use_onnxs: return
         await self._clone(names[:-1])
         extra_name = "" if len(parts) < 4 else parts[3]
         await self.clone(base_name, int(parts[2]), extra_name)
@@ -817,7 +831,7 @@ class RemoteModel:
             return self
         self = super().__new__(cls)
         if name is None: return self    # 适配对象反序列化时调用__new__方法
-        self.name, base_name = name, name.split("/")[0]
+        self.name, base_name = name, name.split("/clone")[0]
         self.cached_cloned_names = {}
         self.local_worker = None
         model_ = None
@@ -829,7 +843,7 @@ class RemoteModel:
             scheduling_strategy=ray_scheduling_local(),
             max_concurrency=100000,
         ).remote(
-            base_name, model,
+            name, model,
             forward_args, forward_kwargs,
             checkpoint_interval, checkpoint,
             max_batch_size or 1,
@@ -1015,7 +1029,7 @@ class RemoteModel:
             self.name, step, extra_name=name, **kwargs)
         cloned_name = ray.get(cloned_name)
         # if step != -1: self.cached_cloned_names[step] = cloned_name
-        return RemoteModel(cloned_name, **kwargs)
+        return type(self)(cloned_name, **kwargs)
 
     def publish_weights(self, weights: NestedArray, step=-1):
         """
@@ -1026,6 +1040,17 @@ class RemoteModel:
         """
         weights = [ray.put(weights, _owner=self.model)]
         return self.model.set_weights.remote(self.name, weights, step)
+
+
+class RemoteTorchModel(RemoteModel):
+    def __call__(self, *args, batch=True, **kwargs) -> "NestedTensor":
+        handle_input = lambda x: x.numpy() if isinstance(
+            x, torch.Tensor) else x
+        args, kwargs = handle_nested_array((args, kwargs), handle_input)
+        outputs = super().__call__(*args, batch=batch, **kwargs)
+        handle_output = lambda x: torch.as_tensor(x) if isinstance(
+            x, np.ndarray) else x
+        return handle_nested_array(outputs, handle_output)
 
 
 if __name__ == "__main__":

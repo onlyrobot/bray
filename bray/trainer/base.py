@@ -31,11 +31,12 @@ class Trainer:
         """
         return replay
 
-    def loss(self, replay: NestedArray) -> torch.Tensor:
+    def loss(self, replay: NestedArray, step: int) -> torch.Tensor:
         """
         计算Loss，计算过程中的指标可以用bray的相关API输出
         Args:
             replay: 一个Replay，是一个NestedArray
+            step: 当前的样本数
         Returns:
             Loss，是一个torch.Tensor，保证可以反向传播
         """
