@@ -74,7 +74,9 @@ def make_batch(
 
 def split_batch(batch: NestedArray, parts: List[int] = None) -> List:
     flatten_arrays = flatten_nested_array(batch)
-    if parts is not None:
+    if isinstance(parts, int):
+        flatten_arrays = [np.array_split(a, parts) for a in flatten_arrays]
+    if isinstance(parts, list):
         indices = np.cumsum(parts)
         flatten_arrays = [np.split(a, indices[:-1]) for a in flatten_arrays]
     arrays = zip(*flatten_arrays)

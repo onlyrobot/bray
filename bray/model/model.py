@@ -37,87 +37,120 @@ def save_weights(weights: Dict, path: str):
 
 
 class ModelForwardProxy:
-    def __init__(self, max_batch_size, parallel=1):
-        self.max_batch_size, self.parallel = max_batch_size, parallel
+    def __init__(self, max_batch_size, parallel=1, max_pending_time=0.0):
+        self.max_batch_size, self.parallel = abs(max_batch_size), parallel
+        self.fix_batch_size = max_batch_size < 0
         self.forward_conds = [
             asyncio.Condition() for _ in range(1 + parallel)]
         self.forward_cond = None
         self.pending_forwards, self.ready_forwards = [], []
         self.pending_time, self.forward_beg = 0.0, time.time()
+        self.num_pendings, self.max_pending_time = 0, max_pending_time
+        self.pending_batch_size, self.outs, self.out = 0, [], None
 
     async def proxy_forward(self, args, kwargs) -> NestedArray:
         raise NotImplementedError
+    
+    def make_batch(self, pending_forwards, batch, parts):
+        if not self.outs: self.outs.append(make_batch(
+            [split_batch(pending_forwards[0])[0]] * self.max_batch_size))
+        self.out = out = self.outs.pop()
+        if batch != self.max_batch_size:
+            out = handle_nested_array(self.out, lambda x: x[:batch])
+        args, kwargs = make_batch(
+            pending_forwards, concate=True, parts=parts, out=out)
+        return self.out if self.fix_batch_size else (args, kwargs)
 
-    async def batch_forward(self, pending_forwards: List):
-        self.forward_beg, parts = time.time(), []
-        forward_beg = self.forward_beg
-        args, kwargs = pending_forwards[0]
-        if len(pending_forwards) > 1:
-            args, kwargs = make_batch(pending_forwards, 
-                concate=True, parts=parts)
-        try: outputs = await self.proxy_forward(args, kwargs)
-        except Exception as e:
-            print(f"Fail to forward: {e}")
-            return [None] * len(pending_forwards)
-        ready_forwards = [outputs]
-        if len(pending_forwards) > 1:
-            ready_forwards = split_batch(outputs, parts)
-        # merge_time_ms(
-        #     f"forward/{self.name}", forward_beg, mode="proxy")
-        self.pending_time = self.pending_time * 7 / 8 + (
-            time.time() - forward_beg) / 8 / self.parallel
-        # merge(f"wait/parallel{self.parallel}", self.pending_time)
-        return ready_forwards
+    async def batch_forward(self, pending_forwards, batch=0):
+        parts, pending_size = [], len(pending_forwards)
+        if self.fix_batch_size or pending_size > 1:
+            args, kwargs = self.make_batch(pending_forwards, batch, parts)
+        else: args, kwargs = pending_forwards[0]
+        out, self.out = self.out, None
+        outputs = await self.proxy_forward(args, kwargs)
+        if self.fix_batch_size and batch != self.max_batch_size:
+            outputs = handle_nested_array(outputs, lambda x: x[:batch])
+        if batch: merge(
+            f"forward/batch_size_parallel_{self.parallel}", batch)
+        if out: self.outs.append(out)
+        return split_batch(outputs, parts) if parts else [outputs]
 
-    async def _forward_coro(self, forward_cond):
-        async with forward_cond:
-            await forward_cond.wait_for(lambda: self.pending_forwards)
+    async def __forward_coro(self, forward_cond):
+        forward_beg = self.forward_beg = time.time()
+        # async with forward_cond:
+        #     await forward_cond.wait_for(lambda: self.pending_forwards)
         pending_size = len(self.pending_forwards)
         last_pending_size = 0
-        while (pending_size < self.max_batch_size 
-        and pending_size != last_pending_size):
+        while (self.pending_batch_size < self.max_batch_size 
+        and (pending_size != last_pending_size or 
+        time.time() - forward_beg < self.max_pending_time)):
             last_pending_size = pending_size
             await asyncio.sleep(0)
             pending_size = len(self.pending_forwards)
         pending_forwards = self.pending_forwards
         ready_forwards = self.ready_forwards
+        batch, self.pending_batch_size = self.pending_batch_size, 0
         self.pending_forwards, self.ready_forwards = [], []
         self.forward_cond = None
-        # set the ready_forwards to the previous pending_forwards
-        ready_forwards[:] = await self.batch_forward(pending_forwards)
-        ready_forwards.append(len(pending_forwards)) # forward done cnt
-        async with forward_cond:
-            forward_cond.notify_all()
-        while ready_forwards[-1] != 0: await asyncio.sleep(0)
+        try: ready_forwards[:] = await self.batch_forward(
+                pending_forwards, batch)
+        except Exception as e:
+            print(f"Fail to forward: {e}")
+        async with forward_cond: forward_cond.notify_all()
         self.forward_conds.append(forward_cond)
+        self.pending_time = self.pending_time * 7 / 8 + (
+            time.time() - forward_beg) / 8 / self.parallel
+        # merge(f"wait/parallel{self.parallel}", self.pending_time)
 
-    async def _initialize_forward_coro(self):
-        while not self.forward_conds: await asyncio.sleep(0.001)
-        if self.forward_cond: return
+    async def split_batch(self, args, kwargs, pending, batch):
+        parts = [self.max_batch_size] * (batch // self.max_batch_size)
+        if extra := batch % self.max_batch_size: parts += [1] * extra
+        inputs = split_batch((args, kwargs), parts=parts)
+        outputs = await asyncio.gather(*[
+            self.forward(*i, pending) for i in inputs])
+        return make_batch(outputs, concate=True)
+    
+    async def _forward_coro(self, ready_forwards):
+        while not self.forward_cond and not self.forward_conds: 
+            await asyncio.sleep(0.001)
+        if ready_forwards is not self.ready_forwards:
+            while not ready_forwards: await asyncio.sleep(0)
+            return None
+        if self.forward_cond: return self.forward_cond
         self.forward_cond = self.forward_conds.pop()
         pending_time = self.forward_beg + self.pending_time - time.time()
-        if pending_time > 0.001:
+        if pending_time > 0:
             await asyncio.sleep(pending_time)
-        asyncio.create_task(self._forward_coro(self.forward_cond))
+        asyncio.create_task(self.__forward_coro(self.forward_cond))
+        return self.forward_cond
 
     async def forward(self, args, kwargs, pending=True) -> NestedArray:
-        if self.max_batch_size < 2:
+        if self.max_batch_size == 0:
             return (await self.batch_forward([(args, kwargs)]))[0]
-        while len(self.pending_forwards) >= self.max_batch_size:
+        batch = flatten_nested_array((args, kwargs))[0].shape[0]
+        if batch > self.max_batch_size:
+            return await self.split_batch(args, kwargs, pending, batch)
+        max_batch_size = self.max_batch_size - batch
+        num_pendings = self.num_pendings
+        while self.pending_batch_size > max_batch_size or num_pendings:
             if not pending:
                 raise RuntimeError("Too many requests.")
-            await asyncio.sleep(0.001)
-        while not self.forward_cond:
-            await self._initialize_forward_coro()
+            rate, num_pendings = (
+                self.pending_batch_size + num_pendings
+                ) / self.max_batch_size, 0
+            self.num_pendings += batch
+            await asyncio.sleep(self.pending_time * rate)
+            self.num_pendings -= batch
         forward_index = len(self.pending_forwards)
         self.pending_forwards.append((args, kwargs))
-        last_forward_cond = self.forward_cond
-        last_ready_forwards = self.ready_forwards
-        async with last_forward_cond:
-            if forward_index == 0: last_forward_cond.notify_all()
-            await last_forward_cond.wait_for(lambda: last_ready_forwards)
-        last_ready_forwards[-1] -= 1
-        return last_ready_forwards[forward_index]
+        self.pending_batch_size += batch
+        ready_forwards = self.ready_forwards
+        if not (forward_cond := self.forward_cond):
+            forward_cond = await self._forward_coro(ready_forwards)
+        if ready_forwards: return ready_forwards[forward_index]
+        async with forward_cond:
+            await forward_cond.wait_for(lambda: ready_forwards)
+        return ready_forwards[forward_index]
 
 
 class TorchModelWorker:
@@ -165,7 +198,11 @@ class OnnxModelWorker:
         self.onnx_model, self.use_onnx = raw_model, use_onnx
 
     def build_ort_session(self):
-        provider = ["CUDAExecutionProvider"] if self.num_gpus else []
+        # provider = [("TensorrtExecutionProvider", {
+        #     "trt_fp16_enable": True, "trt_engine_cache_enable": True
+        # })] if self.num_gpus else []
+        provider = ["TensorrtExecutionProvider", "CUDAExecutionProvider"
+            ] if self.num_gpus else []
         num_cpus = max(1, int(self.num_cpus))
         import onnxruntime as ort
 
@@ -321,7 +358,7 @@ class ModelWorker(ModelForwardProxy, ModelWeightsSubscriber):
     def __init__(self, name, max_batch_size, cpus_per_worker, 
         gpus_per_worker, port=None, use_onnx=None, model: "Model" = None
     ):
-        super().__init__(max_batch_size, parallel=1)
+        super().__init__(max_batch_size, parallel=1, max_pending_time=0.0)
 
         self.name, self.model = name, model or ray.get_actor(
             name.split("/clone")[0])
@@ -463,7 +500,7 @@ class ModelWorkerManager:
         if meta.num_workers is None: return
         num_workers = len(meta.workers) + meta.pending_create_workers
         if num_workers >= meta.num_workers: return
-        create_coros = [self._create_worker(name) 
+        create_coros = [self.create_worker(name) 
             for _ in range(meta.num_workers - num_workers)]
         await asyncio.create_task(*create_coros)
 
@@ -570,8 +607,11 @@ class ModelCheckpointManager(ModelWeightsPublisher):
         
 
 class ModelOnnxManager:
-    def __init__(self, name, torch_path):
+    def __init__(
+        self, name, torch_path, override_model, max_batch_size):
         self.name, self.torch_path = name, torch_path
+        self.override_model = override_model
+        self.max_batch_size = max_batch_size
         self.torch_model, self.use_onnxs = None, {}
         self.root_path = os.path.dirname(self.torch_path)
         self.outputs_path = os.path.join(
@@ -590,7 +630,9 @@ class ModelOnnxManager:
             onnx_train_path,
             self.forward_args,
             self.forward_kwargs,
-            export_params=False)
+            export_params=False,
+            max_batch_size=self.max_batch_size,
+        )
         torch.save(self.forward_outputs, self.outputs_path)
         with open(onnx_train_path, "rb") as f:
             self.onnx_train_model = f.read()
@@ -598,8 +640,11 @@ class ModelOnnxManager:
 
     def _get_onnx_model(self, name, use_onnx, step, weights):
         if use_onnx == "train": return self._get_onnx_train_model()
+        if name == self.name:
+            override, self.override_model = self.override_model, False
+        else: override = False
         onnx_path = os.path.join(self.root_path, f"{name}.onnx")
-        if os.path.exists(onnx_path):
+        if not override and os.path.exists(onnx_path):
             with open(onnx_path, "rb") as f: return f.read()
         from bray.model.onnx import export_onnx
 
@@ -614,7 +659,9 @@ class ModelOnnxManager:
             self.forward_args,
             self.forward_kwargs,
             export_params=True,
-            quantize=use_onnx == "quantize")
+            quantize=use_onnx == "quantize",
+            max_batch_size=self.max_batch_size,
+        )
         if not os.path.exists(self.outputs_path):
             torch.save(self.forward_outputs, self.outputs_path)
         with open(onnx_path, "rb") as f: return f.read()
@@ -639,7 +686,7 @@ class Model(
         forward_kwargs: Dict[str, np.ndarray] = None,
         checkpoint_interval: int = None,
         checkpoint: Union[str, int] = None,
-        max_batch_size: int = 1,
+        max_batch_size: int = 0,
         num_workers: int = None,
         cpus_per_worker: float = 1.0,
         gpus_per_worker: float = 0.0,
@@ -690,7 +737,8 @@ class Model(
         else: weights = get_torch_model_weights(raw_model)
         if weights: save_weights(weights, weights_path)
 
-        ModelOnnxManager.__init__(self, self.name, self.torch_path)
+        ModelOnnxManager.__init__(self, self.name, 
+            self.torch_path, override_model, max_batch_size)
         self.use_onnxs[self.name] = use_onnx
         asyncio.create_task(self.initialize_workers(
         self.name, num_workers, max_batch_size, local_mode))
@@ -846,7 +894,7 @@ class RemoteModel:
             name, model,
             forward_args, forward_kwargs,
             checkpoint_interval, checkpoint,
-            max_batch_size or 1,
+            max_batch_size or 0,
             num_workers,
             cpus_per_worker or 1.0,
             gpus_per_worker or 0.0,
@@ -895,7 +943,7 @@ class RemoteModel:
             checkpoint_interval: 
         模型的checkpoint间隔，单位step，默认10分钟保存一次
             max_batch_size: 
-        模型的max_batch_size，默认为1
+        模型的max_batch_size，默认为0，表示不额外组批次
             num_workers: 
         模型的worker数量，为None会自动根据负载情况调整，默认为0
             cpus_per_worker: 
@@ -923,7 +971,7 @@ class RemoteModel:
         use_onnx=self.use_onnx, model=self.model)
 
     def _initialize_forward_proxy(self) -> ModelForwardProxy:
-        self.forward_proxy = ModelForwardProxy(self.max_batch_size, 4)
+        self.forward_proxy = ModelForwardProxy(abs(self.max_batch_size), 4)
         load_balance = self.load_balance
 
         async def proxy_forward(args, kwargs):
@@ -1043,11 +1091,11 @@ class RemoteModel:
 
 
 class RemoteTorchModel(RemoteModel):
-    def __call__(self, *args, batch=True, **kwargs) -> "NestedTensor":
+    async def forward(self, *args, batch=False, **kwargs) -> "NestedTensor":
         handle_input = lambda x: x.numpy() if isinstance(
             x, torch.Tensor) else x
         args, kwargs = handle_nested_array((args, kwargs), handle_input)
-        outputs = super().__call__(*args, batch=batch, **kwargs)
+        outputs = await super().forward(*args, batch=batch, **kwargs)
         handle_output = lambda x: torch.as_tensor(x) if isinstance(
             x, np.ndarray) else x
         return handle_nested_array(outputs, handle_output)

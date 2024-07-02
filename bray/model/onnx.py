@@ -18,6 +18,7 @@ def export_onnx(
     check_consistency: bool = True,
     relative_diff: float = 1e-5,
     quantize: bool = False,
+    max_batch_size: int = 0,
 ) -> NestedArray:
     """
     将模型导出为onnx格式，并使用导出的onnx模型验证模型的输出是否正确。
@@ -30,6 +31,7 @@ def export_onnx(
         check_consistency: 是否验证模型的输出是否正确
         relative_diff: 验证模型输出是否正确时的相对误差
         quantize: 是否量化模型
+        max_batch_size: 最大批次大小
     Returns:
         NestedArray: 模型的原始输出，用于恢复onnx模型输出的numpy数组的结构。
     """
@@ -41,11 +43,25 @@ def export_onnx(
         model.eval()
         origin_outputs = model(*tensor_args, **tensor_kwargs)
 
+    num_inputs = len(flatten_nested_array(
+        forward_args + tuple(forward_kwargs.values())
+    )) if max_batch_size > 1 else 0
+    input_names = [f"input_{i}" for i in range(num_inputs)]
+    
+    num_outputs = len(flatten_nested_array(
+        origin_outputs)) if max_batch_size > 1 else 0
+    output_names = [f"output_{i}" for i in range(num_outputs)]
+
     torch.onnx.export(
         model,
         tensor_args + (tensor_kwargs,),
         path,
         # verbose=True,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes={
+            n: [0] for n in input_names + output_names
+        },
         training=torch.onnx.TrainingMode.EVAL
         if export_params
         else torch.onnx.TrainingMode.TRAINING,
@@ -63,7 +79,7 @@ def export_onnx(
             model_input=path,
             model_output=path,
             weight_type=QuantType.QUInt8,
-            optimize_model=True,
+            # optimize_model=True,
         )
 
     ort_session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
