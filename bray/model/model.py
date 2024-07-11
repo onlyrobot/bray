@@ -472,7 +472,7 @@ class ModelWorkerManager:
         meta.pending_create_workers += 1
         is_health = await self._is_health(worker)
         meta.pending_create_workers -= 1
-        if not is_health: return
+        if is_health is None: return
         host, node_id = await worker.get_host_and_node_id.remote()
         if self.port:
             w = ModelWorker.__new__(ModelWorker)
@@ -491,7 +491,7 @@ class ModelWorkerManager:
         origin_workers_num = len(meta.workers)
         active_workers = [
             worker for worker in meta.workers[:origin_workers_num]
-            if await self._is_health(worker)
+            if await self._is_health(worker) is not None
         ]
         old_workers, meta.workers = meta.workers, active_workers
         meta.workers.extend(old_workers[origin_workers_num:])
@@ -607,9 +607,10 @@ class ModelCheckpointManager(ModelWeightsPublisher):
         
 
 class ModelOnnxManager:
-    def __init__(
-        self, name, torch_path, override_model, max_batch_size):
+    def __init__(self, name, 
+        torch_path, trial_path, override_model, max_batch_size):
         self.name, self.torch_path = name, torch_path
+        self.trial_path = trial_path
         self.override_model = override_model
         self.max_batch_size = max_batch_size
         self.torch_model, self.use_onnxs = None, {}
@@ -643,7 +644,7 @@ class ModelOnnxManager:
         if name == self.name:
             override, self.override_model = self.override_model, False
         else: override = False
-        onnx_path = os.path.join(self.root_path, f"{name}.onnx")
+        onnx_path = os.path.join(self.trial_path, name, f"model.onnx")
         if not override and os.path.exists(onnx_path):
             with open(onnx_path, "rb") as f: return f.read()
         from bray.model.onnx import export_onnx
@@ -714,8 +715,8 @@ class Model(
         self.model, self.weights_publishers = None, {}
         self.torch_path = os.path.join(root_path, f"model.pt")
 
-        if override_model := raw_model and (override_model or 
-            not os.path.exists(self.torch_path)):
+        if raw_model and (override_model or not os.path.exists(
+            self.torch_path)):
             torch.save(raw_model, self.torch_path)
         else:
             assert os.path.exists(self.torch_path), "Missing model"
@@ -733,15 +734,16 @@ class Model(
         if isinstance(checkpoint, str):
             print(f"{self.name} loading checkpoint from {checkpoint}")
             weights = torch.load(checkpoint)
-        elif not override_model: weights = None
+        elif not override_model or not raw_model: weights = None
         else: weights = get_torch_model_weights(raw_model)
         if weights: save_weights(weights, weights_path)
 
-        ModelOnnxManager.__init__(self, self.name, 
-            self.torch_path, override_model, max_batch_size)
-        self.use_onnxs[self.name] = use_onnx
+        ModelOnnxManager.__init__(self, name, self.torch_path, 
+            self.trial_path, override_model and (
+            raw_model or forward_args or forward_kwargs), max_batch_size)
+        self.use_onnxs[name] = use_onnx
         asyncio.create_task(self.initialize_workers(
-        self.name, num_workers, max_batch_size, local_mode))
+            name, num_workers, max_batch_size, local_mode))
 
     async def get_weights_publisher(self, name, node_id):
         if node_id == ray.get_runtime_context().get_node_id():
@@ -812,7 +814,8 @@ class Model(
     async def _is_health(self, worker):
         try: return await worker.forward.remote(self.forward_args, 
             self.forward_kwargs)
-        except ray.exceptions.RayActorError: return False
+        except ray.exceptions.RayActorError as e:
+            return print(f"Worker is not health: ", e)
         except Exception as e:
             return print(f"Worker is not health: ", e)
 
@@ -872,6 +875,7 @@ class RemoteModel:
         local_mode: [True, False, "proxy"] = None,
         port: int = None,
         override_model: bool = True,
+        namespace: str = None,
     ):
         if name in cls.remote_models and (
             (self := cls.remote_models[name]) is not None
@@ -890,6 +894,7 @@ class RemoteModel:
             get_if_exists=True,
             scheduling_strategy=ray_scheduling_local(),
             max_concurrency=100000,
+            namespace=namespace,
         ).remote(
             name, model,
             forward_args, forward_kwargs,

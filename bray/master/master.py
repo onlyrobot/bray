@@ -310,7 +310,7 @@ def add_scalar(name: str, value: float, step: int = None):
         value: 指标merge的值
         step: 指标的横坐标，默认使用全局的step
     """
-    Worker().master.add_scalar.remote(name, value, step)
+    Worker().master.add_scalar.remote(name, float(value), step)
 
 
 def add_image(

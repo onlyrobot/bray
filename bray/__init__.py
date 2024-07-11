@@ -31,6 +31,9 @@ from bray.utils.nested_array import (
     serialize_nested_array,
     deserialize_nested_array,
 )
+from bray.utils import (
+    ray_scheduling_local, ray_prepare_model
+)
 from bray.master.master import (
     Worker,
     merge,

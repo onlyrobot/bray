@@ -34,6 +34,7 @@ def train_loop_per_worker(
     Trainer: Type[Trainer],
     config: Dict,
     remote_model: RemoteModel,
+    remote_models: List[RemoteModel] = None,
     remote_buffer: RemoteBuffer = None,
     remote_buffers: Dict[str, RemoteBuffer] = None,
     buffer_weights: List[float] = None,
@@ -63,8 +64,8 @@ def train_loop_per_worker(
 
     # initialize optimizer
     parameters = model.parameters()
-    optimizer = torch.optim.Adam(
-        parameters, lr=learning_rate or 5e-4)
+    optimizer = torch.optim.Adam(parameters, 
+        lr=learning_rate or 5e-4)
     trainer = Trainer(name, config, model, optimizer)
     # initialize buffer
     # total batch size = buffer batch size * batch_size * horovod size
@@ -135,8 +136,7 @@ def train_loop_per_worker(
         # TODO(pengyao): is clip in ddp ok?
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), max_norm=clip_grad_max_norm)
-        optimizer.step()
-        optimizer.zero_grad()
+        optimizer.step(), optimizer.zero_grad()
         if world_rank != 0: continue
         merge_time_ms(f"train/{name}", train_step_beg)
         train_step_beg = time.time()
@@ -187,7 +187,8 @@ def RemoteTrainer(
         train_loop_per_worker(name=name, Trainer=Trainer, **kwargs)
 
     scaling_config = ScalingConfig(
-        num_workers=num_workers, use_gpu=use_gpu
+        num_workers=num_workers, use_gpu=use_gpu,
+        trainer_resources={"CPU": 0}, resources_per_worker={"CPU": 0}
     )
 
     trial_path = ray.get_runtime_context().namespace
