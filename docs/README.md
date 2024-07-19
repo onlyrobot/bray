@@ -13,7 +13,7 @@ OpenAI Baselines和PyMARL提供了高效的强化算法实现和多智能体训�
 1. 模块化设计和简单易用的API
 Bray中明确定义了Actor、Model、Buffer、Trainer等概念，对应到Python中的类和模块，模块间充分解耦，让游戏接入、算法调优和性能优化可以独立进行。此外模块化设计保证了框架的高可拓展性，快速支持SelfPlay和League等多智能体训练。
 ## 架构图
-![structure](../docs/img/structure.png)
+![structure](../docs/img/structure.jpg)
 Bray基于Ray开发，运行在Ray集群之上，主要包含RemoteActor、RemoteModel、RemoteTrainer和RemoteBuffer这几个分布式概念，每个概念都有自己的Worker进程。
 这里的Gamecore位于Ray集群之外，运行的是游戏AI机器人、玩家以及环境的交互逻辑。训练过程中Gamecore不断将当前的观测状态发送给RemoteActor，接收来自RemoteActor返回的指令。
 RemoteActor接受到来自Gamecore的结构化状态（玩家、BOSS、地图、奖励等）后，先进行预处理，转化为模型的输入，再调用RemoteModel的Forward接口，得到模型输出，最后将模型的输出转化为Gamecore能够识别的结构化指令并返回。RemoteActor不断循环这个过程，收集强化学习中的Trajectory，计算奖励并Push到RemoteBuffer中。

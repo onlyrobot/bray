@@ -1,17 +1,26 @@
 # Bray框架模板介绍
+
 除了使用Bray提供的基本分布式组件（RemoteModel、RemoteActor等）搭建机器学习流程以外，还可以直接基于预定义的模板快速进行模仿学习、强化学习、模仿+强化学习以及服务部署的开发。
+
 ## 一、模板的定义
+
 模板是高于组件的抽象，提供了参数化的启动方式，能够加快项目接入流程，减少出错的可能性，此外多个项目用同一个模板，也可以很好地复用代码，提高可维护性。
+
 Bray的所有模板都是基于以下6个组件构建的，组件之间充分地解耦，可以独立地开发和验证，一个模板可以包含任意类型和数量的组件：
+
 1. Model：模型，指的是PyTorch模型，封装为RemoteModel后支持高效推理和检查点管理
 2. Agent：代表了游戏中具备一定决策和动作能力的智能体，多个智能体之间可以灵活的交互
 3. Buffer：缓冲区，也是强化学习中的经验回放池，支持不同采样算法，支持添加不同数据源
 4. Source：数据源，可以是文件、网络、对象存储等的封装，添加到缓存区后用于采样训练
 5. Actor：封装了智能体和环境的交互逻辑，也是部署时对外暴露的AI服务接口
 6. Trainer：封装了模型、缓存区和训练算法，支持分布式拓展
+
 目前Bray中定义了三种机器学习的模板：强化学习、模仿学习、模仿+强化学习，分别对应到[这个代码目录](../template)下的三个配置文件。
+
 ## 二、模板示例
+
 以模仿+强化学习模板为例，它的[配置参数](../template/config.yaml)为：
+
 ```yaml
 project: template  # 项目名称，此处为模板
 trial: train_sl_rl_v0  # 实验名称，项目和实验共同确定一个命名空间
@@ -167,14 +176,19 @@ network:
   action_space: 9 # 输出空间：[动作数量]
 ```
 启动模仿+强化训练的命令：
+
 ```bash
 python -m bray.launch --config template/sl_rl.yaml
 ```
+
 可以通过--help选项查看launch的参数：
+
 ```bash
 python -m bray.launch --help
 ```
+
 模板中每个组件的详细定义可以[对应目录](../template/)下的代码，以模仿训练的[Source](../template/sources/source1.py)为例，定义如下：
+
 ```python
 from typing import Iterator, Iterable
 import bray
@@ -218,9 +232,13 @@ def build_eval_source(name, config: dict) -> list[Iterator[bray.NestedArray]]:
 ```
 
 ## 三、如何使用模板
+
 新增项目时，将[template](../template/)复制为项目名称，修改其中的配置文件和对应组件的定义，即可开始训练。注意当前template目录包含了模仿和强化的所有组件，可以根据具体情况进行删除和修改，比如：
 模仿学习只需要定制化组件Model、Source、Trainer，在部署阶段再用到Actor；强化学习需要定制化组件Model、Agent、Trainer。
+
 具体的组件实现可以参考模板中的示例，请关注它的注释和继承的基类。已有的不是基于模板实现的项目，可以考虑迁移过来，方便使用到Bray的最新功能和特性。
+
 ## 四、未来规划
+
 得益于模板的抽象，可以通过组件化的方式进行机器学习，后续会新增更多的机器学习模板，比如League训练的模板。
 对于一些常用的，简单的模板，后续会加入可视化建模的功能，提供更加直观的方式来搭建训练流程，并集成Tensorboard、Notebook等可视化工具。

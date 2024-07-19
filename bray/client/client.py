@@ -37,7 +37,7 @@ class Client:
     
 
 if __name__ == "__main__":
-    client = Client("apps-hp.danlu.netease.com", 36390)
+    client = Client("localhost", 36390)
     client.start()
     for i in range(10):
         print(client.tick("hello world"))

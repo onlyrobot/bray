@@ -1,31 +1,45 @@
 import torch
-from typing import Type
-import math
-import time
+from typing import Type, List, Dict
+import time, os
 import ray
 import numpy as np
 from bray.trainer.base import Trainer
 from bray.model.model import RemoteModel, get_torch_model_weights
 from bray.buffer.buffer import RemoteBuffer
 from bray.buffer.utils import (
-    BatchBuffer,
+    ListBuffer,
+    StackBuffer,
+    ConcateBuffer,
     TorchTensorBuffer,
     PrefetchBuffer,
     CallbackBuffer,
     SampleBuffer,
 )
-from bray.metric.metric import merge_time_ms
-from bray.master.master import get
+from bray.master.master import merge_time_ms
+from bray.utils import ray_scheduling_local
+from ray.train.torch import TorchTrainer
+from ray.train import (
+    RunConfig, ScalingConfig, get_context, CheckpointConfig
+)
 
+# from ray.air.config import (
+#     RunConfig, ScalingConfig, CheckpointConfig
+# )
+# from ray.air import session
 
-def train(
+# get_context = lambda: session
+
+def train_loop_per_worker(
     name: str,
     Trainer: Type[Trainer],
+    config: Dict,
     remote_model: RemoteModel,
-    remote_buffers: dict[str:RemoteBuffer],
-    buffer_weights: [float] = None,
+    remote_models: List[RemoteModel] = None,
+    remote_buffer: RemoteBuffer = None,
+    remote_buffers: Dict[str, RemoteBuffer] = None,
+    buffer_weights: List[float] = None,
     batch_size: int = 1,
-    batch_kind: ["concate", "stack", None] = "concate",
+    batch_kind: ["concate", "stack", "list", None] = "concate",
     prefetch_size: int = 1,
     max_reuse: int = 0,
     learning_rate: float = None,
@@ -35,206 +49,160 @@ def train(
     remote_eval_buffer: RemoteBuffer = None,
     eval_interval: int = 1000,
     eval_steps: int = 10,
+    optimizer_step_interval: int = 1,
 ):
-    # initialize horovod and torch
-    import horovod.torch as hvd
-
-    hvd.init()
+    # initialize torch trainer worker and train loop
+    world_size = get_context().get_world_size()
+    world_rank = get_context().get_world_rank()
     np.random.seed(0)
-    device = torch.device(
-        hvd.local_rank() if torch.cuda.is_available() else "cpu",
-    )
+    device = ray.train.torch.get_device()
+    print(f"Trainer {name} worker {world_rank} starting at device {device}")
     # initialize model and and trainer
     model = remote_model.get_model()
-    model.to(device=device)
-    trainer = Trainer(name, get("config"), model)
+    # Instantiate and prepare model for training.
+    model = ray.train.torch.prepare_model(model)
+
     # initialize optimizer
     parameters = model.parameters()
-    optimizer = torch.optim.Adam(parameters, lr=learning_rate or 5e-4)
-    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
-    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
-    optimizer = hvd.DistributedOptimizer(
-        optimizer,
-        model.named_parameters(),
-    )
+    optimizer = torch.optim.Adam(parameters, 
+        lr=learning_rate or 5e-4)
+    trainer = Trainer(name, config, model, optimizer)
     # initialize buffer
     # total batch size = buffer batch size * batch_size * horovod size
-    buffers = list(remote_buffers.values())
+    if remote_buffer: buffers = [remote_buffer]
+    else:
+        assert remote_buffers, "remote_buffers is None"
+        buffers = list(remote_buffers.values())
     if remote_eval_buffer:
         buffers.append(remote_eval_buffer)
+    buffer_batch_size = buffers[0].batch_size or 1
     names = [buffer.name for buffer in buffers]
-    buffers = [
-        BatchBuffer(
-            b,
-            batch_size=batch_size,
-            kind=batch_kind,
-        )
-        for b in buffers
-    ]
-    buffers = [
-        CallbackBuffer(
-            b,
-            callback=trainer.handle,
-        )
-        for b in buffers
-    ]
-    buffers = [
-        TorchTensorBuffer(
-            b,
-            device=device,
-        )
-        for b in buffers
-    ]
-    buffers = [
-        PrefetchBuffer(
-            buffers[i],
-            size=max(1, prefetch_size),
-            max_reuse=max_reuse,
-            name=names[i],
-        )
+    
+    BatchBuffer = lambda b, size: b
+    if batch_kind == "stack": BatchBuffer = StackBuffer
+    if batch_kind == "list": BatchBuffer = ListBuffer
+    if batch_kind == "concate":
+        BatchBuffer = ConcateBuffer
+    buffers = [BatchBuffer(b, size=batch_size) for b in buffers]
+    buffers = [CallbackBuffer(b, callback=trainer.handle) 
+        for b in buffers]
+    buffers = [TorchTensorBuffer(b, device=device) 
+        for b in buffers]
+    buffers = [PrefetchBuffer(buffers[i], 
+            max(1, prefetch_size), max_reuse, names[i])
         if prefetch_size > 0 or max_reuse > 0
         else buffers[i]
-        for i in range(len(buffers))
-    ]
-    if remote_eval_buffer:
-        eval_buffer = buffers.pop()
-    if len(buffers) > 1:
+        for i in range(len(buffers))]
+    if remote_eval_buffer: eval_buffer = buffers.pop()
+    if remote_buffer: buffer = buffers.pop()
+    elif len(buffers) > 1:
         buffer = SampleBuffer(buffers, buffer_weights)
-    else:
-        buffer = buffers[0]
+    else: buffer = buffers[0]
 
-    def eval_one_step():
-        beg = time.time()
-        replay = next(eval_buffer)
-        merge_time_ms(f"replay/{name}", beg)
-        beg = time.time()
+    def eval_with_metric():
+        next_beg, replay = time.time(), next(eval_buffer)
+        merge_time_ms(f"eval/replay/{name}", next_beg)
+        eval_beg = time.time()
         trainer.eval(replay)
-        merge_time_ms(f"eval/{name}", beg)
+        merge_time_ms(f"eval/{name}", eval_beg)
 
     def eval_at_step(step):
         print(f"Trainer {name} eval at step {step}")
         model.eval()
         with torch.no_grad():
-            for _ in range(eval_steps):
-                eval_one_step()
+            for _ in range(eval_steps): eval_with_metric()
         model.train()
         print(f"Trainer {name} eval done")
 
-    restore_step = remote_model.step
-    print("Trainer {} start from step {}".format(name, restore_step))
-    start_step = restore_step + 1
-    for i in range(start_step, start_step + num_steps):
+    model_step = remote_model.step
+    if world_rank == 0:
+        print(f"Trainer {name} start with {remote_model.name}" + 
+            f"at step {model_step}")
+    optimizer.zero_grad()
+    train_step_beg = time.time()
+    for i in range(1, 1 + num_steps):
         if remote_eval_buffer and i % eval_interval == 0:
             eval_at_step(i)
-        beg = time.time()
-        replay = next(buffer)
-        merge_time_ms(f"replay/{name}", beg)
-        beg = time.time()
-        optimizer.zero_grad()
-        loss = trainer.loss(replay)
+        next_beg, replay = time.time(), next(buffer)
+        if world_rank == 0:
+            merge_time_ms(f"replay/{name}", next_beg)
+        model_step += world_size * batch_size * buffer_batch_size
+        # zero grad, loss backward and optimizer step
+        loss = trainer.loss(replay, model_step)
+        if optimizer_step_interval > 1:
+            loss /= optimizer_step_interval
         loss.backward()
-        optimizer.synchronize()
+        if i % optimizer_step_interval != 0: continue
+        # TODO(pengyao): is clip in ddp ok?
         torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            max_norm=clip_grad_max_norm,
-        )
-        with optimizer.skip_synchronize():
-            optimizer.step()
-        if hvd.rank() != 0:
+            model.parameters(), max_norm=clip_grad_max_norm)
+        optimizer.step(), optimizer.zero_grad()
+        if world_rank != 0: continue
+        merge_time_ms(f"train/{name}", train_step_beg)
+        train_step_beg = time.time()
+        optimizer_step = i // optimizer_step_interval
+        if optimizer_step % 10 == 0:
+            print(f"Trainer {name} step {i}, loss: {loss.item()}")
+        if optimizer_step % weights_publish_interval != 0:
             continue
-        merge_time_ms(f"train/{name}", beg)
-        if i % 10 == 0:
-            print(f"Trainer {name} train step {i}, loss: {loss.item()}")
-        if i % weights_publish_interval != 0:
-            continue
+        publish_beg = time.time()
+        module = model.module if world_size > 1 else model
         remote_model.publish_weights(
-            get_torch_model_weights(model),
+            get_torch_model_weights(module), model_step
         )
+        merge_time_ms(f"publish/{name}", publish_beg)
+        train_step_beg = time.time()
     print(f"Trainer {name} train all {num_steps} steps done!")
 
 
-class RemoteTrainer:
+def train(name: str, torch_trainer: TorchTrainer):
+    @ray.remote(num_cpus=0)
+    def Trainer():
+        try: return torch_trainer.fit()
+        except Exception as e: pass
+        print(f"Fail to fit Trainer {name}: {e}")
+        raise e
+    return Trainer.options(
+        scheduling_strategy=ray_scheduling_local()).remote()
+
+
+def RemoteTrainer(
+    name: str , Trainer: Type[Trainer], use_gpu: bool = None, 
+    num_workers: int = None, **kwargs
+):
     """
-    这个类用于在多个节点上训练模型，它会在多个节点上创建 Trainer 的实例，
-    然后调用 train 函数
+    Args:
+        Trainer: 被封装的Trainer类，该类继承自 bray.Trainer
+        use_gpu: 是否使用GPU，如果不指定则会自动判断
+        num_workers: 训练的 worker 数量，如果不指定则会自动计算
+        **kwargs: 训练函数train_loop_per_worker的关键字参数
     """
+    total_gpus = ray.available_resources().get("GPU", 0)
 
-    def __init__(
-        self,
-        name: str = "default",
-        use_gpu: bool = None,
-        num_workers: int = None,
-        cpus_per_worker: int = None,
-        total_cpus_ratio: float = 0.75,
-        framework: ["torch", "tensorflow"] = "torch",
-    ):
-        """
-        Args:
-            use_gpu: 是否使用GPU，如果不指定则会自动判断
-            num_workers: 训练的 worker 数量，如果不指定则会自动计算
-            cpus_per_worker: 每个节点的CPU核心数，仅当 use_gpu 为 False 时有效
-            total_cpus_ratio: 训练节点的总CPU核心数占用比例，仅当 use_gpu 为 False 时有效
-        """
-        self.name = name
-        from horovod.ray import RayExecutor
+    if use_gpu is None: use_gpu = total_gpus > 0
 
-        total_cpus = ray.available_resources()["CPU"]
-        total_gpus = ray.available_resources().get("GPU", 0)
+    num_workers = num_workers if num_workers else total_gpus
 
-        use_gpu = use_gpu if use_gpu == True else use_gpu is None and total_gpus > 0
+    def train_wrapper(kwargs):
+        train_loop_per_worker(name=name, Trainer=Trainer, **kwargs)
 
-        if not use_gpu:
-            trainer_cpus = max(1, int(total_cpus * total_cpus_ratio))
-            if not num_workers:
-                num_workers = int(math.sqrt(trainer_cpus))
-            if not cpus_per_worker:
-                cpus_per_worker = trainer_cpus // num_workers
-        else:
-            cpus_per_worker = 2
-            num_workers = num_workers if num_workers else total_gpus
+    scaling_config = ScalingConfig(
+        num_workers=num_workers, use_gpu=use_gpu,
+        trainer_resources={"CPU": 0}, resources_per_worker={"CPU": 0}
+    )
 
-        print(
-            f"Trainer {name} start with {num_workers} {'GPU' if use_gpu else 'CPU'} workers, "
-            + f"{cpus_per_worker} cpus per worker"
-        )
+    trial_path = ray.get_runtime_context().namespace
+    storage_path = os.path.join(trial_path, name)
+    checkpoint_config = CheckpointConfig(
+        num_to_keep=1, checkpoint_frequency=0)
+    run_config = RunConfig(
+        # storage_path=storage_path, checkpoint_config=checkpoint_config
+    )
 
-        settings = RayExecutor.create_settings()
-        self.executor = RayExecutor(
-            settings,
-            num_workers=num_workers,
-            cpus_per_worker=cpus_per_worker,
-            use_gpu=use_gpu,
-        )
-        self.executor.start()
-
-        def init_torch():
-            import torch
-
-            torch.set_num_interop_threads(cpus_per_worker)
-            torch.set_num_threads(cpus_per_worker)
-
-        def init_tensorflow():
-            import tensorflow as tf
-
-            gpus = tf.config.experimental.list_physical_devices("GPU")
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-
-            threading = tf.config.threading
-            threading.set_inter_op_parallelism_threads(cpus_per_worker)
-            threading.set_intra_op_parallelism_threads(cpus_per_worker)
-
-        init_framework = init_torch if framework == "torch" else init_tensorflow
-        ray.get(self.executor.run_remote(init_framework))
-
-    def train(self, train: callable, *args, **kwargs) -> list:
-        """
-        在多个节点上执行训练函数
-        Args:
-            train: 训练函数
-            *args: 训练函数的位置参数
-            **kwargs: 训练函数的关键字参数
-        Returns:
-            训练函数在每个节点上的返回值，可以通过 ray.get() 获取
-        """
-        return self.executor.run_remote(train, args, kwargs)
+    torch_trainer = TorchTrainer(
+        train_wrapper, scaling_config=scaling_config, 
+        train_loop_config=kwargs, run_config=run_config,
+    )
+    print(f"Trainer {name} starting with {num_workers} " + 
+            f"{'GPU' if use_gpu else 'CPU'} workers, ")
+    return train(name, torch_trainer)

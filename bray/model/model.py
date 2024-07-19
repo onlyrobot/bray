@@ -1,11 +1,11 @@
-import asyncio
-import time
-import random
-import os
+from typing import List, Dict, Tuple, Union
+import asyncio, time, random, os
+import pickle, struct
 from concurrent.futures import ThreadPoolExecutor
+import multiprocessing.shared_memory as shm
 
 import ray
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from bray.utils import ray_scheduling_local
 import torch
 import numpy as np
 from bray.utils.nested_array import (
@@ -15,833 +15,875 @@ from bray.utils.nested_array import (
     unflatten_nested_array,
     make_batch,
     split_batch,
+    serialize_nested_array,
+    deserialize_nested_array,
 )
-from bray.metric.metric import merge, query, merge_time_ms
+from bray.utils.worker import WorkerLoadBalance
+from bray.master.master import merge, query, merge_time_ms
 
 
-def get_torch_model_weights(model: torch.nn.Module) -> NestedArray:
-    return {k: v.cpu().detach().numpy() for k, v in model.state_dict().items()}
+def get_torch_model_weights(model: torch.nn.Module) -> Dict:
+    return {k: v.cpu().detach().numpy() 
+        for k, v in model.state_dict().items()}
 
 
-def set_torch_model_weights(model: torch.nn.Module, weights: NestedArray):
-    model.load_state_dict(handle_nested_array(weights, torch.from_numpy))
+def set_torch_model_weights(model: torch.nn.Module, weights: Dict):
+    model.load_state_dict(
+        {k: torch.from_numpy(v) for k, v in weights.items()})
 
 
-def build_tensorflow_model(model, forward_args, forward_kwargs):
-    tensorflow_model = model()
-    args, kwargs = forward_args, forward_kwargs
-    import tensorflow as tf
-
-    args, kwargs = handle_nested_array((args, kwargs), tf.identity)
-    tensorflow_model(*args, **kwargs)
-    return tensorflow_model
+def save_weights(weights: Dict, path: str):
+    torch.save({k: torch.as_tensor(v) for k, v in weights.items()}, path)
 
 
-def save_weights(weights: NestedArray, path: str):
-    tensor_weights = handle_nested_array(weights, torch.as_tensor)
-    torch.save(tensor_weights, path)
+class ModelForwardProxy:
+    def __init__(self, max_batch_size, parallel=1, max_pending_time=0.0):
+        self.max_batch_size, self.parallel = abs(max_batch_size), parallel
+        self.fix_batch_size = max_batch_size < 0
+        self.forward_conds = [
+            asyncio.Condition() for _ in range(1 + parallel)]
+        self.forward_cond = None
+        self.pending_forwards, self.ready_forwards = [], []
+        self.pending_time, self.forward_beg = 0.0, time.time()
+        self.num_pendings, self.max_pending_time = 0, max_pending_time
+        self.pending_batch_size, self.outs, self.out = 0, [], None
+
+    async def proxy_forward(self, args, kwargs) -> NestedArray:
+        raise NotImplementedError
+    
+    def make_batch(self, pending_forwards, batch, parts):
+        if not self.outs: self.outs.append(make_batch(
+            [split_batch(pending_forwards[0])[0]] * self.max_batch_size))
+        self.out = out = self.outs.pop()
+        if batch != self.max_batch_size:
+            out = handle_nested_array(self.out, lambda x: x[:batch])
+        args, kwargs = make_batch(
+            pending_forwards, concate=True, parts=parts, out=out)
+        return self.out if self.fix_batch_size else (args, kwargs)
+
+    async def batch_forward(self, pending_forwards, batch=0):
+        parts, pending_size = [], len(pending_forwards)
+        if self.fix_batch_size or pending_size > 1:
+            args, kwargs = self.make_batch(pending_forwards, batch, parts)
+        else: args, kwargs = pending_forwards[0]
+        out, self.out = self.out, None
+        outputs = await self.proxy_forward(args, kwargs)
+        if self.fix_batch_size and batch != self.max_batch_size:
+            outputs = handle_nested_array(outputs, lambda x: x[:batch])
+        if batch: merge(
+            f"forward/batch_size_parallel_{self.parallel}", batch)
+        if out: self.outs.append(out)
+        return split_batch(outputs, parts) if parts else [outputs]
+
+    async def __forward_coro(self, forward_cond):
+        forward_beg = self.forward_beg = time.time()
+        # async with forward_cond:
+        #     await forward_cond.wait_for(lambda: self.pending_forwards)
+        pending_size = len(self.pending_forwards)
+        last_pending_size = 0
+        while (self.pending_batch_size < self.max_batch_size 
+        and (pending_size != last_pending_size or 
+        time.time() - forward_beg < self.max_pending_time)):
+            last_pending_size = pending_size
+            await asyncio.sleep(0)
+            pending_size = len(self.pending_forwards)
+        pending_forwards = self.pending_forwards
+        ready_forwards = self.ready_forwards
+        batch, self.pending_batch_size = self.pending_batch_size, 0
+        self.pending_forwards, self.ready_forwards = [], []
+        self.forward_cond = None
+        try: ready_forwards[:] = await self.batch_forward(
+                pending_forwards, batch)
+        except Exception as e:
+            print(f"Fail to forward: {e}")
+        async with forward_cond: forward_cond.notify_all()
+        self.forward_conds.append(forward_cond)
+        self.pending_time = self.pending_time * 7 / 8 + (
+            time.time() - forward_beg) / 8 / self.parallel
+        # merge(f"wait/parallel{self.parallel}", self.pending_time)
+
+    async def split_batch(self, args, kwargs, pending, batch):
+        parts = [self.max_batch_size] * (batch // self.max_batch_size)
+        if extra := batch % self.max_batch_size: parts += [1] * extra
+        inputs = split_batch((args, kwargs), parts=parts)
+        outputs = await asyncio.gather(*[
+            self.forward(*i, pending) for i in inputs])
+        return make_batch(outputs, concate=True)
+    
+    async def _forward_coro(self, ready_forwards):
+        while not self.forward_cond and not self.forward_conds: 
+            await asyncio.sleep(0.001)
+        if ready_forwards is not self.ready_forwards:
+            while not ready_forwards: await asyncio.sleep(0)
+            return None
+        if self.forward_cond: return self.forward_cond
+        self.forward_cond = self.forward_conds.pop()
+        pending_time = self.forward_beg + self.pending_time - time.time()
+        if pending_time > 0:
+            await asyncio.sleep(pending_time)
+        asyncio.create_task(self.__forward_coro(self.forward_cond))
+        return self.forward_cond
+
+    async def forward(self, args, kwargs, pending=True) -> NestedArray:
+        if self.max_batch_size == 0:
+            return (await self.batch_forward([(args, kwargs)]))[0]
+        batch = flatten_nested_array((args, kwargs))[0].shape[0]
+        if batch > self.max_batch_size:
+            return await self.split_batch(args, kwargs, pending, batch)
+        max_batch_size = self.max_batch_size - batch
+        num_pendings = self.num_pendings
+        while self.pending_batch_size > max_batch_size or num_pendings:
+            if not pending:
+                raise RuntimeError("Too many requests.")
+            rate, num_pendings = (
+                self.pending_batch_size + num_pendings
+                ) / self.max_batch_size, 0
+            self.num_pendings += batch
+            await asyncio.sleep(self.pending_time * rate)
+            self.num_pendings -= batch
+        forward_index = len(self.pending_forwards)
+        self.pending_forwards.append((args, kwargs))
+        self.pending_batch_size += batch
+        ready_forwards = self.ready_forwards
+        if not (forward_cond := self.forward_cond):
+            forward_cond = await self._forward_coro(ready_forwards)
+        if ready_forwards: return ready_forwards[forward_index]
+        async with forward_cond:
+            await forward_cond.wait_for(lambda: ready_forwards)
+        return ready_forwards[forward_index]
 
 
-class ModelWorker:
-    ort_session_and_forward_outputs: dict[str, tuple] = {}
+class TorchModelWorker:
+    def __init__(self, name, model: "Model", num_cpus, num_gpus, 
+        raw_model, **kwargs):
+        self.name, self.model = name, model
+        self.num_cpus, self.num_gpus = num_cpus, num_gpus
+        self.torch_model = raw_model
 
-    def __init__(self, name: str, model: "Model" = None):
-        self.name, self.model = name, model if model else ray.get_actor(
-            name.split("/")[0]
-        )
-        (
-            self.current_step,
-            self.max_batch_size,
-            self.use_onnx,
-            self.num_cpus,
-            self.num_gpus,
-        ) = ray.get(self.model.get_worker_initialize_info.remote(name))
+    def initialize_runtime(self):
+        weights = ray.get(self.model.get_weights.remote(self.name))
+        num_cpus = max(1, int(self.num_cpus))
+        if torch.get_num_interop_threads() != num_cpus:
+            torch.set_num_interop_threads(num_cpus)
+        if torch.get_num_threads() != num_cpus: 
+            torch.set_num_threads(num_cpus)
+        model = self.torch_model.requires_grad_(False).eval()
+        set_torch_model_weights(model, weights)
+        self.torch_model = model.cuda() if self.num_gpus else model
 
-        self.pending_forwards: list[tuple, dict] = []
-        self.ready_forwards: list[NestedArray] = []
-        self.forward_cond = asyncio.Condition()
+    def handler(self, array):
+        if not isinstance(array, (np.ndarray, torch.Tensor)):
+            return array
+        tensor = torch.as_tensor(array)
+        return tensor if not self.num_gpus else tensor.cuda()
 
-        self.set_model_weights = set_torch_model_weights
-        self._init_onnx() if self.use_onnx else self._init_torch()
-        self.__forward = self._forward_onnx if self.use_onnx else self._forward_torch
+    def forward(self, batch_args, batch_kwargs):
+        batch_args, batch_kwargs = handle_nested_array(
+            (batch_args, batch_kwargs), self.handler)
+        outputs = self.torch_model(*batch_args, **batch_kwargs)
+        return handle_nested_array(outputs, 
+        lambda x: x.cpu().detach().numpy(), type_check=False)
 
-        self.forward_task, self.subscribe_task = None, None
-        self.is_initialized = False
+    def set_weights(self, weights: NestedArray):
+        set_torch_model_weights(self.torch_model, weights)
 
-    async def _initialize_async_context(self):
-        self.forward_task = asyncio.create_task(self._forward_coro())
-        self.forward_task.add_done_callback(
-            lambda t: None if t.cancelled() else t.result()
-        )
-        self.subscribe_task = asyncio.create_task(self._subscribe_weights())
-        self.subscribe_task.add_done_callback(
-            lambda t: None if t.cancelled() else t.result()
-        )
-        self.is_initialized = True
-        asyncio.create_task(self.finalize_async_context())
 
-    async def finalize_async_context(self):
-        while self.is_initialized:
-            await asyncio.sleep(10)
-        async with self.forward_cond:
-            self.forward_cond.notify_all()
-        self.forward_task.cancel()
-        self.subscribe_task.cancel()
-        self.forward_task = self.subscribe_task = None
+class OnnxModelWorker:
+    cached_onnx_session: Dict[str, tuple] = {}
 
-    def _build_ort_session(self, onnx_model):
-        provider = ["CUDAExecutionProvider"] if self.num_gpus else []
+    def __init__(self, name, model: "Model", num_cpus, num_gpus, 
+        raw_model, use_onnx, **kwargs):
+        self.name, self.model = name, model
+        self.num_cpus, self.num_gpus = num_cpus, num_gpus
+        self.onnx_model, self.use_onnx = raw_model, use_onnx
+
+    def build_ort_session(self):
+        # provider = [("TensorrtExecutionProvider", {
+        #     "trt_fp16_enable": True, "trt_engine_cache_enable": True
+        # })] if self.num_gpus else []
+        provider = ["TensorrtExecutionProvider", "CUDAExecutionProvider"
+            ] if self.num_gpus else []
         num_cpus = max(1, int(self.num_cpus))
         import onnxruntime as ort
 
+        self.onnx_model, onnx_model = None, self.onnx_model
         options = ort.SessionOptions()
         options.intra_op_num_threads = num_cpus
         options.inter_op_num_threads = num_cpus
-        return ort.InferenceSession(onnx_model, options, provider)
+        outputs = ray.get(self.model.get_forward_outputs.remote())
+        return ort.InferenceSession(
+        onnx_model, options, provider), outputs
 
-    def _init_onnx(self):
-        self.ort_session, self.forward_outputs = None, None
-        base_name = self.name.split("/")[0]
-        if self.use_onnx == "train":
-            (
-                self.ort_session,
-                self.forward_outputs,
-            ) = ModelWorker.ort_session_and_forward_outputs.get(
-                base_name,
-                (None, None),
-            )
-        if not self.ort_session:
-            onnx_model, self.forward_outputs = ray.get(
-                self.model.get_onnx_model.remote(self.name)
-            )
-            self.ort_session = self._build_ort_session(onnx_model)
-        self.onnx_input_names = [input.name for input in self.ort_session.get_inputs()]
-        if self.use_onnx != "train":
-            return
-        ModelWorker.ort_session_and_forward_outputs[base_name] = (
-            self.ort_session,
-            self.forward_outputs,
-        )
+    def get_cached_onnx_session(self):
+        if self.use_onnx != "train": return None, None
+        base_name = self.name.split("/clone")[0]
+        if base_name not in OnnxModelWorker.cached_onnx_session:
+            return None, None
+        return OnnxModelWorker.cached_onnx_session[base_name]
+
+    def set_cached_onnx_session(self, sess, outputs):
+        if self.use_onnx != "train": return
+        base_name = self.name.split("/clone")[0]
+        OnnxModelWorker.cached_onnx_session[base_name] = (sess, outputs)
+
+    def initialize_runtime(self):
+        sess, outputs = self.get_cached_onnx_session()
+        if not sess: sess, outputs = self.build_ort_session()
+        self.set_cached_onnx_session(sess, outputs)
+        self.input_names = [i.name for i in sess.get_inputs()]
+        self.sess, self.outputs = sess, outputs
+        if self.use_onnx != "train": return
         weights = ray.get(self.model.get_weights.remote(self.name))
-        self.weights = [weights[n] for n in self.onnx_input_names if n in weights]
+        weights = handle_nested_array(weights, lambda x: x.copy())
+        self.weights = [weights[n] 
+        for n in self.input_names if n in weights]
 
-    def _init_torch(self):
-        model = ray.get(ray.get(self.model.get_model.remote()))
-        if not isinstance(model, torch.nn.Module):
-            return self._init_tensorflow(model)
-        num_cpus = max(1, int(self.num_cpus))
-        if torch.get_num_threads() != num_cpus:
-            torch.set_num_threads(num_cpus)
-        if torch.get_num_interop_threads() != num_cpus:
-            torch.set_num_interop_threads(num_cpus)
-        model.requires_grad_(False)
-        model.eval()
-        weights = ray.get(self.model.get_weights.remote(self.name))
-        set_torch_model_weights(model, weights)
-        if self.num_gpus:
-            model = model.cuda()
-        self.torch_model = model
-
-    def _init_tensorflow(self, model):
-        num_cpus = max(1, int(self.num_cpus))
-        import tensorflow as tf
-
-        try:
-            threading = tf.config.threading
-            threading.set_inter_op_parallelism_threads(num_cpus)
-            threading.set_intra_op_parallelism_threads(num_cpus)
-        except:
-            pass
-        if self.num_gpus:
-            pass
-        else:
-            tf.config.set_visible_devices([], "GPU")
-        self.torch_model = model = model()
-        args, kwargs = ray.get(self.model.get_forward_inputs.remote())
-        self.torch_model(*args, **kwargs)
-        weights = ray.get(self.model.get_weights.remote(self.name))
-        model.set_weights(weights)
-        self.set_model_weights = lambda m, w: m.set_weights(w)
-        self.tensorflow_model = tf.function(model)
-        self._forward_torch = self._forward_tensorflow
-
-    def _forward_torch(self, batch_args, batch_kwargs):
-        handler = (
-            (lambda x: torch.from_numpy(x).cuda())
-            if self.num_gpus
-            else torch.from_numpy
-        )
-        batch_args, batch_kwargs = handle_nested_array(
-            (batch_args, batch_kwargs), handler
-        )
-        outputs = self.torch_model(*batch_args, **batch_kwargs)
-        return handle_nested_array(
-            outputs, lambda x: x.cpu().detach().numpy(), type_check=False
-        )
-
-    def _forward_onnx(self, batch_args, batch_kwargs):
-        sess = self.ort_session
+    def forward(self, batch_args, batch_kwargs):
         flatten_input = flatten_nested_array(
             batch_args + tuple(batch_kwargs.values()), sort_keys=True
         )
         if self.use_onnx == "train":
             flatten_input.extend(self.weights)
-        inputs = dict(zip(self.onnx_input_names, flatten_input))
-        # output_names = [output.name for output in sess.get_outputs()]
-        # print(handle_nested_array(inputs, lambda x: (x.shape, x.dtype)))
-        outputs = sess.run(None, inputs)
-        return unflatten_nested_array(self.forward_outputs, outputs)
+        inputs = dict(zip(self.input_names, flatten_input))
+        # output_names = [
+        #     output.name for output in self.sess.get_outputs()]
+        # print(handle_nested_array(
+        #     inputs, lambda x: (x.shape, x.dtype)))
+        outputs = self.sess.run(None, inputs)
+        return unflatten_nested_array(self.outputs, outputs)
 
-    def _forward_tensorflow(self, batch_args, batch_kwargs):
-        import tensorflow as tf
+    def set_weights(self, weights: NestedArray):
+        if self.use_onnx != "train":
+            return print("Set onnx weights only in train mode.")
+        self.weights = [
+        v.copy() for k, v in weights if k in self.input_names]
 
-        batch_args, batch_kwargs = handle_nested_array(
-            (batch_args, batch_kwargs), tf.identity
-        )
-        outputs = self.tensorflow_model(*batch_args, **batch_kwargs)
-        return handle_nested_array(outputs, lambda x: x.cpu().numpy())
 
-    async def _forward(self, pending_forwards: list[tuple, dict]):
-        beg, parts = time.time(), []
-        batch_args, batch_kwargs = make_batch(
-            pending_forwards, concate=True, parts=parts
-        )
-        outputs = await asyncio.get_running_loop().run_in_executor(
-            None, self.__forward, batch_args, batch_kwargs
-        )
-        ready_forwards = split_batch(outputs, parts)
-        merge_time_ms(f"forward/{self.name}", beg)
-        return ready_forwards
+class ModelWeightsPublisherMeta:
+    def __init__(self, name):
+        self.shm_name = f"{name}-weights".replace("/", "-")
+        self.cond = asyncio.Condition()
+        self.weights, self.step, self.shm = None, 0, None
 
-    async def __forward_coro(self, forward_cond):
-        pending_forwards = self.pending_forwards
-        cond = self.forward_cond
-        async with cond:
-            await cond.wait_for(lambda: pending_forwards)
-        self.pending_forwards = []
-        ready_forwards = self.ready_forwards
-        self.ready_forwards = []
-        forward_cond, self.forward_cond = self.forward_cond, forward_cond
+    def __del__(self): 
+        if self.shm: self.shm.close(), self.shm.unlink()
 
-        # set the ready_forwards to the previous pending_forwards
-        ready_forwards[:] = await self._forward(pending_forwards)
 
-        async with forward_cond:
-            forward_cond.notify_all()
+class ModelWeightsPublisher:
+    def __init__(self, name): self.name, self.pubs = name, {}
 
-    async def _forward_coro(self):
-        forward_cond = asyncio.Condition()
-        while self.is_initialized:
-            await self.__forward_coro(forward_cond)
+    def get_weights_publisher_meta(self, name):
+        if pub := self.pubs.get(name, None): return pub
+        self.pubs[name] = ModelWeightsPublisherMeta(name)
+        return self.pubs[name]
 
-    async def forward(self, args, kwargs, pending=True) -> NestedArray:
-        if not self.is_initialized:
-            await self._initialize_async_context()
-        # if self.max_batch_size == 1:
-        #     return (await self._forward([(args, kwargs)]))[0]
-        while len(self.pending_forwards) >= self.max_batch_size:
-            if not pending:
-                raise RuntimeError("Too many requests.")
-            await asyncio.sleep(0.001)
-        forward_index = len(self.pending_forwards)
-        self.pending_forwards.append((args, kwargs))
-        previous_forward_cond = self.forward_cond
-        previous_ready_forwards = self.ready_forwards
-        async with previous_forward_cond:
-            if forward_index == 0:
-                previous_forward_cond.notify_all()
-            await previous_forward_cond.wait_for(lambda: previous_ready_forwards)
-        return previous_ready_forwards[forward_index]
+    def create_shm(self, name, size):
+        try: return shm.SharedMemory(name, create=True, size=size)
+        except FileExistsError: pass
+        existing_shm = shm.SharedMemory(name=name)
+        existing_shm.close(), existing_shm.unlink()
+        return shm.SharedMemory(name, create=True, size=size)
 
-    async def __subscribe_weights(self):
-        beg = time.time()
-        try:
-            weights, step = await self.model.subscribe_weights.remote(
-                self.name, self.current_step
-            )
-        except Exception as e:
-            print(f"Fail to subscribe weights from {self.name}.", e)
-            return await asyncio.sleep(0.1)
-        if step <= self.current_step:
-            # print(f"Skip weights from {self.name}.")
-            return
-        self.current_step = step
-        try:
-            weights = await asyncio.wait_for(
-                weights, timeout=1,
-            )
-        except asyncio.TimeoutError:
-            print("Wait for weights timeout")
-            return
-        except Exception as e:
-            print(f"Fail to get weights from {self.name}.", e)
-            return
-        merge_time_ms(f"subscribe weights/{self.name}", beg)
-        merge(f"step/{self.name}/subscribe", step, desc={
-            "time_window_avg": "smoothed subscribe step"
-        })
-        if not self.use_onnx:
-            self.set_model_weights(self.torch_model, weights)
-        elif self.use_onnx == "train":
-            self.weights = [weights[n] for n in self.onnx_input_names if n in weights]
-        else:
-            print("Set onnx weights only in train mode.")
+    async def set_weights(self, name, weights, step):
+        signature, data = serialize_nested_array(weights)
+        pub = self.get_weights_publisher_meta(name)
+        if not (shm := pub.shm):
+            pub.signature = pickle.dumps(signature)
+            shm = self.create_shm(pub.shm_name, 8 + len(data))
+        if 8 + len(data) != shm.size:
+            return print("Invalid weights, signature not match")
+        shm.buf[:8] = struct.pack('q', step)
+        shm.buf[8: 8 + len(data)] = data
+        pub.step, pub.shm = step, shm
+        async with pub.cond: pub.cond.notify_all()
+
+    async def subscribe_weights(self, name, current_step):
+        pub = self.get_weights_publisher_meta(name)
+        pred = lambda: pub.shm and pub.step != current_step
+        coro = pub.cond.wait_for(pred)
+        async with pub.cond:
+            try: await asyncio.wait_for(coro, 10 * 60)
+            except: pass
+        return pub.shm_name, pub.step, pub.signature
+
+    def get_step(self, name) -> int:
+        ckpt_step = self.get_ckpt_steps(name)[-1]
+        return self.get_weights_publisher_meta(name).step or ckpt_step
+
+
+class ModelWeightsSubscriber:
+    async def initialize_subscriber(self, name, model: "Model"):
+        self.name, self.shm = name, None
+        self.current_step = -1
+        self.publisher = await model.get_weights_publisher.remote(
+            self.name, ray.get_runtime_context().get_node_id())
+        self.is_initialized = True
+        asyncio.create_task(self.subscribe_weights())
 
     async def _subscribe_weights(self):
-        if len(self.name.split("/")) != 1:
-            return
-        while self.is_initialized:
-            await self.__subscribe_weights()
+        weights_info = self.publisher.subscribe_weights.remote(
+            self.name, self.current_step)
+        subscribe_beg = time.time()
+        shm_name, step, signature = await weights_info
+        if not shm_name or step == self.current_step: return
+        if not self.shm:
+            self.signature = pickle.loads(signature)
+            self.shm = shm.SharedMemory(shm_name)
+        weights = deserialize_nested_array(
+            self.signature, self.shm.buf[8:])
+        await asyncio.get_running_loop().run_in_executor(
+            ModelWorker.executor, 
+            self.set_weights, weights)
+        if step != struct.unpack('q', self.shm.buf[:8])[0]:
+            print("Error: weights changed when subscribe")
+        self.current_step = step
+        merge_time_ms(f"subscribe/{self.name}", subscribe_beg)
 
-    def get_model_step(self) -> int:
-        """Get the current step of the model from worker to reduce Model overhead."""
-        return self.current_step
+    async def subscribe_weights(self):
+        try: await asyncio.wait_for(self._subscribe_weights(), 
+            timeout=random.randint(0, 10 * 60))
+        except asyncio.TimeoutError: pass
+        except Exception as e:
+            print(f"Fail to subscribe weights for {self.name}: {repr(e)}")
+            await asyncio.sleep(0.1)
+        if not self.is_initialized: return
+        asyncio.create_task(self.subscribe_weights())
 
-    def get_node_id(self) -> str:
-        return ray.get_runtime_context().get_node_id()
+    def set_weights(self, weights): raise NotImplementedError
+    
 
+class ModelWorker(ModelForwardProxy, ModelWeightsSubscriber):
+    executor: ThreadPoolExecutor = None
 
-class ModelMeta:
-    def __init__(self, num_workers=None, use_onnx=None, local_mode=False):
-        self.num_workers, self.workers = num_workers, []
-        self.max_batch_size = 1
-        self.weights, self.step, self.ckpt_step = None, 0, 0
-        self.use_onnx, self.onnx_step = use_onnx, -1
-        self.local_mode = local_mode
-        self.pending_create_workers = 0
-        self.ckpt_steps = []
-        self.step_cond = asyncio.Condition()
-        self.last_sub_weights, self.last_sub_step = None, -1
-        self.worker_cond = asyncio.Condition()
-
-
-@ray.remote(num_cpus=0)
-class Model:
-    def __init__(
-        self,
-        name: str,
-        torch_model: torch.nn.Module | object = None,
-        forward_args: tuple[np.ndarray] = None,
-        forward_kwargs: dict[str : np.ndarray] = None,
-        checkpoint_interval: int = None,
-        checkpoint: str | int = None,
-        max_batch_size: int = 1,
-        num_workers: int = None,
-        cpus_per_worker: float = 0.5,
-        gpus_per_worker: float = 0.0,
-        memory_per_worker: int = 1024,
-        use_onnx: str = None,
-        local_mode: bool = False,
-        override_model: bool = True,
+    def __init__(self, name, max_batch_size, cpus_per_worker, 
+        gpus_per_worker, port=None, use_onnx=None, model: "Model" = None
     ):
-        self.trial_path = ray.get_runtime_context().namespace
-        root_path = os.path.join(self.trial_path, f"{name}")
-        if not os.path.exists(root_path):
-            os.makedirs(root_path, exist_ok=True)
+        super().__init__(max_batch_size, parallel=1, max_pending_time=0.0)
 
-        self.torch_path = os.path.join(root_path, f"{name}.pt")
-        if torch_model is not None:
-            torch.save(torch_model, self.torch_path)
-        else:
-            assert os.path.exists(
-                self.torch_path
-            ), f"Model {name} not found, missing torch model"
-        self.name, self.model = name, None
-        self.override_model = torch_model is not None and override_model
+        self.name, self.model = name, model or ray.get_actor(
+            name.split("/clone")[0])
+        self.is_initialized = False
+        use_onnx, raw_model = ray.get(self.model.get_model.remote(
+            self.name, use_onnx))
+        if not use_onnx: raw_model = ray.get(raw_model)
 
-        args_path = os.path.join(root_path, "forward_inputs.pt")
-        if forward_args or forward_kwargs:
-            forward_args, forward_kwargs = handle_nested_array(
-                (forward_args, forward_kwargs), np.array
-            )
-            torch.save((forward_args, forward_kwargs), args_path)
-        else:
-            assert os.path.exists(args_path), "Missing forward args"
-            forward_args, forward_kwargs = torch.load(args_path)
-        self.forward_args = forward_args
-        self.forward_kwargs = forward_kwargs
+        if use_onnx: RuntimeWorker = OnnxModelWorker
+        else: RuntimeWorker = TorchModelWorker
+        if not ModelWorker.executor:
+            ModelWorker.executor = ThreadPoolExecutor(max_workers=1)
+            
+        self.runtime_worker = RuntimeWorker(
+            self.name, self.model, 
+            cpus_per_worker, gpus_per_worker, raw_model, 
+            use_onnx=use_onnx)
+        self.runtime_worker.initialize_runtime()
 
-        self.checkpoint_interval = checkpoint_interval
+        self.set_weights = self.runtime_worker.set_weights
+        if not port: return
+        asyncio.create_task(self.initialize_http_server(port))
 
-        self.models: dict[str:ModelMeta] = {}
+    async def proxy_forward(self, args, kwargs):
+        forward_beg = time.time()
+        outputs = await asyncio.get_running_loop().run_in_executor(
+            ModelWorker.executor, 
+            self.runtime_worker.forward, args, kwargs)
+        merge_time_ms(f"forward/{self.name}", forward_beg)
+        return outputs
 
-        asyncio.get_running_loop().set_default_executor(
-            ThreadPoolExecutor(max_workers=1)
-        )
+    async def forward(self, args, kwargs, pending=True):
+        is_initialized, self.is_initialized = self.is_initialized, True
+        if not is_initialized:
+            await self.initialize_subscriber(self.name, self.model)
+        return await super().forward(args, kwargs, pending)
 
-        if isinstance(checkpoint, str):
-            print(f"Model {name} loading checkpoint from {checkpoint}")
-            weights = torch.load(checkpoint)
-        elif not self.override_model or torch_model is None:
-            weights = None
-        elif isinstance(torch_model, torch.nn.Module):
-            weights = get_torch_model_weights(torch_model)
-        else:
-            tensorflow_model = build_tensorflow_model(
-                torch_model, forward_args, forward_kwargs
-            )
-            weights = tensorflow_model.get_weights()
+    def get_host_and_node_id(self):
+        node_id = ray.get_runtime_context().get_node_id()
+        return ray.util.get_node_ip_address(), node_id
 
-        weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-        if weights:
-            save_weights(weights, weights_path)
+    async def initialize_http_server(self, port):
+        from bray.utils.http_server import launch_http_server
+        await launch_http_server(port, self._http_forward)
 
-        meta = ModelMeta(num_workers, use_onnx, local_mode)
-        self._initialize_model(self.name, max_batch_size, meta, checkpoint)
+    def initialize_http_session(self):
+        node_id = ray.get_runtime_context().get_node_id()
+        # if node_id == self.node_id: self.host = "localhost"
+        self.url = f"http://{self.host}:{self.port}/step"
+        import requests
+        self.sess = requests.Session()
 
+    async def http_forward(self, args, kwargs, pending=True):
+        if not hasattr(self, "sess"): self.initialize_http_session()
+        data = pickle.dumps((args, kwargs, pending))
+        res = await asyncio.get_running_loop().run_in_executor(
+            None, self.sess.post, self.url, data)
+        if res.status_code != 200: raise Exception(res.text)
+        return pickle.loads(res.content)
+
+    async def _http_forward(self, data: bytes) -> bytes:
+        args, kwargs, pending = pickle.loads(data)
+        return pickle.dumps(await self.forward(args, kwargs, True))
+
+
+class ModelWorkerManagerMeta:
+    def __init__(self, num_workers, max_batch_size, local_mode):
+        self.num_workers, self.workers = num_workers, []
+        self.pending_create_workers = 0
+        self.max_batch_size, self.local_mode = max_batch_size, local_mode
+        self.cond = asyncio.Condition()
+
+
+class ModelWorkerManager:
+    def __init__(
+        self, cpus_per_worker, gpus_per_worker, memory_per_worker, port
+    ):
         self.cpus_per_worker = cpus_per_worker
         self.gpus_per_worker = gpus_per_worker
         self.memory_per_worker = memory_per_worker
+        self.port, self.w_metas = port, {}
+        self.num_workers = len([n for n in ray.nodes() if n["Alive"]])
+        asyncio.create_task(self.health_check())
 
-        self.RemoteModelWorker = ray.remote(ModelWorker).options(
-            num_cpus=cpus_per_worker,
-            num_gpus=gpus_per_worker,
-            memory=memory_per_worker * 1024 * 1024,
-            scheduling_strategy="SPREAD",
-        )
-        for _ in range(
-            len([node for node in ray.nodes() if node["Alive"]])
-            if num_workers is None
-            else num_workers
-        ):
-            asyncio.create_task(self._create_worker(self.name))
+    async def initialize_workers(
+        self, name, num_workers, max_batch_size, local_mode):
+        if name in self.w_metas: return
+        self.w_metas[name] = ModelWorkerManagerMeta(
+            num_workers, max_batch_size, local_mode)
+        if num_workers is None:
+            num_workers = self.num_workers
+        create_coros = [
+            self.create_worker(name) for _ in range(num_workers)]
+        await asyncio.gather(*create_coros)
 
-        asyncio.create_task(self._health_check())
-        if self.checkpoint_interval is None:
+    async def create_worker(self, name):
+        meta: ModelWorkerManagerMeta = self.w_metas[name]
+        num_workers = len(meta.workers) + meta.pending_create_workers
+        max_workers = meta.num_workers or self.num_workers
+        if num_workers >= max_workers: return
+        if self.port: port = self.port = self.port + 1
+        else: port = None
+        RemoteModelWorker = ray.remote(ModelWorker).options(
+            num_cpus=self.cpus_per_worker,
+            num_gpus=self.gpus_per_worker,
+            memory=self.memory_per_worker * 1024 * 1024,
+            scheduling_strategy="SPREAD")
+        worker = RemoteModelWorker.remote(
+            name, meta.max_batch_size, self.cpus_per_worker, 
+            self.gpus_per_worker, port)
+        meta.pending_create_workers += 1
+        is_health = await self._is_health(worker)
+        meta.pending_create_workers -= 1
+        if is_health is None: return
+        host, node_id = await worker.get_host_and_node_id.remote()
+        if self.port:
+            w = ModelWorker.__new__(ModelWorker)
+            w.forward, w.remote = w, w.http_forward
+            worker, w.worker = w, worker
+        worker.host, worker.node_id, worker.port = host, node_id, port
+        if (meta.num_workers is not None 
+            and len(meta.workers) >= meta.num_workers): return
+        meta.workers.append(worker)
+        async with meta.cond: meta.cond.notify_all()
+
+    async def _is_health(self, worker): raise NotImplementedError
+
+    async def _health_check(self, name):
+        meta: ModelWorkerManagerMeta = self.w_metas[name]
+        origin_workers_num = len(meta.workers)
+        active_workers = [
+            worker for worker in meta.workers[:origin_workers_num]
+            if await self._is_health(worker) is not None
+        ]
+        old_workers, meta.workers = meta.workers, active_workers
+        meta.workers.extend(old_workers[origin_workers_num:])
+        merge(f"worker/{name}", len(meta.workers), desc=
+            {"time_window_avg": "smoothed model worker num"})
+        if meta.num_workers is None: return
+        num_workers = len(meta.workers) + meta.pending_create_workers
+        if num_workers >= meta.num_workers: return
+        create_coros = [self.create_worker(name) 
+            for _ in range(meta.num_workers - num_workers)]
+        await asyncio.create_task(*create_coros)
+
+    async def health_check(self):
+        check_coros = [self._health_check(n) for n in self.w_metas]
+        await asyncio.gather(*check_coros)
+        await asyncio.sleep(60)
+        asyncio.create_task(self.health_check())
+
+    async def subscribe_workers(self, name, node_id=None, cur_num=0):
+        meta: ModelWorkerManagerMeta = self.w_metas[name]
+        pred = lambda: cur_num != len(self.get_workers(name, node_id))
+        coro = meta.cond.wait_for(pred)
+        async with meta.cond: 
+            try: await asyncio.wait_for(coro, 10 * 60)
+            except: pass
+        return self.get_workers(name, node_id)
+
+    def get_workers(self, name, node_id=None) -> List[ModelWorker]:
+        meta: ModelWorkerManagerMeta = self.w_metas[name]
+        if not node_id: return meta.workers
+        workers = [w for w in meta.workers if w.node_id == node_id]
+        return workers if workers else meta.workers
+
+
+class ModelCheckpointManager(ModelWeightsPublisher):
+    def __init__(
+        self, name, ckpt_name, trial_path, checkpoint, checkpoint_interval
+    ):
+        ModelWeightsPublisher.__init__(self, name)
+        self.name, self.trial_path, self.ckpt_steps = name, trial_path, {}
+        self.ckpt_name = ckpt_name
+        self.checkpoint = checkpoint
+        if not checkpoint_interval:
             asyncio.create_task(self._save_checkpoint())
+        self.checkpoint_interval = checkpoint_interval
 
-    def _build_ckpt_steps(self, name, ckpt_dir, checkpoint):
-        if isinstance(checkpoint, str) or checkpoint and checkpoint <= 0:
-            return []
-        clone_steps = [
-            int(ckpt.split(".")[0].split("-")[2])
-            for ckpt in os.listdir(os.path.join(self.trial_path, f"{name}"))
-            if ckpt.startswith("clone-step")
-        ]
-        ckpt_steps = [
-            int(ckpt.split(".")[0].split("-")[1]) for ckpt in os.listdir(ckpt_dir)
-        ]
-        # union of ckpt_steps and clone_steps
-        ckpt_steps = list(set(ckpt_steps).union(clone_steps))
-        ckpt_steps.sort()
-        is_valid = lambda ckpt: checkpoint is None or ckpt < checkpoint
-        return [ckpt for ckpt in ckpt_steps if is_valid(ckpt)]
+    async def _save_checkpoint(self, interval=10 * 60):
+        await asyncio.sleep(interval)
+        for name, meta in list(self.pubs.items()):
+            ckpt_steps = self.get_ckpt_steps(name)
+            if not meta.step or meta.step <= ckpt_steps[-1]: 
+                continue
+            ckpt_steps.append(meta.step)
+            await self.save_checkpoint(
+            name, meta.weights, meta.step)
+        asyncio.create_task(self._save_checkpoint(interval))
 
-    def _initialize_model(self, name, max_batch_size, meta: ModelMeta, checkpoint=None):
-        ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
+    async def on_set_weights(self, name, weights, step):
+        ckpt_step = self.get_ckpt_steps(name)[-1]
+        if isinstance(interval:=self.checkpoint_interval, float):
+            base = int(interval)
+            s, interval = step // 10, interval - base
+            while s: interval, s = interval * 10, s // 10
+            interval = max(base, int(interval))
+        if not interval or (step - ckpt_step) // interval < 1:
+            return
+        self.get_ckpt_steps(name).append(step)
+        await self.save_checkpoint(name, weights, step)
+
+    def build_ckpt_steps(self, name) -> List[int]:
+        checkpoint = None if name != self.ckpt_name else self.checkpoint
+        if isinstance(checkpoint, str): return [0]
+        root_path = os.path.join(self.trial_path, name)
+        ckpt_dir = os.path.join(root_path, "checkpoint")
+        if not os.path.exists(ckpt_dir): ckpt_steps = []
+        else: ckpt_steps = [int(ckpt.split(".")[0].split("-")[1]) 
+            for ckpt in os.listdir(ckpt_dir) ]
+        ckpt_steps.append(0)
+        clone_steps = [int(ckpt.split(".")[0].split("-")[2]) 
+            for ckpt in os.listdir(root_path) 
+            if ckpt.startswith("clone-step")]
+        ckpt_steps = sorted(set(ckpt_steps).union(clone_steps))
+        is_valid = lambda c: checkpoint is None or c <= checkpoint
+        return [c for c in ckpt_steps if is_valid(c)]
+
+    def get_ckpt_steps(self, name=None) -> List[int]:
+        if not name: return self.ckpt_steps
+        if c := self.ckpt_steps.get(name, None): return c
+        self.ckpt_steps[name] = self.build_ckpt_steps(name)
+        return self.ckpt_steps[name]
+
+    def load_checkpoint(self, name, step) -> NestedArray:
+        root_path = os.path.join(self.trial_path, name)
+        weights_path = os.path.join(
+            root_path, "checkpoint", f"step-{step}.pt")
+        if step == 0 and isinstance(self.checkpoint, str):
+            weights_path = self.checkpoint
+        if not os.path.exists(weights_path) and step == 0:
+            weights_path = os.path.join(root_path, "weights.pt")
+        if not os.path.exists(weights_path):
+            weights_path = os.path.join(
+            root_path, f"clone-step-{step}", "weights.pt")
+        weights = torch.load(weights_path)
+        return handle_nested_array(weights, lambda x: x.numpy())
+
+    async def save_checkpoint(self, name, weights, step):
+        ckpt_dir = os.path.join(self.trial_path, name, "checkpoint")
         if not os.path.exists(ckpt_dir):
             os.makedirs(ckpt_dir, exist_ok=True)
-        try:
-            ckpt_steps = self._build_ckpt_steps(name, ckpt_dir, checkpoint)
-            step = ckpt_steps[-1] if ckpt_steps else 0
-            meta.step, meta.ckpt_step, meta.ckpt_steps = step, step, ckpt_steps
-        except Exception as e:
-            print(f"Build checkpoint steps for {name} failed: {e}")
+        ckpt_path = os.path.join(ckpt_dir, f"step-{step}.pt")
+        await asyncio.get_running_loop().run_in_executor(None, torch.save, 
+        handle_nested_array(weights, torch.as_tensor), ckpt_path)
+        
 
-        if meta.step != 0:
-            print(f"Model {name} restore checkpoint step is {meta.step}")
+class ModelOnnxManager:
+    def __init__(self, name, 
+        torch_path, trial_path, override_model, max_batch_size):
+        self.name, self.torch_path = name, torch_path
+        self.trial_path = trial_path
+        self.override_model = override_model
+        self.max_batch_size = max_batch_size
+        self.torch_model, self.use_onnxs = None, {}
+        self.root_path = os.path.dirname(self.torch_path)
+        self.outputs_path = os.path.join(
+            self.root_path, "forward_outputs.pt")
+        self.onnx_train_model = self.forward_outputs = None
 
-        meta.max_batch_size = max_batch_size
-        self.models[name] = meta
-
-        if meta.use_onnx:
-            onnx_model, forward_outputs = self._get_onnx_model(name)
-        else:
-            onnx_model, forward_outputs = None, None
-        if meta.use_onnx and name == self.name:
-            print(f"Using onnx model for {name} {meta.use_onnx}.")
-        if name != self.name:
-            return
-        self.onnx_model, self.forward_outputs = onnx_model, forward_outputs
-
-    def _get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
-        onnx_path_postfix = f"{name}/{name}.onnx"
-        onnx_path = os.path.join(self.trial_path, onnx_path_postfix)
-        os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-        outputs_path = os.path.join(
-            self.trial_path,
-            f"{self.name}/forward_outputs.pt",
-        )
+    def _get_onnx_train_model(self):
+        if self.onnx_train_model: return self.onnx_train_model
         from bray.model.onnx import export_onnx
-
-        meta: ModelMeta = self.models[name]
-        step, weights = self._get_target_step(name, -1)
-        onnx_step = meta.onnx_step
-        if (meta.use_onnx != "train" and (
-            (self.override_model and onnx_step == -1)
-            or onnx_step < step
-            or not os.path.exists(onnx_path)
-            or not os.path.exists(outputs_path))
-        ):
-            weights = ray.get(weights) if weights else self._load_checkpoint(name, step)
-            torch_model = torch.load(self.torch_path)
-            set_torch_model_weights(torch_model, weights)
-            print(f"Exporting latest onnx model at step {step} to", onnx_path)
-            forward_outputs = export_onnx(
-                torch_model,
-                onnx_path,
-                self.forward_args,
-                self.forward_kwargs,
-                export_params=True,
-                quantize=meta.use_onnx == "quantize",
-            )
-            meta.onnx_step = step
-            torch.save(forward_outputs, outputs_path)
-
-        onnx_train_path = os.path.join(self.trial_path, f"{self.name}/train.onnx")
-        meta: ModelMeta = self.models[self.name]
-        if meta.use_onnx != "train" or (
-            (not self.override_model or meta.onnx_step != -1)
-            and os.path.exists(onnx_train_path)
-            and os.path.exists(outputs_path)
-        ):
-            if meta.use_onnx == "train":
-                onnx_path = onnx_train_path
-            with open(onnx_path, "rb") as f:
-                onnx_model = f.read()
-            return onnx_model, torch.load(outputs_path)
-
+        onnx_train_path = os.path.join(self.root_path, "train.onnx")
         print("Exporting onnx model to", onnx_train_path)
-        torch_model = torch.load(self.torch_path)
-        forward_outputs = export_onnx(
-            torch_model,
+        if not self.torch_model:
+            self.torch_model = torch.load(self.torch_path)
+        self.forward_outputs = export_onnx(
+            self.torch_model,
             onnx_train_path,
             self.forward_args,
             self.forward_kwargs,
             export_params=False,
+            max_batch_size=self.max_batch_size,
         )
-        meta.onnx_step = 0
-        torch.save(forward_outputs, outputs_path)
+        torch.save(self.forward_outputs, self.outputs_path)
         with open(onnx_train_path, "rb") as f:
-            onnx_model = f.read()
-        return onnx_model, forward_outputs
+            self.onnx_train_model = f.read()
+        return self.onnx_train_model
 
-    async def _create_worker(self, name):
-        meta: ModelMeta = self.models[name]
-        if meta.pending_create_workers > (meta.num_workers or 10):
-            return
-        worker = self.RemoteModelWorker.remote(name)
-        meta.pending_create_workers += 1
-        if not await self._is_health(worker):
-            meta.pending_create_workers -= 1
-            return
-        meta.pending_create_workers -= 1
-        if meta.num_workers is not None and len(meta.workers) >= meta.num_workers:
-            return
-        worker.__node_id = await worker.get_node_id.remote()
-        meta.workers.append(worker)
-        async with meta.worker_cond:
-            meta.worker_cond.notify_all()
+    def _get_onnx_model(self, name, use_onnx, step, weights):
+        if use_onnx == "train": return self._get_onnx_train_model()
+        if name == self.name:
+            override, self.override_model = self.override_model, False
+        else: override = False
+        onnx_path = os.path.join(self.trial_path, name, f"model.onnx")
+        if not override and os.path.exists(onnx_path):
+            with open(onnx_path, "rb") as f: return f.read()
+        from bray.model.onnx import export_onnx
 
-    async def set_weights(self, name, weights, step):
-        meta: ModelMeta = self.models[name]
-        # meta.weights = ray.put(weights)
-        meta.weights = weights[0]
-        meta.step = meta.step + 1 if step == -1 else step
-        merge(
-            f"step/{name}",
-            meta.step,
-            desc={
-                "time_window_cnt": "step per minute",
-                "time_window_avg": "smoothed current step",
-            },
+        weights = weights or self.load_checkpoint(name, step)
+        if not self.torch_model:
+            self.torch_model = torch.load(self.torch_path)
+        set_torch_model_weights(self.torch_model, weights)
+        print(f"Exporting onnx model at step {step} to", onnx_path)
+        self.forward_outputs = export_onnx(
+            self.torch_model,
+            onnx_path,
+            self.forward_args,
+            self.forward_kwargs,
+            export_params=True,
+            quantize=use_onnx == "quantize",
+            max_batch_size=self.max_batch_size,
         )
-        async with meta.step_cond:
-            meta.step_cond.notify_all()
-        if (
-            self.checkpoint_interval is not None
-            and meta.step % self.checkpoint_interval == 0
-        ):
-            await self.__save_checkpoint(name)
+        if not os.path.exists(self.outputs_path):
+            torch.save(self.forward_outputs, self.outputs_path)
+        with open(onnx_path, "rb") as f: return f.read()
 
-    async def clone(
-        self, name, step, max_batch_size, num_workers, use_onnx, local_mode
+    def get_forward_outputs(self) -> NestedArray:
+        if self.forward_outputs is None:
+            self.forward_outputs = torch.load(self.outputs_path)
+        return self.forward_outputs
+
+    async def get_onnx_model(self, name, use_onnx) -> bytes:
+        step, weights = await self.get_target_step(name, -1)
+        return await asyncio.get_running_loop().run_in_executor(None, 
+        self._get_onnx_model, name, use_onnx, step, weights)
+
+
+@ray.remote(num_cpus=0)
+class Model(
+    ModelWorkerManager, ModelCheckpointManager, ModelOnnxManager):
+    def __init__(self, name: str,
+        raw_model: torch.nn.Module = None,
+        forward_args: Tuple[np.ndarray] = None,
+        forward_kwargs: Dict[str, np.ndarray] = None,
+        checkpoint_interval: int = None,
+        checkpoint: Union[str, int] = None,
+        max_batch_size: int = 0,
+        num_workers: int = None,
+        cpus_per_worker: float = 1.0,
+        gpus_per_worker: float = 0.0,
+        memory_per_worker: int = 1024,
+        use_onnx: str = "",
+        local_mode: bool = False,
+        port: int = None,
+        override_model: bool = True,
+    ):
+        self.trial_path = ray.get_runtime_context().namespace
+        root_path = os.path.join(self.trial_path, f"{name}")
+        if name[0] == "." or name[0] == "/":
+            self.trial_path, root_path = "./", name.split("/clone")[0]
+        if not os.path.exists(root_path):
+            os.makedirs(root_path, exist_ok=True)
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1))
+
+        ModelWorkerManager.__init__(self, cpus_per_worker, 
+            gpus_per_worker, memory_per_worker, port)
+        self.name = name.split("/clone")[0]
+        ModelCheckpointManager.__init__(self, self.name, name,
+            self.trial_path, checkpoint, checkpoint_interval)
+
+        self.model, self.weights_publishers = None, {}
+        self.torch_path = os.path.join(root_path, f"model.pt")
+
+        if raw_model and (override_model or not os.path.exists(
+            self.torch_path)):
+            torch.save(raw_model, self.torch_path)
+        else:
+            assert os.path.exists(self.torch_path), "Missing model"
+        args_path = os.path.join(root_path, "forward_inputs.pt")
+        if override_model and (forward_args or forward_kwargs):
+            forward_inputs = handle_nested_array(
+                (forward_args, forward_kwargs), np.array)
+            torch.save(forward_inputs, args_path)
+        else:
+            assert os.path.exists(args_path), "Missing forward args"
+            forward_inputs = torch.load(args_path)
+        self.forward_args, self.forward_kwargs = forward_inputs
+
+        weights_path = os.path.join(root_path, "weights.pt")
+        if isinstance(checkpoint, str):
+            print(f"{self.name} loading checkpoint from {checkpoint}")
+            weights = torch.load(checkpoint)
+        elif not override_model or not raw_model: weights = None
+        else: weights = get_torch_model_weights(raw_model)
+        if weights: save_weights(weights, weights_path)
+
+        ModelOnnxManager.__init__(self, name, self.torch_path, 
+            self.trial_path, override_model and (
+            raw_model or forward_args or forward_kwargs), max_batch_size)
+        self.use_onnxs[name] = use_onnx
+        asyncio.create_task(self.initialize_workers(
+            name, num_workers, max_batch_size, local_mode))
+
+    async def get_weights_publisher(self, name, node_id):
+        if node_id == ray.get_runtime_context().get_node_id():
+            return ray.get_runtime_context().current_actor
+        pub = self.get_weights_publisher_meta(name)
+        if node_id in self.weights_publishers:
+            return self.weights_publishers[node_id]
+        weights_publisher = ray.remote(ModelWeightsPublisher).options(
+            num_cpus=0,
+            scheduling_strategy=ray_scheduling_local(node_id),
+            max_concurrency=100000,
+        ).remote(self.name)
+        self.weights_publishers[node_id] = weights_publisher
+        return self.weights_publishers[node_id]
+
+    async def set_weights(self, name, weights_ref, step):
+        pub = self.get_weights_publisher_meta(name)
+        # pub.weights, weights_ref = weights, ray.put(weights)
+        pub.weights = weights = ray.get(weights_ref[0])
+        if not pub.step: pub.step = self.get_ckpt_steps(name)[-1]
+        step = pub.step + 1 if step == -1 else step
+        publish_coros = [
+            p.set_weights.remote(name, weights_ref[0], step)
+            for p in self.weights_publishers.values()]
+        await asyncio.gather(
+            super().set_weights(name, weights, step), *publish_coros)
+        merge(f"step/{name}", step, desc={
+            "time_window_cnt": "step update per minute",
+            "time_window_avg": "smoothed current step"})
+        await self.on_set_weights(name, weights, step)
+
+    async def clone(self, name, step, extra_name="", 
+        max_batch_size=None, num_workers=0, 
+        use_onnx=None, local_mode=None, gpus_per_worker=None
     ) -> str:
-        step, weights = self._get_target_step(name, step)
-
-        if (cloned_name := f"{name}/clone-step-{step}") in self.models:
-            return cloned_name
-
-        weights = await (weights if weights else self.get_weights(name, step))
-        meta: ModelMeta = self.models[name]
-        use_onnx = use_onnx if use_onnx != "" else meta.use_onnx
-        max_batch_size = (
-            max_batch_size if max_batch_size is not None else meta.max_batch_size
-        )
-        num_workers = num_workers if num_workers != -1 else meta.num_workers
-
-        loop = asyncio.get_running_loop()
-        cloned_meta = ModelMeta(num_workers, use_onnx, local_mode)
-
-        def initialize_model_if_needed():
-            if cloned_name in self.models:
-                return
-
-            weights_path = os.path.join(
-                self.trial_path,
-                f"{cloned_name}/weights.pt",
-            )
-            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
-            if not os.path.exists(weights_path):
-                save_weights(weights, weights_path)
-
-            self._initialize_model(
-                cloned_name,
-                max_batch_size,
-                cloned_meta,
-            )
-            for _ in range(
-                len([node for node in ray.nodes() if node["Alive"]])
-                if num_workers is None
-                else num_workers
-            ):
-                loop.create_task(self._create_worker(cloned_name))
-
-        await loop.run_in_executor(None, initialize_model_if_needed)
+        step, weights = await self.get_target_step(name, step)
+        cloned_name = f"{name}/clone-step-{step}"
+        if extra_name: cloned_name = f"{cloned_name}-{extra_name}"
+        if cloned_name in self.use_onnxs: return cloned_name
+        if use_onnx is None: use_onnx = self.use_onnxs[name]
+        self.use_onnxs[cloned_name] = use_onnx
+        weights_path = os.path.join(self.trial_path, 
+            f"{cloned_name}/weights.pt")
+        os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+        if not os.path.exists(weights_path):
+            await asyncio.get_running_loop().run_in_executor(
+            None, save_weights, 
+            weights or await self.get_weights(name, step), weights_path)
+        meta: ModelWorkerManagerMeta = self.w_metas[name]
+        if max_batch_size is None: 
+            max_batch_size = meta.max_batch_size
+        if num_workers == -1: num_workers = meta.num_workers
+        if local_mode is None: local_mode = meta.local_mode
+        if gpus_per_worker is not None: 
+            self.gpus_per_worker = gpus_per_worker
+        await self.initialize_workers(
+            cloned_name, num_workers, max_batch_size, local_mode)
         return cloned_name
 
-    async def subscribe_weights(self, name, current_step):
-        meta: ModelMeta = self.models[name]
-        async with meta.step_cond:
-            pred = lambda: meta.step > current_step
-            try:
-                await asyncio.wait_for(
-                    meta.step_cond.wait_for(pred),
-                    timeout=10 * 60,
-                )
-            except asyncio.TimeoutError:
-                return None, meta.step
-        if meta.last_sub_step > current_step:
-            return meta.last_sub_weights, meta.last_sub_step
-        meta.cached_weights = meta.last_sub_weights
-        step = meta.last_sub_step = meta.step
-        weights = meta.last_sub_weights = meta.weights
-        return weights, step
-
-    async def subscribe_workers(self, name, node_id: str = None):
-        meta: ModelMeta = self.models[name]
-        async with meta.worker_cond:
-            try:
-                await asyncio.wait_for(
-                    meta.worker_cond.wait(),
-                    timeout=10 * 60,
-                )
-            except asyncio.TimeoutError:
-                pass
-        return await self.get_workers(name, node_id)
-
-    def _load_balance(self, name):
-        meta: ModelMeta = self.models[name]
-        if len(meta.workers) == 0:
-            asyncio.create_task(self._create_worker(name))
-            return
-        forward_time_sum = query("forward", kind="sum", model=name)
-        local_forward_time_sum = query(
-            "forward",
-            kind="sum",
-            model=name,
-            mode="local",
-        )
-        forward_time_sum -= local_forward_time_sum
-        load_rate = max(0.0, forward_time_sum) / (len(meta.workers) * 60 * 1000)
-        merge(
-            f"load/{name}",
-            load_rate,
-            desc={"time_window_avg": "load rate of model forward"},
-        )
-        # 假设以概率p下掉worker，那么下掉后的worker数量为(1-p)*worker_num
-        # 目标负载率为0.6，那么下掉后的负载量为(1-p)*worker_num*0.6
-        # 它应该等于当前测得的负载量，
-        # 即(1-p)*worker_num*0.6 == worker_num * load_rate
-        # 解得p = 1 - load_rate / 0.6
-        # 为了避免过度下掉，我们加入平滑因子 random.random() ** 2
-        if load_rate < 0.4 and len(meta.workers) > 1:
-            p = 1 - load_rate / 0.6
-            shrink_num = min(2, int(p * random.random() ** 2 * len(meta.workers)))
-            del meta.workers[len(meta.workers) - shrink_num :]
-            return
-        if load_rate < 0.55:
-            return
-        # 三级调控，保证负载均衡响应速度，同时避免过度调控
-        add_rate = 0.5 if load_rate < 0.7 else (1 if load_rate < 0.8 else 1.5)
-        for _ in range(1 + int(add_rate * len(meta.workers))):
-            asyncio.create_task(self._create_worker(name))
+    async def _clone(self, names: List[str]):
+        base_name, parts = "/".join(names[:-1]), names[-1].split("-")
+        if "/".join(names) in self.use_onnxs: return
+        await self._clone(names[:-1])
+        extra_name = "" if len(parts) < 4 else parts[3]
+        await self.clone(base_name, int(parts[2]), extra_name)
+        
 
     async def _is_health(self, worker):
-        try:
-            await worker.forward.remote(self.forward_args, self.forward_kwargs)
-            return True
-        except ray.exceptions.RayActorError:
-            return False
+        try: return await worker.forward.remote(self.forward_args, 
+            self.forward_kwargs)
+        except ray.exceptions.RayActorError as e:
+            return print(f"Worker is not health: ", e)
         except Exception as e:
-            print(f"Worker is not health: ", e)
-            return False
+            return print(f"Worker is not health: ", e)
 
-    async def __health_check(self, name):
-        meta: ModelMeta = self.models[name]
-        worker_num = len(meta.workers)
-        active_workers = [
-            worker
-            for worker in meta.workers[:worker_num]
-            if await self._is_health(worker)
-        ]
-        old_workers = meta.workers
-        meta.workers = active_workers
-        meta.workers.extend(old_workers[worker_num:])
-        merge(
-            f"worker/{name}",
-            len(meta.workers),
-            desc={"time_window_avg": "smoothed model worker num"},
-        )
-        if meta.num_workers is None:
-            self._load_balance(name)
-        elif len(meta.workers) < meta.num_workers:
-            asyncio.create_task(self._create_worker(name))
-
-    async def _health_check(self):
-        await asyncio.sleep(60)  # wait for workers to start
-        for name in list(self.models.keys()):
-            await self.__health_check(name)
-        asyncio.create_task(self._health_check())
-
-    def _load_checkpoint(self, name, step):
-        weights_path = os.path.join(
-            os.path.join(self.trial_path, f"{name}/checkpoint"), f"step-{step}.pt"
-        )
-        if not os.path.exists(weights_path) and step == 0:
-            weights_path = os.path.join(self.trial_path, f"{name}/weights.pt")
-        if not os.path.exists(weights_path):
-            clone_dir = os.path.join(self.trial_path, f"{name}/clone-step-{step}")
-            weights_path = os.path.join(clone_dir, f"weights.pt")
-        return handle_nested_array(
-            torch.load(weights_path), lambda x: x.numpy(), type_check=False
-        )
-
-    async def __save_checkpoint(self, name):
-        meta: ModelMeta = self.models[name]
-        ckpt_dir = os.path.join(self.trial_path, f"{name}/checkpoint")
-        ckpt_path = os.path.join(
-            ckpt_dir,
-            f"step-{meta.step}.pt",
-        )
-        await asyncio.get_running_loop().run_in_executor(
-            None,
-            torch.save,
-            handle_nested_array(await meta.weights, torch.from_numpy),
-            ckpt_path,
-        )
-        meta.ckpt_step = meta.step
-        meta.ckpt_steps.append(meta.ckpt_step)
-
-    async def _save_checkpoint(self):
-        await asyncio.sleep(10 * 60)  # save checkpoint every 10 minutes
-        for name, meta in list(self.models.items()):
-            if meta.ckpt_step >= meta.step:
-                continue
-            await self.__save_checkpoint(name)
-        asyncio.create_task(self._save_checkpoint())
-
-    def _get_target_step(self, name, step) -> tuple[int, object]:
-        meta: ModelMeta = self.models[name]
-        if step == -1 and meta.weights:
-            return meta.step, meta.weights
-        ckpt_steps = [0] + meta.ckpt_steps
-        if step == -1:
-            return ckpt_steps[-1], None
+    async def get_target_step(self, name, step) -> Tuple[int, object]:
+        pub = self.get_weights_publisher_meta(name)
+        if step == -1 and pub.weights: return pub.step, pub.weights
+        ckpt_steps = self.get_ckpt_steps(name)
+        if step == -1: return ckpt_steps[-1], None
         index = np.searchsorted(ckpt_steps, step, side="right")
         return ckpt_steps[max(0, index - 1)], None
 
     async def get_weights(self, name, step=-1) -> NestedArray:
-        step, weights = self._get_target_step(name, step)
-        if weights:
-            return await weights
+        step, weights = await self.get_target_step(name, step)
+        if weights: return weights
         return await asyncio.get_running_loop().run_in_executor(
-            None, self._load_checkpoint, name, step
-        )
+        None, self.load_checkpoint, name, step)
 
-    async def get_step(self, name) -> int:
-        return self.models[name].step
-
-    async def get_model(self) -> ray.ObjectRef:
+    async def get_model(self, name, use_onnx=None) -> Tuple:
+        if use_onnx is None: use_onnx = self.use_onnxs[name]
+        if use_onnx: return (use_onnx, 
+            await self.get_onnx_model(name, use_onnx))
         if not self.model:
             self.model = ray.put(torch.load(self.torch_path))
-        return self.model
+        return use_onnx, self.model
 
-    async def get_forward_inputs(self) -> tuple[NestedArray]:
+    async def get_forward_inputs(self) -> Tuple[NestedArray]:
         return self.forward_args, self.forward_kwargs
 
-    async def get_onnx_model(self, name) -> tuple[bytes, NestedArray]:
-        meta: ModelMeta = self.models[name]
-        if not meta.use_onnx:
-            return None, None
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self._get_onnx_model, name
-        )
-
-    async def get_workers(self, name, node_id: str = None) -> list[ModelWorker]:
-        model: ModelMeta = self.models[name]
-        if not node_id:
-            return model.workers
-        workers = [w for w in model.workers if w.__node_id == node_id]
-        return workers if workers else model.workers
-
-    async def is_local_mode(self, name) -> bool:
-        return self.models[name].local_mode
-
-    async def get_worker_initialize_info(
-        self, name
-    ) -> tuple[int, int, str, float, float]:
-        meta: ModelMeta = self.models[name]
-        return (
-            meta.step,
-            meta.max_batch_size,
-            meta.use_onnx,
-            self.cpus_per_worker,
-            self.gpus_per_worker,
-        )
+    async def get_initialize_info(self, name) -> Tuple:
+        if name not in self.w_metas: await self._clone(name.split("/"))
+        meta: ModelWorkerManagerMeta = self.w_metas[name]
+        if meta.pending_create_workers != 0: await asyncio.sleep(1)
+        while meta.pending_create_workers != 0:
+            await asyncio.sleep(3)
+            print(f"Wait {name} worker to be initialized")
+        return (meta.max_batch_size, self.cpus_per_worker, 
+        self.gpus_per_worker, self.use_onnxs[name], meta.local_mode)
 
 
 class RemoteModel:
-    """
-    RemoteModel封装了一个PyTorch模型，它会在Ray集群中创建多个ModelWorker实现并行计算
-    """
+    """RemoteModel封装了一个PyTorch模型，支持分布式部署和推理"""
+    remote_models: Dict[str, "RemoteModel"] = {}
+    max_cached_remote_model: int = 5
 
-    remote_models: dict[str:"RemoteModel"] = {}
-    max_cached_model: int = 5
-
-    set_executor: bool = False
-
-    def __new__(
-        cls,
-        name: str = None,
-        model: torch.nn.Module | object = None,
-        forward_args: tuple[np.ndarray] = (),
-        forward_kwargs: dict[str : np.ndarray] = {},
+    def __new__(cls, name: str = None,
+        model: torch.nn.Module = None,
+        forward_args: Tuple[np.ndarray] = (),
+        forward_kwargs: Dict[str, np.ndarray] = {},
         checkpoint_interval: int = None,
-        checkpoint: str | int = None,
-        max_batch_size: int = 1,
+        checkpoint: Union[str, int] = None,
+        max_batch_size: int = None,
         num_workers: int = None,
-        cpus_per_worker: float = 0.5,
-        gpus_per_worker: float = 0.0,
-        memory_per_worker: int = 1024,
+        cpus_per_worker: float = None,
+        gpus_per_worker: float = None,
+        memory_per_worker: int = None,
         use_onnx: ["train", "infer", "quantize"] = None,
-        local_mode: bool = None,
+        local_mode: [True, False, "proxy"] = None,
+        port: int = None,
         override_model: bool = True,
+        namespace: str = None,
     ):
         if name in cls.remote_models and (
             (self := cls.remote_models[name]) is not None
         ):
             return self
         self = super().__new__(cls)
-        if name is None:  # 适配对象反序列化时调用__new__方法
-            return self
-        self.name = name
-        base_name = name.split("/")[0]
-        scheduling_local = NodeAffinitySchedulingStrategy(
-            node_id=ray.get_runtime_context().get_node_id(),
-            soft=False,
-        )
-        self.subscribe_task = None
+        if name is None: return self    # 适配对象反序列化时调用__new__方法
+        self.name, base_name = name, name.split("/clone")[0]
         self.cached_cloned_names = {}
         self.local_worker = None
         model_ = None
@@ -850,34 +892,45 @@ class RemoteModel:
         self.model = model_ or Model.options(
             name=base_name,
             get_if_exists=True,
-            scheduling_strategy=scheduling_local,
+            scheduling_strategy=ray_scheduling_local(),
             max_concurrency=100000,
+            namespace=namespace,
         ).remote(
-            base_name,
-            model,
-            forward_args,
-            forward_kwargs,
-            checkpoint_interval,
-            checkpoint,
-            max_batch_size,
+            name, model,
+            forward_args, forward_kwargs,
+            checkpoint_interval, checkpoint,
+            max_batch_size or 0,
             num_workers,
-            cpus_per_worker,
-            gpus_per_worker,
-            memory_per_worker,
-            use_onnx,
-            local_mode,
+            cpus_per_worker or 1.0,
+            gpus_per_worker or 0.0,
+            memory_per_worker or 1024,
+            use_onnx or "",
+            local_mode or False,
+            port,
             override_model,
         )
-        self.workers = ray.get(
-            self.model.get_workers.remote(name, ray.get_runtime_context().get_node_id())
-        )
-        self.worker_index = random.randint(0, len(self.workers))
-        if local_mode is None:
-            local_mode = ray.get(self.model.is_local_mode.remote(name))
-        self._forward = self._local_forward if local_mode else self._remote_forward
+        (self.max_batch_size, self.cpus_per_worker, 
+            self.gpus_per_worker, 
+            self.use_onnx, l_mode
+        ) = ray.get(self.model.get_initialize_info.remote(name))
+        if max_batch_size is not None:
+            self.max_batch_size = max_batch_size
+        if cpus_per_worker is not None:
+            self.cpus_per_worker = cpus_per_worker
+        if gpus_per_worker is not None:
+            self.gpus_per_worker = gpus_per_worker
+        if local_mode is None: local_mode = l_mode
+        if use_onnx is not None:
+            self.use_onnx = use_onnx
+        self.load_balance = WorkerLoadBalance(self.name, self.model)
+        self._forward = self._forward_remote
+        if local_mode is True: self._forward = self._forward_local
+        if local_mode == "proxy":
+            self._forward = self._forward_proxy
+            self.forward_proxy = None
         cls.remote_models[name] = self
         names = list(cls.remote_models.keys())
-        if len(names) > cls.max_cached_model:
+        if len(names) > cls.max_cached_remote_model:
             cls.remote_models.pop(names[0])  # pop the oldest one
         return self
 
@@ -886,84 +939,72 @@ class RemoteModel:
         创建或者获取一个RemoteModel，如果已经存在同名的RemoteModel，则直接返回
         Args:
             name: 模型的名字，用于在Ray集群中标识模型
-            model: 目前支持PyTorch模型，和Tensorflow模型，如果为None，则默认已经存在的同名模型
-            forward_args: 模型forward的位置参数输入，用于初始化模型
-            forward_kwargs: 模型forward的关键字参数输入，用于初始化模型
-            checkpoint_interval: 模型的checkpoint间隔，单位step，默认10分钟保存一次
-            max_batch_size: 模型的max_batch_size
-            num_workers: 模型的worker数量，如果为None，则会自动根据负载情况调整
-            cpus_per_worker: 每个worker的CPU核心数
-            gpus_per_worker: 每个worker的GPU数量，如果为0，则表示不使用GPU
-            memory_per_worker: 每个worker的内存大小，单位MB
-            use_onnx: 默认不适用onnx优化，可选值为["train", "infer"]，分别表示训练和部署模式
-            local_mode: 如果为True，则模型会在本地运行，否则会在Ray集群中运行
-            override_model: 如果为True，则会覆盖已经存在的模型，设为False可以加速启动过程
+            model: 
+        目前支持PyTorch模型，如果为None，则默认已经存在的同名模型
+            forward_args: 
+        模型forward的位置参数输入，用于初始化模型
+            forward_kwargs: 
+        模型forward的关键字参数输入，用于初始化模型
+            checkpoint_interval: 
+        模型的checkpoint间隔，单位step，默认10分钟保存一次
+            max_batch_size: 
+        模型的max_batch_size，默认为0，表示不额外组批次，负数表示固定批次大小
+            num_workers: 
+        模型的worker数量，为None会自动根据负载情况调整，默认为0
+            cpus_per_worker: 
+        每个worker的CPU核心数，默认为1
+            gpus_per_worker: 
+        每个worker的GPU数量，如果为0，则表示不使用GPU，默认为0
+            memory_per_worker: 
+        每个worker的内存大小，单位MB，默认为1024
+            use_onnx: 
+        默认不适用onnx优化，可选值为["train", "infer"]
+            local_mode: 
+        为True模型会在本地运行，否则在Ray集群中运行，默认为False
+            override_model: 
+        为True会覆盖已经存在的模型，设为False可以加速启动
+            namespace:
+        模型所在的 Ray 命名空间，通过这个选项可以使用其他命名空间下的模型
         """
-        assert (
-            name in RemoteModel.remote_models
-        ), f"RemoteModel {name} is not initialized"
+        assert name in RemoteModel.remote_models, f"{name} not exist"
 
     def __del__(self):
-        self.subscribe_task.cancel() if self.subscribe_task else None
-        if not self.local_worker:
-            return
-        self.local_worker.is_initialized = False
+        if self.local_worker: self.local_worker.is_initialized = False
+        self.load_balance.is_initialized = False
 
-    async def subscribe_workers(cls, model, name, workers):
-        # 定义为类方法，避免引用self阻止RemoteModel被回收
-        node_id = ray.get_runtime_context().get_node_id()
-        while True:
-            workers[:] = await model.subscribe_workers.remote(name, node_id)
+    def _initialize_local_worker(self) -> ModelWorker:
+        self.local_worker = ModelWorker(self.name, 
+        self.max_batch_size, self.cpus_per_worker, self.gpus_per_worker, 
+        use_onnx=self.use_onnx, model=self.model)
 
-    async def _local_forward(self, args, kwargs) -> NestedArray:
-        if not RemoteModel.set_executor:
-            asyncio.get_running_loop().set_default_executor(
-                ThreadPoolExecutor(max_workers=1)
-            )
-            RemoteModel.set_executor = True
-        if not self.local_worker:
-            self.local_worker = ModelWorker(self.name, self.model)
-        beg = time.time()
-        outputs = await self.local_worker.forward(args, kwargs)
-        forward_time_ms = (time.time() - beg) * 1000
-        merge(f"forward/{self.name}", forward_time_ms, desc={}, mode="local")
-        return outputs
+    def _initialize_forward_proxy(self) -> ModelForwardProxy:
+        self.forward_proxy = ModelForwardProxy(abs(self.max_batch_size), 4)
+        load_balance = self.load_balance
 
-    async def _init_subscribe_task(self):
-        if len(self.workers) != 0 and self.subscribe_task:
-            return
-        if self.subscribe_task:
-            await asyncio.sleep(1)
-            assert self.workers, f"No model worker for {self.name}"
-        coro = RemoteModel.subscribe_workers(
-            RemoteModel, self.model, self.name, self.workers
-        )
-        self.subscribe_task = asyncio.create_task(coro)
-        self.subscribe_task.add_done_callback(
-            lambda t: None if t.cancelled() else t.result()
-        )
-        await self.sync()
-        await self._init_subscribe_task()
+        async def proxy_forward(args, kwargs):
+            # TODO: add load_balance sync fault tolerance
+            return await (await load_balance.select()
+            ).forward.remote(args, kwargs)
+        self.forward_proxy.proxy_forward = proxy_forward
 
-    async def _remote_forward(self, args, kwargs, retry=2) -> NestedArray:
-        if len(self.workers) == 0 or not self.subscribe_task:
-            await self._init_subscribe_task()
-        worker = self.workers[self.worker_index % len(self.workers)]
-        self.worker_index += 1
-        try:
-            pending = len(self.workers) < 2 or retry < 1
-            beg = time.time()
-            outputs = await worker.forward.remote(args, kwargs, pending)
+    async def _forward_local(self, args, kwargs):
+        if not self.local_worker: self._initialize_local_worker()
+        return await self.local_worker.forward(args, kwargs)
+
+    async def _forward_proxy(self, args, kwargs):
+        if not self.forward_proxy: self._initialize_forward_proxy()
+        return await self.forward_proxy.forward(args, kwargs)
+
+    async def _forward_remote(self, args, kwargs, retry=2):
+        worker = await self.load_balance.select()
+        pending = len(self.load_balance.workers) < 2 or retry < 1
+        try: return await worker.forward.remote(args, kwargs, pending)
         except ray.exceptions.RayActorError:
-            print("Ray actor exception from model forward")
-            await self.sync()
-            return await self._remote_forward(args, kwargs)
+            print("Ray exception from model forward")
+            await self.load_balance.sync()
         except ray.exceptions.RayTaskError:
-            if (retry := retry - 1) < 0:
-                raise
-            return await self._remote_forward(args, kwargs, retry)
-        merge_time_ms(f"forward/{self.name}", beg, mode="remote")
-        return outputs
+            if (retry := retry - 1) < 0: raise
+        return await self._forward_remote(args, kwargs, retry)
 
     async def forward(
         self, *args: NestedArray, batch=False, **kwargs: NestedArray
@@ -977,24 +1018,43 @@ class RemoteModel:
         Returns:
             模型的输出，是一个或多个 np.ndarray
         """
+        forward_beg, mode = time.time(), self._forward.__name__[9:]
         if not batch:
-            args, kwargs = handle_nested_array(
-                (args, kwargs), lambda x: np.expand_dims(x, 0)
-            )
-        output = await self._forward(args, kwargs)
+            args, kwargs = handle_nested_array((args, kwargs), 
+                lambda x: np.expand_dims(x, 0))
+        outputs = await self._forward(args, kwargs)
         if not batch:
-            output = handle_nested_array(output, lambda x: np.squeeze(x, 0))
-        return output
-
+            outputs = handle_nested_array(
+                outputs, lambda x: np.squeeze(x, 0))
+        merge_time_ms(f"forward/{self.name}", forward_beg, mode=mode)
+        return outputs
+    
+    def __call__(self, *args, batch=True, **kwargs):
+        """同 self.forward，内部封装了async调用"""
+        from bray.utils import create_or_get_event_loop
+        
+        loop = create_or_get_event_loop()
+        return asyncio.run_coroutine_threadsafe(
+        self.forward(*args, batch=batch, **kwargs), loop).result()
+    
     @property
     def step(self) -> int:
         """获取模型的最新版本号，每次调用 publish weights 会增加版本号"""
-        if self.local_worker and self.local_worker.is_initialized:
-            return self.local_worker.get_model_step()
-        if not self.workers:
-            return ray.get(self.model.get_step.remote(self.name))
-        worker = self.workers[random.randint(0, len(self.workers))]
-        return ray.get(worker.get_model_step.remote())
+        return ray.get(self.model.get_step.remote(self.name))
+
+    def set_local_mode(
+        self, max_batch_size: int = 1, cpus_per_worker: float = 0.5, 
+        gpus_per_worker: float = 0.0,
+        use_onnx: ["train", "infer", "quantize"] = None,
+    ):
+        (
+            self.max_batch_size, self.cpus_per_worker, 
+            self.gpus_per_worker
+        ) = (
+            max_batch_size, cpus_per_worker, gpus_per_worker
+        )
+        if use_onnx is not None: self.use_onnx = use_onnx
+        self._forward = self._forward_local
 
     def get_model(self) -> torch.nn.Module:
         """
@@ -1002,49 +1062,29 @@ class RemoteModel:
         Returns:
             被封装的Pytorch模型，权重为最新的权重
         """
-        torch_model = ray.get(ray.get(self.model.get_model.remote()))
-        weights = ray.get(self.model.get_weights.remote(self.name))
-        if isinstance(torch_model, torch.nn.Module):
-            set_torch_model_weights(torch_model, weights)
-            return torch_model
-        forward_args, forward_kwargs = ray.get(self.model.get_forward_inputs.remote())
-        tensorflow_model = build_tensorflow_model(
-            torch_model, forward_args, forward_kwargs
-        )
-        tensorflow_model.set_weights(weights)
-        return tensorflow_model
+        torch_model = ray.get(ray.get(
+            self.model.get_model.remote(self.name, use_onnx=""))[1])
+        set_torch_model_weights(torch_model, 
+            ray.get(self.model.get_weights.remote(self.name)))
+        return torch_model
 
-    def clone(
-        self,
-        step: int = -1,
-        max_batch_size: int = None,
-        num_workers: int = -1,
-        use_onnx: ["train", "infer", "quantize"] = "",
-        local_mode: bool = None,
-    ) -> "RemoteModel":
+    def clone(self, step: int = -1, name=None, **kwargs):
         """
         克隆一个新的RemoteModel，可以用于SelfPlay和League的多智能体对抗
         Args:
-            step: 克隆的模型的版本号，-1表示克隆最新版本
-            local_mode: 是否使用本地模式，None表示使用原来的配置
-            max_batch_size: 克隆的模型的max_batch_size，None表示使用原来的
-            num_workers: 克隆的模型的worker数量，-1表示使用原来的worker数量， None表示自动负载均衡
-            use_onnx: 克隆的模型是否使用onnx，""表示使用原来的配置
+            step: 克隆的模型的版本号，-1表示最新版本
+            name: 克隆模型的额外名字后缀，用于区分不同模型
+            kwargs: RemoteModel的关键字参数
         Returns:
-            克隆的RemoteModel
+            克隆的RemoteModel，用法和RemoteModel一致
         """
-        # RemoteModel.remote_models[self.name] = self
-        if local_mode is None:
-            local_mode = self._forward == self._local_forward
-        if cloned_name := self.cached_cloned_names.get(step, None):
-            return RemoteModel(cloned_name, local_mode=local_mode)
+        # if cloned_name := self.cached_cloned_names.get(step, None):
+        #     return RemoteModel(cloned_name, **kwargs)
         cloned_name = self.model.clone.remote(
-            self.name, step, max_batch_size, num_workers, use_onnx, local_mode
-        )
+            self.name, step, extra_name=name, **kwargs)
         cloned_name = ray.get(cloned_name)
-        if step != -1:
-            self.cached_cloned_names[step] = cloned_name
-        return RemoteModel(cloned_name, local_mode=local_mode)
+        # if step != -1: self.cached_cloned_names[step] = cloned_name
+        return type(self)(cloned_name, **kwargs)
 
     def publish_weights(self, weights: NestedArray, step=-1):
         """
@@ -1053,27 +1093,67 @@ class RemoteModel:
             weights: 模型的权重，为一个NestedArray数组
             step: 权重的版本号，每次更新权重都需要增加版本号
         """
-        # self.model.set_weights.remote(self.name, weights, step)
         weights = [ray.put(weights, _owner=self.model)]
-        self.model.set_weights.remote(self.name, weights, step)
+        return self.model.set_weights.remote(self.name, weights, step)
 
-    async def sync(self):
-        self.workers[:] = await self.model.get_workers.remote(
-            self.name, ray.get_runtime_context().get_node_id()
-        )
 
-    def warmup(self):
-        """预热模型，避免第一次forward的时候耗时过长"""
-        if self._forward != self._local_forward or self.local_worker:
-            return
-        self.local_worker = ModelWorker(self.name, self.model)
+class RemoteTorchModel(RemoteModel):
+    async def forward(self, *args, batch=False, **kwargs) -> "NestedTensor":
+        handle_input = lambda x: x.numpy() if isinstance(
+            x, torch.Tensor) else x
+        args, kwargs = handle_nested_array((args, kwargs), handle_input)
+        outputs = await super().forward(*args, batch=batch, **kwargs)
+        handle_output = lambda x: torch.as_tensor(x) if isinstance(
+            x, np.ndarray) else x
+        return handle_nested_array(outputs, handle_output)
 
-    def get_torch_forward_args(self):
-        return self.get_torch_forward_inputs()[0]
 
-    def get_torch_forward_inputs(self):
-        forward_args, forward_kwargs = ray.get(self.model.get_forward_inputs.remote())
-        torch_args, torch_kwargs = handle_nested_array(
-            (forward_args, forward_kwargs), torch.as_tensor
-        )
-        return torch_args, torch_kwargs
+if __name__ == "__main__":
+    from bray.model.test import AtariModel, forward_args
+    ray.init(namespace="model", address="local")
+
+    model = AtariModel()
+
+    remote_model = RemoteModel(
+        "model", model=model, forward_args=forward_args)
+    remote_model(*forward_args)
+
+    remote_model = RemoteModel(
+        "model1", model=model, forward_args=forward_args, 
+        local_mode=True,
+    )
+    remote_model(*forward_args)
+
+    remote_model = RemoteModel(
+        "model2", model=model, forward_args=forward_args,
+        port=9890,
+    )
+    print(remote_model(*forward_args))
+
+    remote_model = RemoteModel(
+        "model3", model=model, forward_args=forward_args,
+        local_mode=True,
+        use_onnx="infer",
+    )
+    remote_model(*forward_args)
+
+    remote_model = RemoteModel(
+        "model4", model=model, forward_args=forward_args,
+        checkpoint_interval=1,
+    )
+    remote_model.clone()(*forward_args)
+    remote_model.clone(name="1")(*forward_args)
+    remote_model.clone().clone()(*forward_args)
+
+    weights = get_torch_model_weights(model)
+    ray.get(remote_model.clone().publish_weights(weights))
+    ray.get(remote_model.publish_weights(weights))
+    ray.get(remote_model.clone().clone().publish_weights(weights))
+
+    # remote_model = RemoteModel(
+    #     "model4", model=model, forward_args=forward_args,
+    #     local_mode=True,
+    #     use_onnx="quantize",
+    # )
+    # remote_model(*forward_args)
+    print("All tests done")
