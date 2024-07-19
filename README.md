@@ -104,7 +104,7 @@ RemoteModel 内部封装了 Onnx 和 TensorRT，通过选项可以控制是否�
 
 RemoteModel 可以单独启动，向外暴露端口提供模型服务，也可以与 RemoteTrainer 一起搭建强化学习训练流程，因此以上性能优化在推理和训练阶段都可以使用。
 
-## [RemoteBuffer](./bray/buffer/README.md)
+## [RemoteBuffer](./bray/buffer/buffer.py)
 
 Buffer 的作用是存放经验回放（Replay），而 RemoteBuffer 是一个分布式的经验回放池，向外提供 `push` 和 `pop` 两个方法。
 
@@ -116,7 +116,7 @@ RemoteBuffer 也集成了负载均衡，确保所有 BufferWorker 的 Replay 数
 
 对于固定的数据集，可以直接以 Source 的方式添加到 RemoteBuffer，它们会自动加载并 push 到 BufferWorker。
 
-## [RemoteTrainer](./bray/trainer/README.md)
+## [RemoteTrainer](./bray/trainer/trainer.py)
 
 RemoteTrainer 支持分布式数据并行（DDP）训练，并对训练 Pipeline 进行了以下优化：
 
@@ -160,13 +160,13 @@ RemoteActor 封装了 Actor，用于实现 Actor 的并行计算。一个 Remote
 
 交互过程中产生的 Episode 将会被统一收集汇总，用于数据分析、模型训练和可视化渲染。
 
-## [RemoteServer](./bray/server/README.md)
+## [RemoteServer](./bray/actor/README.md)
 
 RemoteServer 用于向外暴露服务，支持 http/tcp 协议。相较于 Ray Serve，它更加轻量且性能优越，相较于 FastAPI、Flask 等 Python 服务框架，它更贴合机器学习场景，并支持多种负载均衡策略。
 
 RemoteServer 支持有状态和无状态的服务，客户端可以通过 http 发起请求，也可以使用配套的 [SDK](./client/cpp/client.h) 进行调用。
 
-## [指标、日志和可视化](./bray/master/README.md)
+## [指标、日志和可视化](./bray/master/master.py)
 
 在分布式强化学习中，指标分为框架层面的指标（数据吞吐率、资源利用率等）、算法层面的指标（loss 等）和业务层面的指标（奖励、胜率等）。Bray 统一用标签（label）来区分它们。
 
