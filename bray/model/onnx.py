@@ -118,7 +118,8 @@ def export_onnx(
         origin_outputs, validate_model_output, type_check=False
     )
 
-    assert len(ort_outputs) == len(origin_outputs), "Onnx model output length error."
+    assert len(ort_outputs) == len(flatten_nested_array(origin_outputs)
+        ), "Onnx model output length error."
     if not check_consistency:
         return origin_outputs
     for ort_output, origin_output in zip(

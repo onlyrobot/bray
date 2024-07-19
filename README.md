@@ -264,13 +264,13 @@ Agent 的 Trajectory 被放入经验回放池，经 Replay Handler 转为 Datase
 
 所有的模版都是由以下七个组件组成的，一个模版可以包含任意类型和数量的组件：
 
-1. Model：指 PyTorch 模型，被用于推理和训练
-2. Agent：代表了和环境交互的智能体
-3. Buffer：缓冲区，可以向其中添加数据源
-4. Source：数据源，可以是文件、网络、对象存储等的封装
+1. Model：指 PyTorch 模型，被用于推理和训练，支持权重管理和检查点管理
+2. Agent：代表了和环境交互的智能体，被添加到 Actor 中
+3. Buffer：缓冲区，可以向其中添加数据源或者 Push 数据
+4. Source：数据源，可以是文件、网络、对象存储等的封装，以迭代器的形式加入到缓冲区（Buffer）中
 5. Actor：定义了智能体和环境的交互逻辑，也是部署时对外暴露的AI服务
-6. Trainer：封装了模型、缓存区和训练算法
-7. Render：渲染器，用于可视化渲染
+6. Trainer：封装了模型（Model）、缓存区（Buffer）和训练算法（Algorithm）
+7. Render：渲染器，用于渲染 Actor 中生成的 Episode
 
 ## Gym Atari 示例
 

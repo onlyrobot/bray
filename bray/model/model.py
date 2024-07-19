@@ -668,7 +668,7 @@ class ModelOnnxManager:
         with open(onnx_path, "rb") as f: return f.read()
 
     def get_forward_outputs(self) -> NestedArray:
-        if not self.forward_outputs:
+        if self.forward_outputs is None:
             self.forward_outputs = torch.load(self.outputs_path)
         return self.forward_outputs
 
@@ -948,7 +948,7 @@ class RemoteModel:
             checkpoint_interval: 
         模型的checkpoint间隔，单位step，默认10分钟保存一次
             max_batch_size: 
-        模型的max_batch_size，默认为0，表示不额外组批次
+        模型的max_batch_size，默认为0，表示不额外组批次，负数表示固定批次大小
             num_workers: 
         模型的worker数量，为None会自动根据负载情况调整，默认为0
             cpus_per_worker: 
@@ -963,6 +963,8 @@ class RemoteModel:
         为True模型会在本地运行，否则在Ray集群中运行，默认为False
             override_model: 
         为True会覆盖已经存在的模型，设为False可以加速启动
+            namespace:
+        模型所在的 Ray 命名空间，通过这个选项可以使用其他命名空间下的模型
         """
         assert name in RemoteModel.remote_models, f"{name} not exist"
 
