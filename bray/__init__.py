@@ -17,6 +17,9 @@ from bray.model.model import (
 from bray.model.pool import ModelPool
 from bray.model.server import ModelServer
 # from bray.model.onnx import export_onnx
+from bray.actor.actor import RemoteActor
+from bray.actor.base import Actor
+from bray.metric.validate import Metric
 from bray.server.server import RemoteServer
 from bray.server.base import Server
 from bray.trainer.trainer import (

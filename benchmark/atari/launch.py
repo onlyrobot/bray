@@ -1,13 +1,14 @@
 import numpy as np
 import bray
+import torch
 
 from .model import AtariModel
 from .actor import AtariActor
-from .trainer import train_atari
+from .trainer import AtariTrainer
 
 bray.init(project="./atari-pengyao", trial="ppo-v0")
 
-model_inputs = {"image": np.random.randn(1, 42, 42, 4).astype(np.float32)}
+model_inputs = {"image": torch.rand(1, 42, 42, 4, dtype=torch.float32)}
 
 remote_model = bray.RemoteModel(
     name="atari_model",
@@ -17,8 +18,8 @@ remote_model = bray.RemoteModel(
     local_mode=True,
     use_onnx="train",
 )
-bray.add_graph(remote_model.get_model().eval(), remote_model.get_torch_forward_args())
-bray.set_tensorboard_step(remote_model.name)
+bray.add_graph(remote_model.get_model().eval(), model_inputs)
+bray.set_tensorboard_step(remote_model)
 
 remote_buffer = bray.RemoteBuffer(
     "atari_buffer",
@@ -28,12 +29,11 @@ remote_buffer = bray.RemoteBuffer(
 )
 
 remote_trainer = bray.RemoteTrainer(
+    name="kitty_trainer", 
+    Trainer=AtariTrainer,
+    config=None,
     use_gpu=None,
-    num_workers=None,
-)
-
-remote_trainer.train(
-    train=train_atari,
+    num_workers=1,
     remote_model=remote_model,
     remote_buffer=remote_buffer,
     batch_size=8,

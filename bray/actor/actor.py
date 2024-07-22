@@ -7,7 +7,7 @@ import struct
 from bray.actor.base import Actor
 from bray.actor.gateway import Gateway
 
-from bray.metric.metric import (
+from bray.master.master import (
     merge,
     merge_time_ms,
 )
