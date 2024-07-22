@@ -29,7 +29,8 @@ class AtariTrainer(bray.Trainer):
             replay["advantage"],
         )
         local_batch_size = advantage.shape[0]
-        global_batch_size = local_batch_size * self.world_size
+        # global_batch_size = local_batch_size * self.world_size
+        global_batch_size = local_batch_size
         target_value = value + advantage
 
         advantage_sum = torch.sum(advantage)

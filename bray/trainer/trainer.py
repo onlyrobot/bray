@@ -188,7 +188,7 @@ def RemoteTrainer(
 
     scaling_config = ScalingConfig(
         num_workers=num_workers, use_gpu=use_gpu,
-        trainer_resources={"CPU": 0}, resources_per_worker={"CPU": 0}
+        # trainer_resources={"CPU": 0}, resources_per_worker={"CPU": 0}
     )
 
     trial_path = ray.get_runtime_context().namespace
