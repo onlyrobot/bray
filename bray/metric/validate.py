@@ -1,5 +1,6 @@
 import numpy as np
-from bray.metric.metric import merge, add_histogram
+from bray.master.master import merge, add_histogram
+from typing import Union
 
 
 class Metric:
@@ -36,7 +37,7 @@ class Metric:
     def __del__(self):
         self.report()
 
-    def _merge(self, value: float | np.ndarray):
+    def _merge(self, value: Union[float, np.ndarray]):
         if not isinstance(value, np.ndarray):
             self.samples[self.num_samples] = value
             self.num_samples += 1
@@ -49,7 +50,7 @@ class Metric:
         self.num_samples += merge_num
         return None if len(value) > merge_num else value[merge_num:]
 
-    def merge(self, value: float | np.ndarray):
+    def merge(self, value: Union[float, np.ndarray]):
         assert np.all(self.low_bound <= value) and np.all(
             value <= self.up_bound,
         ), (

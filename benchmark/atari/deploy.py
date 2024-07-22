@@ -1,5 +1,6 @@
 import numpy as np
 import bray
+import torch
 
 from .model import AtariModel
 from .actor import AtariActor
@@ -9,7 +10,7 @@ bray.init(project="./atari-pengyao", trial="deploy")
 remote_model = bray.RemoteModel(
     name="atari_model",
     model=AtariModel(),
-    forward_args=({"image": np.random.randn(42, 42, 4).astype(np.float32)},),
+    forward_args=({"image": torch.rand(1, 42, 42, 4, dtype=torch.float32)},),
     use_onnx="infer",
     local_mode=True,
 )

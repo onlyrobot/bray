@@ -22,7 +22,7 @@ Http的body为任意数据，框架本身不会对其解析，Gamecore和Actor�
 
 ### 接入流程
 
-1. 启动 [FakeActor](./bray/fake/fake_actor.py) ，可以在config中修改FakeActor的行为：
+1. 启动 [FakeActor](../../bray/fake/fake_actor.py) ，可以在config中修改FakeActor的行为：
 
 ```python
 config = {
@@ -37,8 +37,8 @@ actor_port = 8000
 
 ### Gamecore的最佳实践
 
-* [Python下的Gym Atari使用requests库和多线程](./benchmark/atari/gamecore.py)
-* [C++下使用TCP协议向Actor发送请求](./bray/fake/fake_gamecore.cpp)
+* [Python下的Gym Atari使用requests库和多线程](../../benchmark/atari/gamecore.py)
+* [C++下使用TCP协议向Actor发送请求](../../bray/fake/fake_gamecore.cpp)
 
 ## 2. Model 接入
 
@@ -50,10 +50,10 @@ Model接入主要是为了保证以下几点：
 * 框架集成的计算图优化、算子优化、量化等优化pipeline能够跑通，且通过正确性验证
 * 模型能够被正确的 `get_weights` 和 `set_weights` 
 
-模型接入流程非常简单：[Gym Atari的简单PyTorch模型](./benchmark/atari/model.py)
+模型接入流程非常简单：[Gym Atari的简单PyTorch模型](../../benchmark/atari/model.py)
 
 ```python
-inputs = np.random.randn(1, 42, 42, 4).astype(np.float32)
+inputs = {"image": torch.rand(1, 42, 42, 4, dtype=torch.float32)}
 remote_model = bray.RemoteModel(
     name="atari_model", 
     model=AtariModel(),
@@ -80,11 +80,11 @@ remote_model.publish_weights(weights)
 * 收集trajectory，计算奖励，push到Buffer中
 * 处理模型不擅长的决策树逻辑
 
-框架已经实现了Server和网关路由的功能，用户需要继承 [Actor基类](./bray/actor/base.py) ，实现其中的三个方法，并交给RemoteActor调度。
+框架已经实现了Server和网关路由的功能，用户需要继承 [Actor基类](../../bray/actor/base.py) ，实现其中的三个方法，并交给RemoteActor调度。
 
 Actor接入依赖Gamecore和Model，可以使用FakeGamecore和FakeModel来解耦。
 
-[Gym Atari的Actor示例](./benchmark/atari/actor.py)
+[Gym Atari的Actor示例](../../benchmark/atari/actor.py)
 
 ```python
 # 初始化模型
@@ -105,7 +105,7 @@ Trainer接入主要考虑以下几点：
 * 强化训练过程中Model的权重版本号能否正常增长
 * 训练过程中的指标是否正常（loss、reward等）
 
-[Gym Atari的Trainer示例](./benchmark/atari/trainer.py)
+[Gym Atari的Trainer示例](../../benchmark/atari/trainer.py)
 
 ```python
 # 初始化模型
@@ -124,6 +124,6 @@ bray.run_until_asked_to_stop()
 
 将上面的Gamecore、Actor、Model、Trainer集成到一起：
 
-[Gym Atari的训练脚本](./benchmark/atari/launch.py)
+[Gym Atari的训练脚本](../../benchmark/atari/launch.py)
 
-[Gym Atari的部署脚本](./benchmark/atari/deploy.py)
+[Gym Atari的部署脚本](../../benchmark/atari/deploy.py)

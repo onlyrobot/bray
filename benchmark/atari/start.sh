@@ -1,6 +1,6 @@
 apt install libgl1-mesa-glx
-pip install gym[atari]
-pip install gym[accept-rom-license]
-pip install autorom[accept-rom-license]
-pip install atari_py
-pip install opencv-python
+pip3 install gym[atari]
+pip3 install gym[accept-rom-license]
+pip3 install autorom[accept-rom-license]
+pip3 install atari_py
+pip3 install opencv-python
