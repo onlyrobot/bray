@@ -112,6 +112,11 @@ def remove_router(task_id: str, host: str, port: str):
     asyncio.create_task(notify_all_nodes(nodes))
     if not ROUTERS[task_id]: del ROUTERS[task_id]
 
+def update_router_rules(task_id: str, rules: list):
+    for r in ROUTERS.get(task_id, []): 
+        if r not in rules: remove_router(task_id, *r.split(':'))
+    for r in rules: insert_router(task_id, *r.split(':'))
+
 async def launch_task_dep(task: list, dep: str, env: dict) -> str:
     if len(parts := (task_id := task[0]).split('/', 1)) != 2: 
         return f'实验不存在 {task[0]}' if task[0] else ''
@@ -655,6 +660,43 @@ async def dist_node_remove(host: str) -> bool:
     if info.used_gpus or info.used_cpus: return False
     HOST2NODE_INFO.pop(host); return True
 
+LOG: 'dict[str: list[str]]' = {'info': [], 'error': []}
+class Metric:
+    def __init__(self, cnt=0, sum=0.0, step=None):
+        self.cnt, self.sum, self.step = cnt, sum, step
+    def merge(self, other: 'Metric'):
+        self.cnt += other.cnt; self.sum += other.sum
+        if self.step is None or other.step is None: return
+        self.step = self.step + other.step
+    def diff(self, other) -> 'Metric':
+        if self.step is None or other.step is None: step = None
+        else: step = self.step - other.step
+        cnt, sum = self.cnt - other.cnt, self.sum - other.sum
+        return Metric(cnt, sum, step)
+METRIC, DESC, LOG, DATA, REGISTRY = {}, {}, {}, {}, {}
+
+@app.post('/dist/data/set')
+async def dist_master_set(name: str, value): DATA[name] = value
+
+@app.get('/dist/data/get')
+async def dist_master_get(name: str): return DATA.get(name)
+
+@app.post('/dist/metric/merge')
+async def dist_metric_merge(name: str, metric, desc: dict): pass
+
+@app.post('/dist/metric/add')
+async def dist_metric_add(name: str, metric, step) -> bool: pass
+
+@app.get('/dist/metric/query')
+async def dist_metric_query(name: str) -> object: pass
+
+@app.post('/dist/log/logging')
+async def dist_log_logging(name: str, level: str, msg: str): pass
+
+@app.post('/dist/registry/register')
+async def dist_registry_register(name: str) -> int:
+    id = REGISTRY[name] = REGISTRY.get(name, -1) + 1; return id
+
 async def handle(method, url, data, headers, params):
     r = await cached_session().request(method, url, data=data, 
         headers=headers, params=params)
@@ -769,8 +811,7 @@ async def register_dist_node_(url: str, data: list) -> list:
     ssl=False, timeout=60, json=data, allow_redirects=True)
     except asyncio.CancelledError: data[2][0] = None; return data
     except: await asyncio.sleep(10); return data
-    for k, v in data[-2].items():
-         ROUTERS.update({k:v}) if v else ROUTERS.pop(k, None)
+    for k, v in data[-2].items(): update_router_rules(k, v)
     if not (task := data[-1].copy()): return data
     try: await launch_dist_task(data[0], task)
     except Exception as e: 
