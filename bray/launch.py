@@ -1,9 +1,9 @@
 import logging, asyncio, time, os, fastapi, uvicorn
 import subprocess, signal, random
+from bray.common import cached_session, request
 from bray.common import (HOST,
     save_task_config, load_task_config, load_trial_config,
     get_trial_path, get_project_path, save_trial_config)
-from bray.common import cached_session, request
 from concurrent.futures import ThreadPoolExecutor
 
 executor = ThreadPoolExecutor(max_workers=4)
@@ -85,37 +85,39 @@ async def register_to_master_on_start(_: fastapi.FastAPI):
         k.startswith('DIST_')}
     if CLUSTER == f'{HOST}:{PORT}': device_kind = 'localhost'
     else: device_kind = env.pop('DIST_DEVICE_KIND', '')
-    t = asyncio.create_task(register_dist_node(env, device_kind))
-    t.add_done_callback(lambda _: handle_exit_signal()); yield
+    asyncio.create_task(register_dist_node(env, device_kind)); yield
 
 app = fastapi.FastAPI(lifespan=register_to_master_on_start)
 
-async def notify_all_nodes(nodes: 'list[NodeInfo]'):
+async def notify_all_nodes(nodes: 'tuple[NodeInfo]', index):
     async with nodes[0].cond: nodes[0].cond.notify_all()
-    if not (nodes := nodes[1:]): return
-    asyncio.create_task(notify_all_nodes(nodes))
+    if index >= len(nodes): return
+    asyncio.create_task(notify_all_nodes(nodes, index + 1))
 
-def insert_router(task_id: str, host: str, port: str):
+def insert_router(task_id: str, host: str, port=''):
+    rule = f'{host}:{port}' if port else host
     if task_id not in ROUTERS: ROUTERS[task_id] = []
-    if (rule := f'{host}:{port}') in ROUTERS[task_id]: return
+    elif rule in ROUTERS[task_id]: return
     (rules := ROUTERS[task_id]).append(rule)
-    for i in (nodes := list(HOST2NODE_INFO.values())): 
-        if i.routers is not None: i.routers[task_id] = rules
-    asyncio.create_task(notify_all_nodes(nodes))
+    if not (nodes := [n for n in HOST2NODE_INFO.values() 
+        if n.routers is not None]): return
+    for n in nodes: n.routers[task_id] = rules
+    asyncio.create_task(notify_all_nodes(nodes, index=0))
 
-def remove_router(task_id: str, host: str, port: str):
-    if task_id not in ROUTERS: return
-    if (rule := f'{host}:{port}') not in ROUTERS[task_id]: return
+def remove_router(task_id: str, host: str, port=''):
+    rule = f'{host}:{port}' if port else host
+    if rule not in ROUTERS.get(task_id, []): return
     (rules := ROUTERS[task_id]).remove(rule)
-    for i in (nodes := list(HOST2NODE_INFO.values())): 
-        if i.routers is not None: i.routers[task_id] = rules
-    asyncio.create_task(notify_all_nodes(nodes))
     if not ROUTERS[task_id]: del ROUTERS[task_id]
+    if not (nodes := [n for n in HOST2NODE_INFO.values() 
+        if n.routers is not None]): return
+    for n in nodes: n.routers[task_id] = rules
+    asyncio.create_task(notify_all_nodes(nodes, index=0))
 
 def update_router_rules(task_id: str, rules: list):
-    for r in ROUTERS.get(task_id, []): 
-        if r not in rules: remove_router(task_id, *r.split(':'))
-    for r in rules: insert_router(task_id, *r.split(':'))
+    for rule in tuple(ROUTERS.get(task_id, [])): 
+        if rule not in rules: remove_router(task_id, rule)
+    for rule in rules: insert_router(task_id, rule)
 
 async def launch_task_dep(task: list, dep: str, env: dict) -> str:
     if len(parts := (task_id := task[0]).split('/', 1)) != 2: 
@@ -435,7 +437,7 @@ async def schedule_task_(task_id, task: TaskInfo) -> str:
 
     host2infos = [] if not env.get('DIST_CPU_KIND') else [
         (h, i) for h, i in HOST2NODE_INFO.items() 
-        if  i.kind == env['DIST_CPU_KIND'] 
+        if i.kind == env['DIST_CPU_KIND'] 
     and all(v == env.get(k, v) for k, v in i.env.items())]
     def remain_cpu_num(h2i: tuple) -> float:
         priority = 0.0 if h2i[0] in node_affinity else 10000
@@ -638,7 +640,7 @@ async def dist_node_register(req: fastapi.Request) -> tuple:
     info.task = asyncio.create_task(change_status_later())
     if info.routers is not None: data[-2] = info.routers
     else: data[-2] = ROUTERS; info.routers = {}
-    if not info.is_alive(): info.kind = data[2] = None
+    if not info.is_alive(): info.kind = data[2][0] = None
     if not info.tasks: data[-1] = {}; return data
     logging.info(f'launch task {host} {info.tasks[0]}')
     data[-1] = info.tasks[0]; return data
@@ -647,6 +649,12 @@ async def wait_for_task(info: NodeInfo, timeout=60):
     async with info.cond: await asyncio.wait_for(
     info.cond.wait_for(lambda: info.tasks 
     or not info.is_alive() or info.routers != {}), timeout)
+        
+@app.post('/dist/node/remove')
+async def dist_node_remove(host: str) -> bool:
+    if not (info := HOST2NODE_INFO.get(host)): return True
+    if info.used_gpus or info.used_cpus: return False
+    HOST2NODE_INFO.pop(host); return True
     
 @app.post('/dist/node/update')
 async def dist_node_update(host: str, project: str) -> bool:
@@ -654,13 +662,7 @@ async def dist_node_update(host: str, project: str) -> bool:
     if info.used_gpus: return False
     info.env['DIST_PROJECT'] = project; return True
 
-@app.post('/dist/node/remove')
-async def dist_node_remove(host: str) -> bool:
-    if not (info := HOST2NODE_INFO.get(host)): return True
-    if info.used_gpus or info.used_cpus: return False
-    HOST2NODE_INFO.pop(host); return True
-
-LOG: 'dict[str: list[str]]' = {'info': [], 'error': []}
+DATA: 'dict[str]' = {}; REGISTRY: 'dict[str: int]' = {}
 class Metric:
     def __init__(self, cnt=0, sum=0.0, step=None):
         self.cnt, self.sum, self.step = cnt, sum, step
@@ -668,12 +670,13 @@ class Metric:
         self.cnt += other.cnt; self.sum += other.sum
         if self.step is None or other.step is None: return
         self.step = self.step + other.step
-    def diff(self, other) -> 'Metric':
+    def diff(self, other: 'Metric'):
         if self.step is None or other.step is None: step = None
         else: step = self.step - other.step
         cnt, sum = self.cnt - other.cnt, self.sum - other.sum
         return Metric(cnt, sum, step)
-METRIC, DESC, LOG, DATA, REGISTRY = {}, {}, {}, {}, {}
+LOG = {'info': [], 'warning': [], 'error': []}
+METRIC: 'dict[str: Metric]' = {}; DESC: dict = {}
 
 @app.post('/dist/data/set')
 async def dist_master_set(name: str, value): DATA[name] = value
@@ -698,13 +701,12 @@ async def dist_registry_register(name: str) -> int:
     id = REGISTRY[name] = REGISTRY.get(name, -1) + 1; return id
 
 async def handle(method, url, data, headers, params):
-    r = await cached_session().request(method, url, data=data, 
+    req = cached_session().build_request(method, url, data=data, 
         headers=headers, params=params)
-    async def stream_response() -> 'AsyncGenerator':
-        async with r:
-            async for c in r.content: yield c
+    r = await cached_session().send(req, stream=True)
     return fastapi.responses.StreamingResponse(
-    stream_response(), status_code=r.status, headers=r.headers)
+    r.aiter_bytes(), status_code=r.status_code, headers=r.headers, 
+    background=fastapi.BackgroundTasks([r.aclose]))
 
 @app.api_route('/{path:path}', methods=['GET', 'POST', 
     'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'])
@@ -759,9 +761,7 @@ async def launch_dist_task(host: str, env: str):
     t.add_done_callback(lambda _: t.result())
 
 async def register_dist_task_(env: dict, url: str) -> bool:
-    try: return await request(cached_session().post, url, 
-    ssl=False, timeout=60, json=env, allow_redirects=True)
-    except asyncio.CancelledError: return False
+    try: return await request('POST', url, timeout=60, json=env)
     except: await asyncio.sleep(10); return True
 
 async def register_dist_task(env, popen: subprocess.Popen):
@@ -769,10 +769,12 @@ async def register_dist_task(env, popen: subprocess.Popen):
     async def async_check_when():
         while popen.poll() is None: await asyncio.sleep(0.1)
     async_check = asyncio.create_task(async_check_when())
-    while r := (await asyncio.wait([async_check,
+    async def try_wait_cancel_or_stop():
+        try: return (await asyncio.wait([async_check,
     asyncio.create_task(register_dist_task_(env, url))], 
-    return_when=asyncio.FIRST_COMPLETED
-        ))[0].pop().result(): pass
+    return_when=asyncio.FIRST_COMPLETED))[0].pop().result()
+        except asyncio.CancelledError: return False
+    while r := await try_wait_cancel_or_stop(): pass
     env = {**env, 'DIST_REGISTER_TIMEOUT': '0',
     'DIST_TASK_STATUS': 'FAILED' if popen.poll() else 'SUCCESS'}
     try: os.killpg(os.getpgid(popen.pid), signal.SIGTERM)
@@ -796,10 +798,12 @@ async def register_dist_node(env: dict, device_kind: str):
     device_kind = device_kind or gpu_kind or 'CPU'
     data = ['', env, [device_kind, gpu, os.cpu_count()], None, {}]
     url = f'http://{CLUSTER}/dist/node/register'
-    while data[2]: data = await register_dist_node_(url, data)
+    while data[2][0]: data = await register_dist_node_(url, data)
+    if data[2][0] is None: await handle_async_exit()
+    await request('POST', url, timeout=3, json=data)
 
 async def handle_async_exit(timeout: float=1.0):
-    cancel_coros = ['register_dist_node', 'register_dist_task_']
+    cancel_coros = ['register_dist_node', 'register_dist_task']
     for t in (tasks := [t for t in asyncio.all_tasks() if 
         t.get_coro().__name__ in cancel_coros]): t.cancel()
     res = await asyncio.wait_for(asyncio.gather(*tasks, 
@@ -807,15 +811,13 @@ async def handle_async_exit(timeout: float=1.0):
     logging.info(f'exit with {res}'); handle_exit_signal()
 
 async def register_dist_node_(url: str, data: list) -> list:
-    try: data = await request(cached_session().post, url, 
-    ssl=False, timeout=60, json=data, allow_redirects=True)
-    except asyncio.CancelledError: data[2][0] = None; return data
+    try: data = await request('POST', url, timeout=60, json=data)
+    except asyncio.CancelledError: data[2][0] = ''; return data
     except: await asyncio.sleep(10); return data
     for k, v in data[-2].items(): update_router_rules(k, v)
     if not (task := data[-1].copy()): return data
     try: await launch_dist_task(data[0], task)
-    except Exception as e: 
-        logging.warning(f'launch task {task} err, {e}')
+    except Exception as e: logging.warning(f'launch err, {e}')
     logging.info(f'launch task with env {task}'); return data
 
 def parse_gpu_kind_for_nvidia_device() -> tuple:

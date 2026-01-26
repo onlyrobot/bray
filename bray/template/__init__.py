@@ -3,7 +3,7 @@ from importlib import import_module, reload
 modules = ['swift.grpo', 'swift.rm', 'swift.sft', 'swift']
 
 def build_templates(m: str) -> dict[str: tuple]: 
-    module = reload(import_module(f'mllm.template.{m}'))
+    module = reload(import_module(f'bray.template.{m}'))
     ts = getattr(module, 'TEMPLATES')
     return {f'{m}.{k}': v for k, v in ts.items()}
 
