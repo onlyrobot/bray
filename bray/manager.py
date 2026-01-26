@@ -11,11 +11,11 @@ from datasets import (load_dataset,
 BASE_URL = f'http://127.0.0.1:{PORT}'
 
 TASK_CHOICES = ['GRPO', 'SFT', 'DL', 'RLOO', 'DAPO', 'RM', 
-    'DPO', 'KTO', 'PPO', 'RL', 'EVAL', 'TASK', 'NONE']
-SERVE_TASKS = ['API', 'VLLM', 'SGLANG', 'RAY', 'SERVE', 'WEB']
+    'DPO', 'KTO', 'PPO', 'RL', 'EVAL', 'NONE', 'RAY']
+SERVE_TASKS = ['SERVE', 'API', 'VLLM', 'SGLANG', 'WEB', 'MODEL']
 TASK_CHOICES += SERVE_TASKS; SERVE_TASKS = set(SERVE_TASKS)
 RL_TASKS = {'GRPO', 'PPO', 'RL', 'RLOO', 'DAPO'}
-NO_TRAIN_TASKS = {'NONE', 'RAY', 'EVAL', 'TASK'} | SERVE_TASKS
+NO_TRAIN_TASKS = {'NONE', 'RAY', 'EVAL'} | SERVE_TASKS
 
 TASK_HEADERS = ['Task', 'Name', 'Description', 'Type', 'Status']
 TASK_WIDTHS = [3, 2, 2, 1, 1]
@@ -227,8 +227,8 @@ def on_trial_change(template, project, trial) -> tuple:
     return update_param(updates, 'DIST_NUM_NODES', node_num)
 
 def build_trial_config(project, trial, kwargs: dict) -> dict:
-    env = {'DIST_MODEL': kwargs['DIST_MODEL'] or os.getcwd()}
-    kwargs['DIST_MODEL'] = env['DIST_MODEL']
+    if not (model := kwargs['DIST_MODEL']): env = {}
+    else: env = {'DIST_MODEL': model, 'DIST_PATH': model}
     env['TEMPLATE'], template = t_.match_template(**kwargs)
     env.update({k: v for k, v in template.items() if 
         k != 'VERIFY' and not isinstance(v, (list, dict))})
@@ -578,7 +578,7 @@ def on_script_key_up(code: str, data: gr.KeyUpData):
 def build_execute_group(project, trial, saves) -> tuple:
     with gr.Row(equal_height=True) as execute_row:
         conda = gr.Dropdown(allow_custom_value=True,
-        label='Conda Env', scale=1, value='', min_width=100)
+        label='Conda', scale=1, value='', min_width=100)
     with execute_row as code_row:
         code = gr.Dropdown(allow_custom_value=True, 
         scale=1, label='Code', min_width=100)
@@ -1011,6 +1011,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, scale=1, min_width=100)
         device_cpus = gr.Dropdown(label='Num CPUs', 
         allow_custom_value=True, scale=1, min_width=100)
+        device_mem = gr.Dropdown(label='Memory/GB', 
+        allow_custom_value=True, scale=1, min_width=100)
         node_num = gr.Dropdown(label='Num Nodes', 
         allow_custom_value=True, scale=1, min_width=100)
     with calc_row as cpu_row:
@@ -1018,23 +1020,25 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, visible=False)
         cpu_num = gr.Dropdown(label='Num CPUs', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
+        cpu_mem = gr.Dropdown(label='Memory/GB', visible=False,
+        allow_custom_value=True, scale=1, min_width=100)
         cpu_node_num = gr.Dropdown(label='Num Nodes', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
     with calc_row as instance_row:
         instance_num = gr.Number(1, label='Num Instances', 
-        scale=1, minimum=0, visible=False)
+        scale=1, minimum=0, visible=False, min_width=100)
     with calc_row as deepspeed_row:
         deepspeed_stage = gr.Dropdown(label='DeepSpeed Zero', 
         scale=1, choices=DEEPSPEED_ZERO_CHOICES, min_width=130)
-    with calc_row as sp_row:
-        cp_size = gr.Dropdown(label='CP Size', 
-        allow_custom_value=True, scale=1, min_width=100)
     with calc_row as tp_ep_row:
         ep_size = gr.Dropdown(label='EP Size', 
         allow_custom_value=True, scale=1, min_width=100)
         tp_size = gr.Dropdown(label='TP Size', 
         allow_custom_value=True, scale=1, min_width=100)
         pp_size = gr.Dropdown(label='PP Size', 
+        allow_custom_value=True, scale=1, min_width=100)
+    with calc_row as sp_row:
+        cp_size = gr.Dropdown(label='CP Size', 
         allow_custom_value=True, scale=1, min_width=100)
     with gr.Group() as dataset_group:
         (init_ds_event_args, dataset, dataset_split, datasets
@@ -1178,7 +1182,9 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_DEVICE_KIND': (device_kind, {}), 
     'DIST_NUM_DEVICES': (device_num, {}),
     'DIST_DEVICE_CPUS': (device_cpus, {}),
+    'DIST_DEVICE_MEM': (device_num, {}),
     'DIST_NUM_NODES': (node_num, {}),
+    'DIST_CPU_MEM': (cpu_mem, set(TASK_CHOICES) - {'RAY'}),
     'DIST_CPU_KIND': (cpu_kind, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_CPUS': (cpu_num, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_CPU_NODES': (
@@ -1192,7 +1198,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_DEEPSPEED_STAGE': (
         deepspeed_stage, NO_TRAIN_TASKS - {'EVAL'}),
     'DIST_DATASET_SPLIT': (dataset_split, {}),
-    'DATASETS': (datasets, {'RAY', 'NONE', 'WEB', 'API'}), 
+    'DATASETS': (datasets, {'RAY', 'NONE', 'WEB', 'API', 'SERVE'}), 
     'DIST_CHAT_TEMPLATE': (
         chat_template, NO_TRAIN_TASKS - {'EVAL'}),
     'DIST_SYSTEM_PROMPT': (
@@ -1255,6 +1261,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         on_trial_change, [template, project, trial], VALUES
     ).then(*update_task_status_event_args
     ).then(*task_deps_change_event_args).then(*init_ds_event_args
+    ).then(build_config, [project, trial] + VALUES, script_cfg
     ).success(lambda _: None, selected, 
     js='(id) => {document.getElementById(id).click()}')
     trial.blur(on_project_input, project, trial)
