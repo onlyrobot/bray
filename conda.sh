@@ -1,20 +1,24 @@
 set -o errexit; export SHELLOPTS
 
-export CONDA_DIR=/tmp/pymp-conda; mkdir -p $CONDA_DIR
+export DIST_CONDA_PATH=${DIST_CONDA_PATH:-$PWD/.conda}
 if [ -n "$DIST_CONDA_ENV" ]; then
-export CONDA_ENVS_PATH=$CONDA_DIR/conda/envs
+mkdir -p $(dirname $DIST_CONDA_PATH)
+export CONDA_ENVS_PATH=$DIST_CONDA_PATH/envs
 
-if [ ! -d $CONDA_DIR/conda ]; then
+if [ ! -d $DIST_CONDA_PATH ]; then
 if [ $(uname) == "Darwin" ]; then CONDA_NAME=MacOSX-arm64
 else CONDA_NAME=Linux-x86_64; fi
 if [ ! -f Miniconda3-latest-$CONDA_NAME.sh ]; then
 CONDA_URL=https://repo.anaconda.com/miniconda
 echo "从 $CONDA_URL 下载 Conda 安装包 ..."
 curl -sL $CONDA_URL/Miniconda3-latest-$CONDA_NAME.sh -O; fi
-echo "安装 Conda 到 $CONDA_DIR/conda ..."
-bash -i Miniconda3-latest-$CONDA_NAME.sh -b -p $CONDA_DIR/conda
+echo "安装 Conda 到 $DIST_CONDA_PATH ..."
+bash -i Miniconda3-latest-$CONDA_NAME.sh -b -p $DIST_CONDA_PATH
 if [ -f $PWD/.condarc ]; then 
-cp $PWD/.condarc $CONDA_DIR/conda/; fi; fi
+cp $PWD/.condarc $DIST_CONDA_PATH; fi
+elif [ ! -d $DIST_CONDA_PATH/cache ]; then
+echo "等待 Conda 安装到 $DIST_CONDA_PATH ..."
+while [ ! -d $DIST_CONDA_PATH/cache ]; do sleep 1; done; fi
 
 CURRENT_CONDA_ENV=$PWD/conda/$DIST_CONDA_ENV
 CACHED_CONDA_ENV=$PWD/cache/$DIST_CONDA_ENV
@@ -22,7 +26,8 @@ if [ -n "$DIST_DOCKER_IMAGE" ]; then
 CACHED_CONDA_ENV=$CACHED_CONDA_ENV.${DIST_DOCKER_IMAGE////_}; fi
 CONDA_ENV_PATH=$CONDA_ENVS_PATH/$DIST_CONDA_ENV
 
-LOCAL_CONDA_ENV=$CONDA_DIR/$DIST_CONDA_ENV
+LOCAL_CONDA_ENV=$DIST_CONDA_PATH/cache/$DIST_CONDA_ENV
+mkdir -p $(dirname $LOCAL_CONDA_ENV)
 if [[ ! -d $CONDA_ENV_PATH || ! -f $LOCAL_CONDA_ENV ]]; then
 
 if [ -f $CACHED_CONDA_ENV ] && cmp -s "$CURRENT_CONDA_ENV" \
@@ -35,10 +40,10 @@ cp $CACHED_CONDA_ENV $LOCAL_CONDA_ENV
 elif [ ! -d $CONDA_ENV_PATH ]; then
 echo "创建 Conda 环境 $DIST_CONDA_ENV 到 $CONDA_ENV_PATH ..."
 rm -f $$LOCAL_CONDA_ENV
-$CONDA_DIR/conda/bin/conda create -n $DIST_CONDA_ENV -y; fi; fi
+$DIST_CONDA_PATH/bin/conda create -n $DIST_CONDA_ENV -y; fi; fi
 
 echo "激活并安装 Conda 环境 $CONDA_ENV_PATH ..."
-source $CONDA_DIR/conda/bin/activate $DIST_CONDA_ENV
+source $DIST_CONDA_PATH/bin/activate $DIST_CONDA_ENV
 
 if [ ! -f $LOCAL_CONDA_ENV ] || ! cmp -s "$CURRENT_CONDA_ENV" \
 "$LOCAL_CONDA_ENV"; then

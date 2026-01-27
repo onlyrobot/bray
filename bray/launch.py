@@ -47,8 +47,10 @@ class TaskInfo:
         self.cond, self.task = asyncio.Condition(), None
         self.env, self.deps, self.msg = env, deps, ''
         self.resources: 'dict[tuple, dict[str: tuple[list]]]' = {}
-    def type(self): return self.env.get('DIST_TASK_TYPE')
+    def task_type(self): return self.env.get('DIST_TASK_TYPE')
     def status(self) -> str: 
+        if self.resources: return 'RUNNING'
+        if self.deps: return 'PENDING'
         return self.env.get('DIST_TASK_STATUS') or 'UNKNOWN'
     def update_status(self, status: str): 
         self.env['DIST_TASK_STATUS'] = status
@@ -551,11 +553,9 @@ async def dist_task_query(project='', trial='') -> dict:
 @app.get('/dist/task/status')
 async def dist_task_status(project: str, trial: str) -> tuple:
     info = CREATED_TASK_ID2INFO.get(t := f'{project}/{trial}')
-    if not info: return 'UNKNOWN', ''
-    deps = info.deps - {''}; dep = deps.pop() if deps else ''
-    if info.resources: return 'RUNNING', dep
-    # if t in PENDING_TASK_ID2INFO: return 'PENDING', dep
-    return 'PENDING' if info.deps else info.status(), dep
+    if not info: return 'UNKNOWN', 'UNKNOWN', ''
+    deps = info.deps - {''}; task_dep = deps.pop() if deps else ''
+    return info.status(), info.task_type(), task_dep
 
 @app.get('/dist/device/query')
 async def dist_gpu_query(project: str, remain=True) -> dict:

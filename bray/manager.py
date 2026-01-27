@@ -101,7 +101,7 @@ def on_project_input(project: str, trial: str=None) -> dict:
 def on_train_type_select(train_type: str) -> dict:
     return gr.update(visible=train_type == 'LoRA')
 
-def query_task_status(project: str, trial: str) -> str:
+def query_task_status(project: str, trial: str) -> tuple:
     path = f'/dist/task/status?project={project}&trial={trial}'
     return request_json(f'{BASE_URL}{path}', 'GET')
 
@@ -109,12 +109,10 @@ def build_task_type_and_status(task: list) -> list:
     if len(parts := task[0].split('/', 1)) != 2: return task
     if not task[1]: task[1] = parts[1].upper()
     if not task[2]: task[2] = time.strftime('%Y-%m-%d %H:%M:%S')
-    status, _ = query_task_status(parts[0], parts[1])
+    status, task_type, _ = query_task_status(parts[0], parts[1])
     status2color = {'RUNNING': 'green', 'SUCCESS': 'blue', 
         'PENDING': 'orange', 'UNKNOWN': 'gray'}
     color = status2color.get(status, 'red')
-    try: task_type = load_trial_config(*parts)['DIST_TASK_TYPE']
-    except: task_type = 'UNKNOWN'
     template = task[-1].split('template=')[-1].split('&')[0]
     if not template or status != 'UNKNOWN': template = task[0]
     status = f'''<a href="./?template={template}&project={
@@ -130,7 +128,9 @@ def update_task_status(project: str, trial: str) -> tuple:
     on, off = gr.update(visible=True), gr.update(visible=False)
     down = gr.update(interactive=False)
     if not trial: return [down, off, down, down, off, off, down]
-    status, dep = query_task_status(project, trial)
+    status, task_type, dep = query_task_status(project, trial)
+    # if task_type == 'WEB' and status == 'RUNNING':
+    #     delete = gr.update(value='跳转页面', link=f'./{p}/{t}')
     link = gr.update(visible=True, link=f'./?task={dep}')
     add = lambda u: [u | off, link] if dep else [u | on, off]
     launch = down | gr.update(value=status)
@@ -227,11 +227,10 @@ def on_trial_change(template, project, trial) -> tuple:
     return update_param(updates, 'DIST_NUM_NODES', node_num)
 
 def build_trial_config(project, trial, kwargs: dict) -> dict:
-    if not (model := kwargs['DIST_MODEL']): env = {}
-    else: env = {'DIST_MODEL': model, 'DIST_PATH': model}
-    env['TEMPLATE'], template = t_.match_template(**kwargs)
-    env.update({k: v for k, v in template.items() if 
-        k != 'VERIFY' and not isinstance(v, (list, dict))})
+    name, template = t_.match_template(**kwargs)
+    env = {k: v for k, v in template.items() if k != 'VERIFY' and 
+        not isinstance(v, (list, dict))}
+    env.update({'TEMPLATE': name})
     kwargs = {k: v for k, v in kwargs.items() if is_task_valid(
         kwargs['DIST_TASK_TYPE'], k) or k in template}
 
@@ -330,6 +329,7 @@ def save_trial(project: str, trial: str, *args) -> tuple:
     return project, trial, gr.update(interactive=True), output
 
 def delete_trial(project, trial, delete: str) -> tuple:
+    if delete == '跳转页面': return [gr.update()] * 5
     trial_path = get_trial_path(project, trial)
     if not os.path.exists(trial_path):
         return [gr.update()] * 4 + [f'任务 {trial} 不存在']
@@ -980,33 +980,15 @@ with gr.Blocks(title='Bray Cloud') as platform:
     saves = [save, launch, resume]
     tasks = gr.Dataframe(column_widths=TASK_WIDTHS, visible=False, 
         headers=TASK_HEADERS, datatype='html', type='array')
-    with gr.Row(equal_height=True) as algo_row:
+    with gr.Row(equal_height=True) as task_row:
         task_deps = gr.Dropdown(label='Task Deps', scale=1,
-        choices=['OFF', 'ON'], min_width=120)
-    with algo_row as task_type_row:
+        choices=['OFF', 'ON'], min_width=100)
+    with task_row as task_type_row:
         task_type = gr.Dropdown(label='Task Type', scale=1,
-        choices=TASK_CHOICES, allow_custom_value=True, min_width=150)
-    with algo_row as booster_row:
-        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=3, 
-        label='Tuning Method', min_width=120)
-        quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=3, 
-        label='Quantization', min_width=100)
-        boost = gr.Dropdown(BOOST_CHOICES, 
-        scale=3, label='Booster Method', min_width=120)
-    with algo_row as model_row:
-        model = gr.Dropdown(MODELS, label='Model or Path', 
-        allow_custom_value=True, scale=10, min_width=320)
-    with gr.Row(equal_height=True, visible=False) as lora_row:
-        lora_rank = gr.Number(8, label='LoRA Rank')
-        lora_alpha = gr.Number(16, label='LoRA Alpha')
-        lora_dropout = gr.Number(
-        minimum=0, maximum=1, step=0.01, label='LoRA Dropout')
-    with lora_row as lora_module_row:
-        lora_module = gr.Textbox(label='LoRA modules', 
-        placeholder='Default or use commas to separate')
-    with gr.Row() as calc_row:
-        device_kind = gr.Dropdown(label='Device Kind', scale=1,
-        allow_custom_value=True)
+        choices=TASK_CHOICES, allow_custom_value=True, min_width=100)
+    with task_row as device_resource_row:
+        device_kind = gr.Dropdown(label='Device Kind', scale=2,
+        allow_custom_value=True, min_width=100)
         device_num = gr.Dropdown(label='Num Devices', 
         allow_custom_value=True, scale=1, min_width=100)
         device_cpus = gr.Dropdown(label='Num CPUs', 
@@ -1015,31 +997,50 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, scale=1, min_width=100)
         node_num = gr.Dropdown(label='Num Nodes', 
         allow_custom_value=True, scale=1, min_width=100)
-    with calc_row as cpu_row:
-        cpu_kind = gr.Dropdown(label='CPU Kind', scale=1,
-        allow_custom_value=True, visible=False)
+    with task_row as cpu_resource_row:
+        cpu_kind = gr.Dropdown(label='CPU Kind', scale=2,
+        allow_custom_value=True, visible=False, min_width=100)
         cpu_num = gr.Dropdown(label='Num CPUs', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
         cpu_mem = gr.Dropdown(label='Memory/GB', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
         cpu_node_num = gr.Dropdown(label='Num Nodes', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
-    with calc_row as instance_row:
-        instance_num = gr.Number(1, label='Num Instances', 
-        scale=1, minimum=0, visible=False, min_width=100)
-    with calc_row as deepspeed_row:
-        deepspeed_stage = gr.Dropdown(label='DeepSpeed Zero', 
-        scale=1, choices=DEEPSPEED_ZERO_CHOICES, min_width=130)
-    with calc_row as tp_ep_row:
-        ep_size = gr.Dropdown(label='EP Size', 
-        allow_custom_value=True, scale=1, min_width=100)
-        tp_size = gr.Dropdown(label='TP Size', 
-        allow_custom_value=True, scale=1, min_width=100)
-        pp_size = gr.Dropdown(label='PP Size', 
-        allow_custom_value=True, scale=1, min_width=100)
-    with calc_row as sp_row:
+    with task_row as instance_row:
+        instance_num = gr.Number(1, label='Num Service', 
+        scale=1, minimum=0, visible=False, min_width=120)
+    with gr.Row(equal_height=True) as model_row:
+        model = gr.Dropdown(MODELS, label='Model or Path', 
+        allow_custom_value=True, scale=1, min_width=240)
+    with model_row: algo_coloumn = gr.Column(scale=6)
+    with algo_coloumn, gr.Row() as algo_row:
+        deepspeed_stage = gr.Dropdown(label='DeepSpeed', 
+        scale=1, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
+    with algo_row as context_paralle_row:
         cp_size = gr.Dropdown(label='CP Size', 
-        allow_custom_value=True, scale=1, min_width=100)
+        allow_custom_value=True, scale=1, min_width=80)
+    with algo_row as ep_tp_pp_row:
+        ep_size = gr.Dropdown(label='EP Size', 
+        allow_custom_value=True, scale=1, min_width=80)
+        tp_size = gr.Dropdown(label='TP Size', 
+        allow_custom_value=True, scale=1, min_width=80)
+        pp_size = gr.Dropdown(label='PP Size', 
+        allow_custom_value=True, scale=1, min_width=80)
+    with algo_row as quant_row:
+        quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=1, 
+        label='Quantization', min_width=100)
+        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
+        label='Tuning Method', min_width=120)
+        boost = gr.Dropdown(BOOST_CHOICES, 
+        scale=1, label='Booster Method', min_width=120)
+    with gr.Row(equal_height=True, visible=False) as lora_row:
+        lora_rank = gr.Number(8, label='LoRA Rank')
+        lora_alpha = gr.Number(16, label='LoRA Alpha')
+        lora_dropout = gr.Number(
+        minimum=0, maximum=1, step=0.01, label='LoRA Dropout')
+    with lora_row as lora_module_row:
+        lora_module = gr.Textbox(label='LoRA modules', 
+        placeholder='Default or use commas to separate')
     with gr.Group() as dataset_group:
         (init_ds_event_args, dataset, dataset_split, datasets
         ) = build_dataset_group(output)
@@ -1171,14 +1172,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
     PARAMS = { 'TEMPLATE': (template, {}), 
     'DIST_TASK_DEPS': (task_deps, {}),
     'TASKS': (tasks, {}), 'DIST_TASK_TYPE': (task_type, {}), 
-    'DIST_MODEL': (model, {}),
-    'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
-    'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
-    'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
-    'DIST_LORA_ALPHA': (lora_alpha, NO_TRAIN_TASKS),
-    'DIST_LORA_MODULE': (lora_module, NO_TRAIN_TASKS),
-    'DIST_QUANTIZE': (quantize, NO_TRAIN_TASKS), 
-    'DIST_BOOST': (boost, NO_TRAIN_TASKS),
     'DIST_DEVICE_KIND': (device_kind, {}), 
     'DIST_NUM_DEVICES': (device_num, {}),
     'DIST_DEVICE_CPUS': (device_cpus, {}),
@@ -1191,6 +1184,14 @@ with gr.Blocks(title='Bray Cloud') as platform:
         cpu_node_num, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_INSTANCES': (
         instance_num, set(TASK_CHOICES) - SERVE_TASKS),
+    'DIST_MODEL': (model, {'RAY', 'NONE', 'WEB', 'API', 'SERVE'}),
+    'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
+    'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
+    'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
+    'DIST_LORA_ALPHA': (lora_alpha, NO_TRAIN_TASKS),
+    'DIST_LORA_MODULE': (lora_module, NO_TRAIN_TASKS),
+    'DIST_QUANTIZE': (quantize, NO_TRAIN_TASKS), 
+    'DIST_BOOST': (boost, NO_TRAIN_TASKS),
     'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - {'EVAL'}),
     'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - {'EVAL'}), 
@@ -1284,11 +1285,9 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ).then(*update_task_status_event_args)
     for v in VALUES: v.input(verify_trial, [project, trial] + VALUES, 
         VALUES + [output], show_progress='hidden')
-    model.blur(lambda task_type: [gr.update(visible=is_task_valid(
-        task_type, 'DIST_TRAIN_TYPE'))] * 3, 
-        task_type, [train_type, quantize, boost])
-    model.focus(lambda: [gr.update(visible=False)] * 3, 
-        None, [train_type, quantize, boost], show_progress='hidden')
+    model.blur(lambda: gr.update(visible=True), outputs=algo_coloumn)
+    model.focus(lambda: gr.update(visible=False), 
+        outputs=algo_coloumn, show_progress='hidden')
     for e in [device_kind.input, device_kind.focus]: 
         e(on_device_kind_change, [project, device_kind], device_num)
     for e in [device_kind.input, device_kind.focus, 
