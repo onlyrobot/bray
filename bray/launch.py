@@ -410,7 +410,7 @@ async def schedule_task_(task_id, task: TaskInfo) -> str:
     node_affinity = env.get('DIST_NODE_AFFINITY', '')
     host2infos = [] if not env.get('DIST_DEVICE_KIND') else [
         (h, i) for h, i in HOST2NODE_INFO.items()
-        if i.kind == env['DIST_DEVICE_KIND']
+        if env['DIST_DEVICE_KIND'] in [i.kind, h]
     and all(v == env.get(k, v) for k, v in i.env.items())]
     def remain_gpu_num(h2i: tuple) -> float:
         priority = 0.0 if h2i[0] in node_affinity else 10000
@@ -439,7 +439,7 @@ async def schedule_task_(task_id, task: TaskInfo) -> str:
 
     host2infos = [] if not env.get('DIST_CPU_KIND') else [
         (h, i) for h, i in HOST2NODE_INFO.items() 
-        if i.kind == env['DIST_CPU_KIND'] 
+        if env['DIST_CPU_KIND'] in [i.kind, h]
     and all(v == env.get(k, v) for k, v in i.env.items())]
     def remain_cpu_num(h2i: tuple) -> float:
         priority = 0.0 if h2i[0] in node_affinity else 10000
@@ -549,6 +549,11 @@ async def dist_task_query(project='', trial='') -> dict:
     ps = [project] if project else os.listdir(get_project_path())
     return {p: dist_task_query_(p, trial) 
     for p in ps if os.path.isdir(get_project_path(p))}
+
+@app.get('/dist/task/resource')
+async def dist_task_resource(project: str, trial: str) -> dict:
+    info = CREATED_TASK_ID2INFO.get(f'{project}/{trial}')
+    return info.resources if info else {}
 
 @app.get('/dist/task/status')
 async def dist_task_status(project: str, trial: str) -> tuple:

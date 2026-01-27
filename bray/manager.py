@@ -127,30 +127,31 @@ def update_tasks_type_and_status(tasks: list) -> list | dict:
 def update_task_status(project: str, trial: str) -> tuple:
     on, off = gr.update(visible=True), gr.update(visible=False)
     down = gr.update(interactive=False)
-    if not trial: return [down, off, down, down, off, off, down]
+    if not trial: return [down, off, off, down, off, off, down]
     status, task_type, dep = query_task_status(project, trial)
-    # if task_type == 'WEB' and status == 'RUNNING':
-    #     delete = gr.update(value='跳转页面', link=f'./{p}/{t}')
-    link = gr.update(visible=True, link=f'./?task={dep}')
-    add = lambda u: [u | off, link] if dep else [u | on, off]
+    u = gr.update(value='跳转页面', interactive=True,
+         link=f'/{project}/{trial}')
+    if task_type != 'WEB' or status != 'RUNNING':
+        u = gr.update(value='删除任务', link='') | down
+    d = gr.update(visible=True, link=f'?task={dep}')
     launch = down | gr.update(value=status)
     if status in ['RUNNING', 'PENDING']: 
-        return add(down) + [down, launch, on, off, down]
+        return [u, d if dep else off, off, launch, on, off, down]
     active = gr.update(interactive=True)
     if status == 'SUCCESS': 
-        return add(active) + [down, launch, off, off, active]
+        return [u | active, off, on, launch, off, off, active]
     launch = active | gr.update(value='启动任务')
     if not os.path.exists(get_trial_path(project, trial)): 
-        return add(down) + [active, launch, off, off, down]
+        return [u | down, off, on, launch, off, off, down]
     path = get_output_path(project, trial, node=0)
     if not os.path.exists(path): resume = off
     else: resume = on; launch = down | gr.update(value=status)
-    return add(active) + [active, launch, off, resume, active]
+    return [u | active, off, on, launch, off, resume, active]
 
-def update_param(params: list, name: str, value) -> list:
+def update_param(params: list, name: str, value: object) -> list:
     params[NAMES.index(name)] = value; return params
 
-def get_param_value(name: str, env={}) -> object:
+def get_param_value(name: str, env: dict={}) -> object:
     return env.get(name, DEFAULTS[NAMES.index(name)])
 
 def on_trial_change(template, project, trial) -> tuple:
@@ -451,8 +452,11 @@ def flush_log_and_metric(project, trial, metric, log_filter,
     nodes = sorted([int(n.split('.')[1]) for n in os.listdir(
         os.path.dirname(node_path)) 
     if n.startswith('out.') and n.endswith('.txt')])
-    node = gr.update(visible=os.path.exists(node_path),
-        choices=nodes, value=node if node in nodes else 0)
+    resource = request_json(f'{BASE_URL}/dist/task/resource'
+        f'?project={project}&trial={trial}', 'GET')
+    if r := list(resource.values()): nodes = list(r[0])
+    node = gr.update(visible=r or len(nodes) > 1, choices=
+        nodes, value=nodes[node or 0])
     hint = 200 * 1024 if log_filter == 'HEAD-200K' else -1
     seek = lambda f: f.seek(max(0, f.seek(0, 2) - 200 * 1024) if 
         log_filter == 'TAIL-200K' else 0)
@@ -577,14 +581,18 @@ def on_script_key_up(code: str, data: gr.KeyUpData):
     
 def build_execute_group(project, trial, saves) -> tuple:
     with gr.Row(equal_height=True) as execute_row:
-        conda = gr.Dropdown(allow_custom_value=True,
-        label='Conda', scale=1, value='', min_width=100)
+        conda = gr.Dropdown(allow_custom_value=True, value='',
+        label='Conda', scale=3, min_width=100)
+        conda_scope = gr.Dropdown(['global', 'trial'], min_width=80, 
+        scale=1, label='Scope', visible=False)
     with execute_row as code_row:
         code = gr.Dropdown(allow_custom_value=True, 
-        scale=1, label='Code', min_width=100)
+        scale=3, label='Code', min_width=100)
     with execute_row as script_row:
-        script = gr.Dropdown(scale=1, value='',
-        allow_custom_value=True, label='Script', min_width=100)
+        script = gr.Dropdown(allow_custom_value=True, value='', 
+        label='Script', scale=3, min_width=100)
+        script_scope = gr.Dropdown(['code', 'trial'], min_width=80, 
+        scale=1, label='Scope', visible=False)
     conda_row = gr.Row(visible=False)
     with conda_row, gr.Column(min_width=240) as conda_column:
         docker_image = gr.Dropdown(
@@ -972,7 +980,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         delete = gr.Button(value='删除任务', interactive=False)
         cancel = gr.Button(value='取消删除', visible=False)
         dependent = gr.Button(value='跳转依赖', visible=False)
-        save = gr.Button(value='暂存任务', interactive=False)
+        save = gr.Button(value='暂存任务', visible=False)
     with trial_row, gr.Column(scale=1, min_width=100):
         launch = gr.Button(value='启动任务', interactive=False)
         stop = gr.Button(value='停止任务', visible=False)
@@ -993,7 +1001,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, scale=1, min_width=100)
         device_cpus = gr.Dropdown(label='Num CPUs', 
         allow_custom_value=True, scale=1, min_width=100)
-        device_mem = gr.Dropdown(label='Memory/GB', 
+        device_memory = gr.Dropdown(label='Memory/GB', 
         allow_custom_value=True, scale=1, min_width=100)
         node_num = gr.Dropdown(label='Num Nodes', 
         allow_custom_value=True, scale=1, min_width=100)
@@ -1002,7 +1010,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, visible=False, min_width=100)
         cpu_num = gr.Dropdown(label='Num CPUs', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
-        cpu_mem = gr.Dropdown(label='Memory/GB', visible=False,
+        cpu_memory = gr.Dropdown(label='Memory/GB', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
         cpu_node_num = gr.Dropdown(label='Num Nodes', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
@@ -1120,7 +1128,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         label='Log Filter', allow_custom_value=True, min_width=100)
     with log_group, log_row:
         node = gr.Dropdown([0], label='Node', scale=1, 
-        min_width=60, visible=False)
+        min_width=60, visible=False, type='index')
     with log_group, log_row, gr.Column(scale=1, min_width=100):
         clean = gr.Button('清理日志', interactive=False)
         flush = gr.Button('刷新日志')
@@ -1175,11 +1183,12 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_DEVICE_KIND': (device_kind, {}), 
     'DIST_NUM_DEVICES': (device_num, {}),
     'DIST_DEVICE_CPUS': (device_cpus, {}),
-    'DIST_DEVICE_MEM': (device_num, {}),
+    'DIST_DEVICE_MEMORY': (device_memory, {}),
     'DIST_NUM_NODES': (node_num, {}),
-    'DIST_CPU_MEM': (cpu_mem, set(TASK_CHOICES) - {'RAY'}),
     'DIST_CPU_KIND': (cpu_kind, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_CPUS': (cpu_num, set(TASK_CHOICES) - {'RAY'}),
+    'DIST_CPU_MEMORY': (
+        cpu_memory, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_CPU_NODES': (
         cpu_node_num, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_INSTANCES': (
