@@ -1,5 +1,5 @@
 import logging, asyncio, time, os, fastapi, uvicorn
-import subprocess, signal, random
+import subprocess, signal, random, websockets
 from bray.common import cached_session, request
 from bray.common import (HOST,
     save_task_config, load_task_config, load_trial_config,
@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 executor = ThreadPoolExecutor(max_workers=4)
 START_TIME, START_WAIT = time.time(), 10
-MASTER_PORTS, PORT = [str(8614 + i) for i in range(10)], 8413
+MASTER_PORTS, PORT = [str(8418 + i) for i in range(10)], 8413
 class NodeInfo:
     def __init__(self, env, kind, gpu, cpu):
         self.reset(env, kind, gpu, cpu)
@@ -710,7 +710,7 @@ async def handle(method, url, data, headers, params):
         headers=headers, params=params)
     r = await cached_session().send(req, stream=True)
     return fastapi.responses.StreamingResponse(
-    r.aiter_bytes(), status_code=r.status_code, headers=r.headers, 
+    r.aiter_raw(), status_code=r.status_code, headers=r.headers, 
     background=fastapi.BackgroundTasks([r.aclose]))
 
 @app.api_route('/{path:path}', methods=['GET', 'POST', 
@@ -721,15 +721,50 @@ async def router(request: fastapi.Request) -> fastapi.Response:
     else: raise fastapi.HTTPException(404, detail='path err')
     if not (rules := ROUTERS.get(task_id)): 
         raise fastapi.HTTPException(404, detail=f'no router')
-    target = random.choice(rules)
-    url = f'http://{target}/{"/".join(parts[3:])}'
+    rule = random.choice(rules)
+    url = f'http://{rule}/{"/".join(parts[3:])}?{request.url.query}'
+    if request.query_params.get('proxy') == '0':
+        return fastapi.responses.RedirectResponse(url)
     logging.info(f'router {request.url} to {url}')
     method, body = request.method, await request.body()
     try: return await handle(method, url, 
         body, request.headers, request.query_params)
     except Exception as e: err = e
-    logging.warning(f'router {task_id} {request.url} err: {err}')
+    logging.warning(f'router {request.url} err: {err}')
     raise fastapi.HTTPException(500, detail=f'err: {err}')
+
+@app.websocket('/{path:path}')
+async def router_websocket(origin: fastapi.WebSocket):
+    path = origin.url.path; parts = path.split('/')
+    if len(parts) > 2: task_id = '/'.join(parts[1:3])
+    else: await origin.close(1008, reason='path err'); return
+    if not (rules := ROUTERS.get(task_id)):
+        await origin.close(1008, reason='no router'); return
+    rule = random.choice(rules)
+    url = f'ws://{rule}/{"/".join(parts[3:])}?{origin.url.query}'
+    logging.info(f'router {origin.url} to {url}')
+    try: return await handle_websocket(url, origin)
+    except websockets.exceptions.ConnectionClosed: return
+    except Exception as e: err = e
+    logging.warning(f'router {origin.url} err: {err}')
+
+async def handle_websocket(url, origin: fastapi.WebSocket):
+    async def read_from_origin(origin, target):
+        while True:
+            msg = await origin.receive()
+            data = msg.get('bytes') or msg.get('text')
+            if not data: break
+            await target.send(data)
+    async def read_from_target(origin, target):
+        while True:
+            data = await target.recv()
+            is_text = isinstance(data, str)
+            if is_text: await origin.send_text(data)
+            else: await origin.send_bytes(data)
+    await origin.accept()
+    async with websockets.connect(url) as target:
+        await asyncio.gather(read_from_origin(
+    origin, target), read_from_target(origin, target))
 
 async def launch_dist_task(host: str, env: str):
     nnode, node = env['DIST_NUM_NODES'], env['DIST_NODE_RANK']
@@ -804,7 +839,7 @@ async def register_dist_node(env: dict, device_kind: str):
     data = ['', env, [device_kind, gpu, os.cpu_count()], None, {}]
     url = f'http://{CLUSTER}/dist/node/register'
     while data[2][0]: data = await register_dist_node_(url, data)
-    if data[2][0] is None: await handle_async_exit()
+    if data[2][0] != '': asyncio.create_task(handle_async_exit())
     await request('POST', url, timeout=3, json=data)
 
 async def handle_async_exit(timeout: float=1.0):

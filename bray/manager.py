@@ -14,6 +14,7 @@ TASK_CHOICES = ['GRPO', 'SFT', 'DL', 'RLOO', 'DAPO', 'RM',
     'DPO', 'KTO', 'PPO', 'RL', 'EVAL', 'NONE', 'RAY']
 SERVE_TASKS = ['SERVE', 'API', 'VLLM', 'SGLANG', 'WEB', 'MODEL']
 TASK_CHOICES += SERVE_TASKS; SERVE_TASKS = set(SERVE_TASKS)
+MODEL_TASKS = {'VLLM', 'SGLAGNG', 'MODEL', 'EVAL'}
 RL_TASKS = {'GRPO', 'PPO', 'RL', 'RLOO', 'DAPO'}
 NO_TRAIN_TASKS = {'NONE', 'RAY', 'EVAL'} | SERVE_TASKS
 
@@ -130,7 +131,7 @@ def update_task_status(project: str, trial: str) -> tuple:
     if not trial: return [down, off, off, down, off, off, down]
     status, task_type, dep = query_task_status(project, trial)
     u = gr.update(value='跳转页面', interactive=True,
-         link=f'/{project}/{trial}')
+        link=f'/{project}/{trial}/')
     if task_type != 'WEB' or status != 'RUNNING':
         u = gr.update(value='删除任务', link='') | down
     d = gr.update(visible=True, link=f'?task={dep}')
@@ -427,6 +428,8 @@ def parse_output_metrics(project: str, trial: str) -> list:
     metric_path = os.path.join(trial_path, 'output/metric.json')
     if not os.path.exists(metric_path): 
         metric_path = os.path.join(trial_path, 'output/logging.jsonl')
+    if not os.path.exists(metric_path): metric_path = os.path.join(
+        trial_path, 'output/completions.jsonl')
     if not os.path.exists(metric_path): return []
     with open(metric_path, 'r') as f: lines = f.readlines()
     def try_parse_metric(l: str, step: int):
@@ -446,8 +449,9 @@ def flush_log_and_metric(project, trial, metric, log_filter,
     # trials = [t for t in TRIALS.get(project, {}) if t != trial]
     trials = [t for t in TRIALS.get(project, {})]
     metric_label = gr.update(choices=sorted(trials))
-    path = get_output_path(project, trial, node)
-    if not os.path.exists(path): return update, metric_label, node, ''
+    path = get_output_path(project, trial, node or 0)
+    if not os.path.exists(path): 
+        return update, metric_label, gr.update(), ''
     node_path = get_output_path(project, trial, node=1)
     nodes = sorted([int(n.split('.')[1]) for n in os.listdir(
         os.path.dirname(node_path)) 
@@ -455,7 +459,7 @@ def flush_log_and_metric(project, trial, metric, log_filter,
     resource = request_json(f'{BASE_URL}/dist/task/resource'
         f'?project={project}&trial={trial}', 'GET')
     if r := list(resource.values()): nodes = list(r[0])
-    node = gr.update(visible=r or len(nodes) > 1, choices=
+    node = gr.update(visible=bool(r) or len(nodes) > 1, choices=
         nodes, value=nodes[node or 0])
     hint = 200 * 1024 if log_filter == 'HEAD-200K' else -1
     seek = lambda f: f.seek(max(0, f.seek(0, 2) - 200 * 1024) if 
@@ -485,12 +489,12 @@ def on_metric_select(project, trial, metric, metric_label, axis_x):
     else: updates = on_metric_select(
         project, metric_label[0], metric, metric_label[1:], axis_x)
     data = updates['value'].to_dict(orient='list') if updates else {}
-    t = [trial] * len(metrics) + data.get('trial', [])
+    color = [trial] * len(metrics) + data.get('color', [])
     x += data.get('x', []); y += data.get('y', [])
-    color = f'color-{str(id(updates))[-4:]}'
-    value = pandas.DataFrame({'x': x, 'y': y, 'trial': t, color: t})
-    return gr.update(title=metric, y_title=metric, 
-    color=color if t else None, x_title=axis_x, value=value)
+    value = pandas.DataFrame({'x': x, 'y': y, 'color': color})
+    color_column = 'color' if metric_label else ''
+    return gr.update(color=color_column, x='x', y='y',
+    title=metric, y_title=metric, x_title=axis_x, value=value)
 
 def clean_log(project, trial, clean, node=0) -> str:
     if clean == '清理日志': return '确认清理', '请确认清理日志'
@@ -580,19 +584,17 @@ def on_script_key_up(code: str, data: gr.KeyUpData):
     return on_code_or_script_change(code, data.input_value)
     
 def build_execute_group(project, trial, saves) -> tuple:
+    # conda_scope = gr.Button('global scope', size='sm')
     with gr.Row(equal_height=True) as execute_row:
         conda = gr.Dropdown(allow_custom_value=True, value='',
-        label='Conda', scale=3, min_width=100)
-        conda_scope = gr.Dropdown(['global', 'trial'], min_width=80, 
-        scale=1, label='Scope', visible=False)
+        label='Conda', min_width=100) #, buttons=[conda_scope])
     with execute_row as code_row:
         code = gr.Dropdown(allow_custom_value=True, 
-        scale=3, label='Code', min_width=100)
+        label='Code', min_width=100)
+    # script_scope = gr.Button('code scope', size='sm')
     with execute_row as script_row:
         script = gr.Dropdown(allow_custom_value=True, value='', 
-        label='Script', scale=3, min_width=100)
-        script_scope = gr.Dropdown(['code', 'trial'], min_width=80, 
-        scale=1, label='Scope', visible=False)
+        label='Script', min_width=100) #, buttons=[script_scope])
     conda_row = gr.Row(visible=False)
     with conda_row, gr.Column(min_width=240) as conda_column:
         docker_image = gr.Dropdown(
@@ -953,7 +955,8 @@ def build_eval_group(project, trial, eval_btn, saves):
     for e in [evals.change, eval_btn.click]: e(on_eval_btn_click, 
         [evals] + eval_info, [evals] + eval_info + [remove, add]
     ).then(lambda: None, None, eval_output)
-    build_dataset_preview(output_ds, preview, evals)
+    with gr.Group() as preview_group: 
+        build_dataset_preview(output_ds, preview, evals)
     for c in eval_info: c.change(on_eval_info_change, 
         [evals] + eval_info, [evals] + eval_info + [remove, add])
     return evals, eval_input, eval_code, eval_info
@@ -1034,13 +1037,14 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, scale=1, min_width=80)
         pp_size = gr.Dropdown(label='PP Size', 
         allow_custom_value=True, scale=1, min_width=80)
-    with algo_row as quant_row:
+    with algo_row as boost_row:
         quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=1, 
         label='Quantization', min_width=100)
-        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
-        label='Tuning Method', min_width=120)
         boost = gr.Dropdown(BOOST_CHOICES, 
         scale=1, label='Booster Method', min_width=120)
+    # with algo_row as train_row:
+        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
+        label='Tuning Method', min_width=120)
     with gr.Row(equal_height=True, visible=False) as lora_row:
         lora_rank = gr.Number(8, label='LoRA Rank')
         lora_alpha = gr.Number(16, label='LoRA Alpha')
@@ -1115,7 +1119,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ckpt_step = gr.Slider(value=-1, visible=False,
         minimum=0, maximum=0, step=1, label='Checkpoint Step')
     with gr.Group(visible=True) as log_group: plot = gr.LinePlot(
-        x='x', y='y', title='Metric', height=320)
+        color_title='', title='Metric', height=320)
     with log_group, gr.Row(equal_height=True) as log_row:
         metric = gr.Dropdown(label='Metric', 
         allow_custom_value=True, scale=2, min_width=100)
@@ -1127,8 +1131,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         log_filter = gr.Dropdown(LOG_FILTER_CHOICES, scale=1,
         label='Log Filter', allow_custom_value=True, min_width=100)
     with log_group, log_row:
-        node = gr.Dropdown([0], label='Node', scale=1, 
-        min_width=60, visible=False, type='index')
+        node = gr.Dropdown(label='Node', scale=1, min_width=60, 
+        visible=False, type='index')
     with log_group, log_row, gr.Column(scale=1, min_width=100):
         clean = gr.Button('清理日志', interactive=False)
         flush = gr.Button('刷新日志')
@@ -1151,7 +1155,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, trial, model], ckpt_step)
     selected = gr.Button('log', visible=False, elem_id='selected')
     code_frame = lambda code: f'''<iframe allowfullscreen
-    src='http://{HOST}:8414/?folder={code}' 
+    src='http://{HOST}:{PORT}/localhost/code-server/?folder={code}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     code_html = gr.HTML(visible=False, padding=False, autoscroll=True)
     code_btn.click(code_frame, code, code_html)
@@ -1159,7 +1163,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, record_btn, rec_md], rec_md)
     rec_md.change(lambda x: x, rec_md, view_rec, show_progress=False)
     tb_frame = lambda p, t: f'''<iframe allowfullscreen src='
-    http://{HOST}:8420/?runFilter={p}/{t}#scalars&regexInput={p}/{t}' 
+    http://{HOST}:{PORT}/localhost/tensorboard/''' + \
+    f'''?runFilter={p}/{t}#scalars&regexInput={p}/{t}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     tb_html = gr.HTML(visible=False, padding=False, autoscroll=True)
     tb_btn.click(tb_frame, [project, trial], tb_html)
@@ -1194,19 +1199,20 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_NUM_INSTANCES': (
         instance_num, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_MODEL': (model, {'RAY', 'NONE', 'WEB', 'API', 'SERVE'}),
+    'DIST_DEEPSPEED_STAGE': (
+        deepspeed_stage, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
+    'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
+    'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_QUANTIZE': (
+        quantize, NO_TRAIN_TASKS - MODEL_TASKS), 
+    'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
     'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
     'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
     'DIST_LORA_ALPHA': (lora_alpha, NO_TRAIN_TASKS),
     'DIST_LORA_MODULE': (lora_module, NO_TRAIN_TASKS),
-    'DIST_QUANTIZE': (quantize, NO_TRAIN_TASKS), 
-    'DIST_BOOST': (boost, NO_TRAIN_TASKS),
-    'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - {'EVAL'}),
-    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
-    'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - {'EVAL'}), 
-    'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - {'EVAL'}),
-    'DIST_DEEPSPEED_STAGE': (
-        deepspeed_stage, NO_TRAIN_TASKS - {'EVAL'}),
     'DIST_DATASET_SPLIT': (dataset_split, {}),
     'DATASETS': (datasets, {'RAY', 'NONE', 'WEB', 'API', 'SERVE'}), 
     'DIST_CHAT_TEMPLATE': (
@@ -1260,8 +1266,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
     project.input(on_project_input, project, trial
     ).then(lambda t: (None, t or ''), trial, [trial, template]
     ).then(lambda t: t, template, trial)
-    on_metric_select_event_args = (on_metric_select, 
-        [project, trial, metric, metric_label, axis_x], plot)
     update_task_status_event_args = (update_task_status, 
         [project, trial], 
     [delete, dependent, save, launch, stop, resume, clean])
@@ -1321,13 +1325,15 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, trial, model, ckpt_step], ckpt_step)
     flush_event_args = (flush_log_and_metric, [project, trial, metric, 
         log_filter, node], [metric, metric_label, node, logger])
-    for c in [log_btn, flush]: c.click(
-        *flush_event_args).then(*on_metric_select_event_args
+    update_metric_event_args = (on_metric_select, 
+        [project, trial, metric, metric_label, axis_x], plot)
+    for c in [log_btn, flush]: c.click(*flush_event_args
+    ).then(lambda: None, None, plot).then(*update_metric_event_args
     ).then(*update_task_status_event_args
     ).then(lambda: '清理日志', None, clean)
     for c in [log_filter, node]: c.input(*flush_event_args)
-    for c in [metric, metric_label, axis_x]: 
-        c.change(*on_metric_select_event_args)
+    for c in [metric, metric_label, axis_x]: c.change(
+        lambda: None, None, plot).then(*update_metric_event_args)
     metric_label.change(lambda x: gr.update(show_label=not x), 
         metric_label, metric_label)
     clean.click(clean_log, [project, trial, clean, node], 

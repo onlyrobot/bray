@@ -99,3 +99,6 @@ obj/
 [Tt]est[Rr]esult*
 *.VisualState.xml
 _buildlogs/*
+
+cache/*
+.conda/*
