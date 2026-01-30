@@ -12,9 +12,9 @@ BASE_URL = f'http://127.0.0.1:{PORT}'
 
 TASK_CHOICES = ['GRPO', 'SFT', 'DL', 'RLOO', 'DAPO', 'RM', 
     'DPO', 'KTO', 'PPO', 'RL', 'EVAL', 'NONE', 'RAY']
-SERVE_TASKS = ['SERVE', 'API', 'VLLM', 'SGLANG', 'WEB', 'MODEL']
+SERVE_TASKS = ['SERVE', 'MODEL', 'WEB', 'API', 'SGLANG', 'VLLM']
 TASK_CHOICES += SERVE_TASKS; SERVE_TASKS = set(SERVE_TASKS)
-MODEL_TASKS = {'VLLM', 'SGLAGNG', 'MODEL', 'EVAL'}
+MODEL_TASKS = {'MODEL', 'SGLANG', 'VLLM', 'EVAL'}
 RL_TASKS = {'GRPO', 'PPO', 'RL', 'RLOO', 'DAPO'}
 NO_TRAIN_TASKS = {'NONE', 'RAY', 'EVAL'} | SERVE_TASKS
 
@@ -589,7 +589,7 @@ def build_execute_group(project, trial, saves) -> tuple:
         conda = gr.Dropdown(allow_custom_value=True, value='',
         label='Conda', min_width=100) #, buttons=[conda_scope])
     with execute_row as code_row:
-        code = gr.Dropdown(allow_custom_value=True, 
+        code = gr.Dropdown(allow_custom_value=True, value='',
         label='Code', min_width=100)
     # script_scope = gr.Button('code scope', size='sm')
     with execute_row as script_row:
@@ -1018,11 +1018,13 @@ with gr.Blocks(title='Bray Cloud') as platform:
         cpu_node_num = gr.Dropdown(label='Num Nodes', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
     with task_row as instance_row:
-        instance_num = gr.Number(1, label='Num Service', 
-        scale=1, minimum=0, visible=False, min_width=120)
+        instance_num = gr.Number(1, label='Num Instances', scale=1, 
+        minimum=0, visible=False, min_width=120)
+        load_balance = gr.Dropdown(['HASH', 'RR', 'NONE'], scale=1,
+        label='Load Balance', visible=False, min_width=100)
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
-        allow_custom_value=True, scale=1, min_width=240)
+        allow_custom_value=True, scale=3, min_width=200)
     with model_row: algo_coloumn = gr.Column(scale=6)
     with algo_coloumn, gr.Row() as algo_row:
         deepspeed_stage = gr.Dropdown(label='DeepSpeed', 
@@ -1042,7 +1044,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         label='Quantization', min_width=100)
         boost = gr.Dropdown(BOOST_CHOICES, 
         scale=1, label='Booster Method', min_width=120)
-    # with algo_row as train_row:
         train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
         label='Tuning Method', min_width=120)
     with gr.Row(equal_height=True, visible=False) as lora_row:
@@ -1198,9 +1199,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
         cpu_node_num, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_INSTANCES': (
         instance_num, set(TASK_CHOICES) - SERVE_TASKS),
-    'DIST_MODEL': (model, {'RAY', 'NONE', 'WEB', 'API', 'SERVE'}),
-    'DIST_DEEPSPEED_STAGE': (
-        deepspeed_stage, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_LOAD_BALANCE': (
+        load_balance, set(TASK_CHOICES) - SERVE_TASKS),
+    'DIST_MODEL': (model, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_DEEPSPEED_STAGE': (deepspeed_stage, NO_TRAIN_TASKS),
     'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 

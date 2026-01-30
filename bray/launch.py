@@ -43,10 +43,10 @@ class NodeInfo:
         async with self.cond: self.cond.notify_all()
 HOST2NODE_INFO: 'dict[str: NodeInfo]' = {}
 class TaskInfo:
-    def __init__(self, env: dict, deps: set):
-        self.cond, self.task = asyncio.Condition(), None
-        self.env, self.deps, self.msg = env, deps, ''
+    def __init__(self, env: dict, deps: set=None):
         self.resources: 'dict[tuple, dict[str: tuple[list]]]' = {}
+        self.cond, self.task = asyncio.Condition(), None
+        self.env, self.deps, self.msg = env, deps or set(), ''
     def task_type(self): return self.env.get('DIST_TASK_TYPE')
     def status(self) -> str: 
         if self.resources: return 'RUNNING'
@@ -75,7 +75,7 @@ async def restore_task_on_start(wait_for_start: float):
     envs = {f'{p}/{t}': env for p, ts in (await dist_task_query()
         ).items() for t, env in ts.items() if env}
     for task_id, env in envs.items():
-        CREATED_TASK_ID2INFO[task_id] = TaskInfo(env, set())
+        CREATED_TASK_ID2INFO[task_id] = TaskInfo(env)
     await asyncio.sleep(wait_for_start)
     await asyncio.gather(*[dist_task_launch(e.copy(), '') 
         for e in envs.values() if e and not 
@@ -234,7 +234,7 @@ async def dist_task_create(env: dict, dep: str='') -> str:
     task_id = f'{env["DIST_PROJECT"]}/{env["DIST_TRIAL"]}'
     logging.info(f'start to create task {env}')
     if not (task := CREATED_TASK_ID2INFO.get(task_id)):
-        task = CREATED_TASK_ID2INFO[task_id] = TaskInfo({}, set())
+        task = CREATED_TASK_ID2INFO[task_id] = TaskInfo({})
     elif not dep and dep in task.deps: return '重复启动'
     exist = task.resources or task_id in PENDING_TASK_ID2INFO
     if (exist or task.is_ready()) and dep == '':
@@ -402,10 +402,10 @@ async def allocate_resource_(task: TaskInfo, cluster: str) -> str:
     return (await process.communicate())[1].decode()
 
 async def schedule_task_(task_id, task: TaskInfo) -> str:
-    if task.resources: return '任务正在运行中'
     if not task.env or not task.deps: return '任务已经结束'
     if task.is_ready(): return '任务已经就绪'
     if not is_task_deps_ready(task_id): return '依赖任务未就绪'
+    if task.resources: return '任务正在运行中'
     PENDING_TASK_ID2INFO[task_id] = task; env = task.env
     node_affinity = env.get('DIST_NODE_AFFINITY', '')
     host2infos = [] if not env.get('DIST_DEVICE_KIND') else [
@@ -495,9 +495,9 @@ async def remove_task_and_clean(task_id, status) -> TaskInfo:
     for t in info.env.get('DIST_TASKS', '').split(' '):
         if t: await remove_task_dep(t, task_id)
     if not info.resources: return info
-    for m, p in info.resources.keys():
-        if info.is_serve(): remove_router(task_id, m, p)
-        HOST2NODE_INFO[m].used_ports.remove(p)
+    for master, port in info.resources:
+        if info.is_serve(): remove_router(task_id, master, port)
+        HOST2NODE_INFO[master].used_ports.remove(port)
     for gcs in info.resources.values():
         for h, gc in gcs.items(): HOST2NODE_INFO[h].free(*gc)
     asyncio.create_task(schedule_all_tasks())
@@ -553,7 +553,7 @@ async def dist_task_query(project='', trial='') -> dict:
 @app.get('/dist/task/resource')
 async def dist_task_resource(project: str, trial: str) -> dict:
     info = CREATED_TASK_ID2INFO.get(f'{project}/{trial}')
-    return info.resources if info else {}
+    return info.resources if info and info.resources else {}
 
 @app.get('/dist/task/status')
 async def dist_task_status(project: str, trial: str) -> tuple:
@@ -582,24 +582,24 @@ def restore_task(dep: str, env: dict, info: TaskInfo):
 async def initialize_task_if_needed(env: dict) -> tuple:
     task_id = f'{env["DIST_PROJECT"]}/{env["DIST_TRIAL"]}'
     if not (info := CREATED_TASK_ID2INFO.get(task_id)):
-        info = CREATED_TASK_ID2INFO[task_id] = TaskInfo({}, set())
+        info = CREATED_TASK_ID2INFO[task_id] = TaskInfo({})
     if info.is_done(): return task_id, info
     if not info.resources: restore_task(task_id, env, info)
     master, host = env['DIST_MASTER'], env['DIST_WORKER']
-    master_port = env['DIST_MASTER_PORT']
-    gpus_cpus = info.resources.get((master, master_port), {})
+    port = env['DIST_MASTER_PORT']
+    gpus_cpus = info.resources.get((master, port), {})
     if host in gpus_cpus: return task_id, info
     if not (node := HOST2NODE_INFO.get(host)):
         node = HOST2NODE_INFO[host] = NodeInfo(*([None]*4))
     if not gpus_cpus and info.is_serve(): 
-        insert_router(task_id, master, master_port)
-    if host == master: node.used_ports.append(master_port)
+        insert_router(task_id, master, port)
+    if host == master: node.used_ports.append(port)
     gpus = [int(i) for i in env.get(
         'DIST_DEVICES', '').split(',') if i]
     cpus = [int(i) for i in env['DIST_CPUS'].split(',') if i]
     node.used_gpus += gpus; node.used_cpus += cpus
     gpus_cpus[host] = (gpus, cpus)
-    info.resources[(master, master_port)] = gpus_cpus
+    info.resources[(master, port)] = gpus_cpus
     return task_id, CREATED_TASK_ID2INFO[task_id]
 
 async def wait_timeout(cond: asyncio.Condition, timeout=60):
@@ -733,21 +733,6 @@ async def router(request: fastapi.Request) -> fastapi.Response:
     logging.warning(f'router {request.url} err: {err}')
     raise fastapi.HTTPException(500, detail=f'err: {err}')
 
-@app.websocket('/{path:path}')
-async def router_websocket(origin: fastapi.WebSocket):
-    path = origin.url.path; parts = path.split('/')
-    if len(parts) > 2: task_id = '/'.join(parts[1:3])
-    else: await origin.close(1008, reason='path err'); return
-    if not (rules := ROUTERS.get(task_id)):
-        await origin.close(1008, reason='no router'); return
-    rule = random.choice(rules)
-    url = f'ws://{rule}/{"/".join(parts[3:])}?{origin.url.query}'
-    logging.info(f'router {origin.url} to {url}')
-    try: return await handle_websocket(url, origin)
-    except websockets.exceptions.ConnectionClosed: return
-    except Exception as e: err = e
-    logging.warning(f'router {origin.url} err: {err}')
-
 async def handle_websocket(url, origin: fastapi.WebSocket):
     async def read_from_origin(origin, target):
         while True:
@@ -765,6 +750,21 @@ async def handle_websocket(url, origin: fastapi.WebSocket):
     async with websockets.connect(url) as target:
         await asyncio.gather(read_from_origin(
     origin, target), read_from_target(origin, target))
+
+@app.websocket('/{path:path}')
+async def router_websocket(origin: fastapi.WebSocket):
+    path = origin.url.path; parts = path.split('/')
+    if len(parts) > 2: task_id = '/'.join(parts[1:3])
+    else: await origin.close(1008, reason='path err'); return
+    if not (rules := ROUTERS.get(task_id)):
+        await origin.close(1008, reason='no router'); return
+    rule = random.choice(rules)
+    url = f'ws://{rule}/{"/".join(parts[3:])}?{origin.url.query}'
+    logging.info(f'router {origin.url} to {url}')
+    try: return await handle_websocket(url, origin)
+    except websockets.exceptions.ConnectionClosed: return
+    except Exception as e: err = e
+    logging.warning(f'router {origin.url} err: {err}')
 
 async def launch_dist_task(host: str, env: str):
     nnode, node = env['DIST_NUM_NODES'], env['DIST_NODE_RANK']
@@ -840,7 +840,7 @@ async def register_dist_node(env: dict, device_kind: str):
     url = f'http://{CLUSTER}/dist/node/register'
     while data[2][0]: data = await register_dist_node_(url, data)
     if data[2][0] != '': asyncio.create_task(handle_async_exit())
-    await request('POST', url, timeout=3, json=data)
+    else: await request('POST', url, timeout=3, json=data)
 
 async def handle_async_exit(timeout: float=1.0):
     cancel_coros = ['register_dist_node', 'register_dist_task']

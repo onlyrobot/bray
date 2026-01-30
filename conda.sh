@@ -1,6 +1,7 @@
-set -o errexit; export SHELLOPTS
-
 export DIST_CONDA_PATH=${DIST_CONDA_PATH:-$PWD/.conda}
+
+set -o errexit; echo "使用 Conda $DIST_CONDA_PATH"
+
 if [ -n "$DIST_CONDA_ENV" ]; then
 mkdir -p $(dirname $DIST_CONDA_PATH)
 export CONDA_ENVS_PATH=$DIST_CONDA_PATH/envs
