@@ -249,6 +249,7 @@ async def dist_task_create(env: dict, dep: str='') -> str:
     if dep == '' and dep in task.deps: 
         await notify_user(task_id, 'CREATED', '创建成功')
     if not (r := await schedule_task(task_id, task)): return ''
+    if task.is_done(): return '创建失败，任务已经结束'
     task_deps_on = task.env['DIST_TASK_DEPS'] == 'ON'
     if task_deps_on or '' not in task.deps or dep: return ''
     await remove_task_and_clean(task_id, 'FAILED'); return r
@@ -771,31 +772,32 @@ async def launch_dist_task(host: str, env: str):
     nproc_per_node = len(env.get('DIST_DEVICES', '').split(','))
     code = env.get('DIST_CODE') or os.getcwd()
     conda = os.path.join(os.getcwd(), 'conda.sh')
-    envs = (f'source {conda} && cd {code} && '
+    script = (f'source {conda} && cd {code} && '
     f'MASTER_ADDR={env["DIST_MASTER"]} NODE_RANK={node} '
     f'MASTER_PORT={env["DIST_MASTER_PORT"]} '
     f'CUDA_VISIBLE_DEVICES={env.get("DIST_DEVICES", "")} '
     f'NPROC_PER_NODE={nproc_per_node} NNODES={nnode} ')
     if script_envs := env.get('DIST_SCRIPT_ENVS'): 
-        envs = f'{envs} {script_envs}'
-    script = os.path.join(code, s := env['DIST_SCRIPT'])
-    if s.startswith('script/') and not os.path.exists(script):
-        script = os.path.join(os.getcwd(), s)
-    if not os.path.exists(script): script = s
-    elif script.endswith('.sh'): script = f'source {script}'
-    elif script.endswith('.py'): script = f'python {script}'
+        script = f'{script} {script_envs}'
+    script = f'{script} {env["DIST_SCRIPT"]}'
+    # script = os.path.join(code, s := env['DIST_SCRIPT'])
+    # if s.startswith('script/') and not os.path.exists(script):
+    #     script = os.path.join(os.getcwd(), s)
+    # if not os.path.exists(script): script = s
+    # elif script.endswith('.sh'): script = f'source {script}'
+    # elif script.endswith('.py'): script = f'python {script}'
     if script_args := env.get('DIST_SCRIPT_ARGS'):
         script = f'{script} {script_args}'
     path = f'{env["DIST_TRIAL_PATH"]}/output/out.{node}.txt'
     async for _ in (await asyncio.sleep(0.01 * i) 
         for i in range(50) if 'DIST_RESUME_PATH' not in env):
         if not os.path.exists(path): break
-    logging.info(f'launch task {envs} in node {host}')
+    logging.info(f'launch task {script} in node {host}')
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'a') as f: 
-        f.write(f'Launch with {env}\n {envs} {script}\n')
-    popen = subprocess.Popen(f'{envs} {script}', env=env, 
-        shell=True, start_new_session=True,
+        f.write(f'Launch task with \n{env}\n{script}\n')
+    popen = subprocess.Popen(script, env=env, shell=True, 
+        start_new_session=True,
     stdout=open(path, 'a'), stderr=subprocess.STDOUT)
     t = asyncio.create_task(register_dist_task(env, popen))
     t.add_done_callback(lambda _: t.result())

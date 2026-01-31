@@ -1,7 +1,6 @@
+set -o errexit; echo "执行 Conda 的当前工作目录 $PWD"
+
 export DIST_CONDA_PATH=${DIST_CONDA_PATH:-$PWD/.conda}
-
-set -o errexit; echo "使用 Conda $DIST_CONDA_PATH"
-
 if [ -n "$DIST_CONDA_ENV" ]; then
 mkdir -p $(dirname $DIST_CONDA_PATH)
 export CONDA_ENVS_PATH=$DIST_CONDA_PATH/envs

@@ -331,21 +331,21 @@ def save_trial(project: str, trial: str, *args) -> tuple:
     return project, trial, gr.update(interactive=True), output
 
 def delete_trial(project, trial, delete: str) -> tuple:
-    if delete == '跳转页面': return [gr.update()] * 5
+    if delete == '跳转页面': return [gr.update()] * 3
     trial_path = get_trial_path(project, trial)
     if not os.path.exists(trial_path):
-        return [gr.update()] * 4 + [f'任务 {trial} 不存在']
+        return [gr.update()] * 2 + [f'任务 {trial} 不存在']
     on, off = gr.update(visible=True), gr.update(visible=False)
     if delete == '删除任务': 
-        return gr.update(), '确认删除', on, off, '请确认'
+        return gr.update(), '确认删除', '请确认删除，或者取消'
     url = f'/dist/task/remove?project={project}&trial={trial}'
     if r := request_json(f'{BASE_URL}{url}'):
-        return [gr.update()] * 4 + [r]
+        return [gr.update()] * 2 + [r]
     if os.path.abspath(trial_path) == trial_path: 
         shutil.rmtree(trial_path)
-    else: return [gr.update()] * 4 + [f'任务 {trial} 路径非法']
+    else: return [gr.update()] * 2 + [f'任务 {trial} 路径非法']
     update = on_project_input(project) | gr.update(value=None)
-    return update, '删除任务', off, on, f'已删除 {trial}'
+    return update, '删除任务', f'已删除 {trial}'
 
 def on_task_type_change(task_type: str, *args) -> tuple[dict]:
     kwargs = {n: args[i] for i, n in enumerate(PARAMS)}
@@ -514,7 +514,26 @@ def on_eval_start(project, trial, api, method, input):
     headers={'Content-Type': 'application/json'}).json()
     return json.dumps(data, indent=4, ensure_ascii=False)
 
-def on_script_input(script, code) -> tuple[dict, float]:
+def parse_path_from_script(code: str, script: str) -> str:
+    def is_valid_path(code: str, part: str) -> bool:
+        return bool(on_code_or_script_change(code, part)['choices'])
+    for part in (parts := script.split(' ')):
+        if part and is_valid_path(code, part): return part
+    if (s := script.split('python -m ')[1:]) and s[0]:
+        return s[0].split(' ')[0].replace('.', '/') + '.py'
+    else: return '' if '' in parts else script
+
+def replace_script_path(code, script, path: str) -> str:
+    old_script_path = parse_path_from_script(code, script)
+    exec = script.split(old_script_path, 1)[0].split(' ')[-1]
+    postfix2exec = {'.sh': 'source', '.py': 'python'}
+    if path and path[0] not in ['/', '.']: path = f'./{path}'
+    for p, e in postfix2exec.items():
+        if path.endswith(p) and exec != e: path = f'{e} {path}'; break
+    return script.replace(old_script_path, path, 1)
+
+def on_script_change(script, code) -> tuple[dict, float]:
+    script = parse_path_from_script(code, script)
     path = os.path.join(code or './', script)
     if script.startswith('script/') and not os.path.exists(path):
         path = os.path.join('./', script)
@@ -524,6 +543,26 @@ def on_script_input(script, code) -> tuple[dict, float]:
     language = 'python' if script.endswith('.py') else 'shell'
     updates |= gr.update(value=code, language=language)
     return updates, os.path.getmtime(path)
+
+def on_code_or_script_change(code: str, script: str) -> dict:
+    if ' ' in script: script = parse_path_from_script(code, script)
+    if code != './' and script.startswith('script/'): 
+        defaults = on_code_or_script_change('./', script)
+    else: defaults = gr.update(choices=[])
+    if not script: defaults['choices'].append('script/')
+    path = os.path.join(code, s_dir := os.path.dirname(script))
+    if not os.path.isdir(path): return defaults
+    choices = [os.path.join(s_dir, d + '/' if os.path.isdir(
+        os.path.join(path, d)) else d) 
+    for d in os.listdir(path) if s_dir or d.startswith(script)]
+    return gr.update(choices=choices + [
+    c for c in defaults['choices'] if c not in choices])
+
+def on_script_key_up(code: str, data: gr.KeyUpData):
+    return on_code_or_script_change(code, data.input_value)
+
+def on_script_select(code, script, evt: gr.SelectData) -> str:
+    return replace_script_path(code, script, evt.value)
 
 def on_conda_input(conda: str) -> tuple[dict, float]:
     if not os.path.isfile(path := os.path.join('conda', conda)):
@@ -549,6 +588,7 @@ def save_conda_code(conda, conda_code, mtime) -> dict:
     return gr.update(value=max(os.path.getmtime(path), abs(mtime)))
 
 def save_script_code(code, script, script_code, mtime) -> dict:
+    script = parse_path_from_script(code, script)
     if not script or not script_code or mtime > 0: return gr.update()
     path = os.path.join(code or './', script)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -561,40 +601,22 @@ def build_config(project: str, trial: str, *args) -> str:
     kwargs = {n: args[i] for i, n in enumerate(PARAMS)}
     config = build_trial_config(project, trial, kwargs)
     extra_env = {'DIST_MASTER': 'ip', 'DIST_MASTER_PORT': 'int', 
-    'DIST_WORKER': 'ip', 'DIST_NODE_RANK': 'int', 'DIST_RESUME_PATH': '', 
+    'DIST_WORKER': 'ip', 'DIST_NODE_RANK': 'int', 
+    'DIST_RESUME_PATH': 'ckpt path set if resume trial', 
     'DIST_TRIAL': trial, 'DIST_PROJECT': project}
     extra_env['DIST_TRIAL_PATH'] = get_trial_path(project, trial)
     return json.dumps(config | extra_env, indent=0)
-
-def on_code_or_script_change(code: str, script: str) -> dict:
-    if code != './' and script.startswith('script/'): 
-        defaults = on_code_or_script_change('./', script)
-    else: defaults = gr.update(choices=[])
-    if not script: defaults['choices'].append('script/')
-    if not code: return gr.update(choices=SCRIPTS)
-    if not script.endswith('/'): script = os.path.dirname(script)
-    path = os.path.join(code, script)
-    if not os.path.isdir(path): return defaults
-    choices = [os.path.join(script, d + '/' if os.path.isdir(
-        os.path.join(path, d)) else d) for d in os.listdir(path)]
-    return gr.update(choices=choices + [
-    c for c in defaults['choices'] if c not in choices])
-
-def on_script_key_up(code: str, data: gr.KeyUpData):
-    return on_code_or_script_change(code, data.input_value)
     
 def build_execute_group(project, trial, saves) -> tuple:
-    # conda_scope = gr.Button('global scope', size='sm')
-    with gr.Row(equal_height=True) as execute_row:
-        conda = gr.Dropdown(allow_custom_value=True, value='',
-        label='Conda', min_width=100) #, buttons=[conda_scope])
-    with execute_row as code_row:
-        code = gr.Dropdown(allow_custom_value=True, value='',
-        label='Code', min_width=100)
     # script_scope = gr.Button('code scope', size='sm')
-    with execute_row as script_row:
+    # script_scope = gr.Button('code scope', size='sm')
+    with gr.Row(equal_height=True) as execute_row:
         script = gr.Dropdown(allow_custom_value=True, value='', 
-        label='Script', min_width=100) #, buttons=[script_scope])
+        label='Script', scale=3) #, buttons=[script_scope])
+        code = gr.Dropdown(allow_custom_value=True, value='',
+        label='Code', scale=2, min_width=100)
+        conda = gr.Dropdown(allow_custom_value=True, value='', 
+        label='Conda', scale=2) #, buttons=[conda_scope])
     conda_row = gr.Row(visible=False)
     with conda_row, gr.Column(min_width=240) as conda_column:
         docker_image = gr.Dropdown(
@@ -614,21 +636,23 @@ def build_execute_group(project, trial, saves) -> tuple:
         conda_code = gr.Code(language='shell', label='conda.sh')
     script_row = gr.Row(visible=False)
     with script_row, gr.Column(min_width=240) as script_column:
-        script_args = gr.Textbox(label='Script Args')
         env_code = gr.Code(language='shell', label='env.sh')
-    with script_row, script_column:
         script_cfg = gr.Code(language='json', label='config.json')
     with script_row: script_code = gr.Code(language='shell')
     script_mtime = gr.Number(0.0, visible=False)
     on, off = gr.update(visible=True), gr.update(visible=False)
+    script.blur(lambda: [on] * 2, None, [code, conda])
+    script.focus(lambda: [off] * 2, None, 
+        [code, conda], show_progress='hidden')
     code.focus(lambda: (off, off), None, [conda_row, script_row])
-    code.blur(lambda: [on] * 2, None, [conda, script])
-    code.focus(lambda: [off, on, off], None, 
-        [conda, code, script], show_progress='hidden')
+    code.blur(lambda: [on] * 2, None, [script, conda])
+    code.focus(lambda: [off] * 2, None, 
+        [script, conda], show_progress='hidden')
     conda.focus(lambda: (on, off), None, [conda_row, script_row])
     conda.change(on_conda_input, conda, [conda_code, conda_mtime])
-    script.change(on_script_input, [script, code], 
+    script.change(on_script_change, [script, code], 
         [script_code, script_mtime])
+    script.select(on_script_select, [code, script], script)
     script.focus(lambda: (on, off), None, [script_row, conda_row])
     for c in saves: c.click(save_script_code, 
         [code, script, script_code, script_mtime], script_mtime)
@@ -639,12 +663,12 @@ def build_execute_group(project, trial, saves) -> tuple:
     conda_code.input(lambda x: -abs(x), conda_mtime, conda_mtime)
     code.change(on_code_or_script_change, 
         [code, script], script).then(
-    on_script_input, [script, code], [script_code, script_mtime])
+    on_script_change, [script, code], [script_code, script_mtime])
     script.input(on_code_or_script_change, [code, script], script)
     script.key_up(on_script_key_up, 
         [code], script, show_progress='hidden')
     resource = [user, user_group, resource_group, node_alive]
-    return (conda, code, script, script_args, script_cfg, 
+    return (conda, code, script, script_cfg, 
     docker_image, *resource, resource_cfg, env_code)
 
 def on_kind_select(kind, dataset, datasets) -> tuple:
@@ -981,7 +1005,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         interactive=False, max_lines=1)
     with trial_row, gr.Column(scale=1, min_width=100):
         delete = gr.Button(value='删除任务', interactive=False)
-        cancel = gr.Button(value='取消删除', visible=False)
         dependent = gr.Button(value='跳转依赖', visible=False)
         save = gr.Button(value='暂存任务', visible=False)
     with trial_row, gr.Column(scale=1, min_width=100):
@@ -1013,22 +1036,37 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, visible=False, min_width=100)
         cpu_num = gr.Dropdown(label='Num CPUs', visible=False,
         allow_custom_value=True, scale=1, min_width=100)
-        cpu_memory = gr.Dropdown(label='Memory/GB', visible=False,
-        allow_custom_value=True, scale=1, min_width=100)
-        cpu_node_num = gr.Dropdown(label='Num Nodes', visible=False,
-        allow_custom_value=True, scale=1, min_width=100)
+        cpu_memory = gr.Dropdown(label='Memory/GB', min_width=100, 
+        visible=False, allow_custom_value=True, scale=1)
+        cpu_node_num = gr.Dropdown(
+        label='Num Nodes', visible=False, 
+        min_width=100, allow_custom_value=True, scale=1)
     with task_row as instance_row:
         instance_num = gr.Number(1, label='Num Instances', scale=1, 
         minimum=0, visible=False, min_width=120)
         load_balance = gr.Dropdown(['HASH', 'RR', 'NONE'], scale=1,
         label='Load Balance', visible=False, min_width=100)
+    with gr.Group() as execute_group:
+        (conda, code, script, script_cfg, docker_image, 
+        user, user_group, resource_group, 
+        node_alive, resource_cfg, env_code,
+        ) = build_execute_group(project, trial, saves)
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
-        allow_custom_value=True, scale=3, min_width=200)
+        allow_custom_value=True, scale=2, min_width=200)
     with model_row: algo_coloumn = gr.Column(scale=6)
     with algo_coloumn, gr.Row() as algo_row:
+        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
+        label='Train Type', min_width=120)
+    with algo_row as deepspeed_row:
         deepspeed_stage = gr.Dropdown(label='DeepSpeed', 
         scale=1, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
+    with algo_row as boost_row:
+        boost = gr.Dropdown(BOOST_CHOICES, 
+        scale=1, label='Booster Method', min_width=120)
+    with algo_row as quant_row:
+        quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=1, 
+        label='Quantization', min_width=100)
     with algo_row as context_paralle_row:
         cp_size = gr.Dropdown(label='CP Size', 
         allow_custom_value=True, scale=1, min_width=80)
@@ -1039,13 +1077,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, scale=1, min_width=80)
         pp_size = gr.Dropdown(label='PP Size', 
         allow_custom_value=True, scale=1, min_width=80)
-    with algo_row as boost_row:
-        quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=1, 
-        label='Quantization', min_width=100)
-        boost = gr.Dropdown(BOOST_CHOICES, 
-        scale=1, label='Booster Method', min_width=120)
-        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
-        label='Tuning Method', min_width=120)
     with gr.Row(equal_height=True, visible=False) as lora_row:
         lora_rank = gr.Number(8, label='LoRA Rank')
         lora_alpha = gr.Number(16, label='LoRA Alpha')
@@ -1097,11 +1128,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         top_k = gr.Number(50, label='Top K', scale=1)
     with reward_group: rewards = gr.Dataframe(type='array',
         headers=REWARD_HEADERS, column_widths=REWARD_WIDTHS)
-    with gr.Group() as execute_group:
-        (conda, code, script, script_args, script_cfg, 
-        docker_image, user, user_group, resource_group, 
-        node_alive, resource_cfg, env_code,
-        ) = build_execute_group(project, trial, saves)
     with gr.Row(equal_height=True) as operate_row:
         node_btn = gr.Button('节点', elem_id='node', min_width=70)
         export_btn = gr.Button(
@@ -1201,16 +1227,23 @@ with gr.Blocks(title='Bray Cloud') as platform:
         instance_num, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_LOAD_BALANCE': (
         load_balance, set(TASK_CHOICES) - SERVE_TASKS),
+    'DIST_CONDA_ENV': (conda, {}), 'ENV_CODE': (env_code, {}),
+    'DIST_DOCKER_IMAGE': (docker_image, {}), 
+    'DIST_USER': (user, {}), 'DIST_USER_GROUP': (user_group, {}),
+    'DIST_RESOURCE_GROUP': (resource_group, {}), 
+    'DIST_NODE_ALIVE': (node_alive, {}), 
+    'DIST_RESOURCE_CONFIG': (resource_cfg, {}),
+    'DIST_CODE': (code, {}), 'DIST_SCRIPT': (script, {}),
     'DIST_MODEL': (model, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
     'DIST_DEEPSPEED_STAGE': (deepspeed_stage, NO_TRAIN_TASKS),
-    'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
-    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
-    'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
-    'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_QUANTIZE': (
         quantize, NO_TRAIN_TASKS - MODEL_TASKS), 
-    'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
-    'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
+    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
+    'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
+    'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
     'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
     'DIST_LORA_ALPHA': (lora_alpha, NO_TRAIN_TASKS),
@@ -1239,14 +1272,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_TOP_P': (top_p, set(TASK_CHOICES) - RL_TASKS),
     'DIST_TOP_K': (top_k, set(TASK_CHOICES) - RL_TASKS),
     'REWARDS': (rewards, set(TASK_CHOICES) - RL_TASKS), 
-    'DIST_CONDA_ENV': (conda, {}), 'ENV_CODE': (env_code, {}),
-    'DIST_DOCKER_IMAGE': (docker_image, {}), 
-    'DIST_USER': (user, {}), 'DIST_USER_GROUP': (user_group, {}),
-    'DIST_RESOURCE_GROUP': (resource_group, {}), 
-    'DIST_NODE_ALIVE': (node_alive, {}), 
-    'DIST_RESOURCE_CONFIG': (resource_cfg, {}),
-    'DIST_CODE': (code, {}), 'DIST_SCRIPT': (script, {}),
-    'DIST_SCRIPT_ARGS': (script_args, {}),
     'EVALS': (evals, {}), 'EVAL_INPUT': (eval_input, {}),
     'EVAL_CODE': (eval_code, set(TASK_CHOICES)),
     'DIST_NOTIFY_USERS': (notify_users, {}),
@@ -1282,27 +1307,25 @@ with gr.Blocks(title='Bray Cloud') as platform:
     js='(id) => {document.getElementById(id).click()}')
     trial.blur(on_project_input, project, trial)
     delete.click(delete_trial, [project, trial, delete], 
-        [trial, delete, cancel, save, output])
+        [trial, delete, output])
+    on, off = gr.update(visible=True), gr.update(visible=False)
     save.click(save_trial, [project, trial] + VALUES, 
         [project, trial, delete, output])
-    on, off = gr.update(visible=True), gr.update(visible=False)
-    cancel.click(lambda: ('删除任务', off, on), None, 
-        [delete, cancel, save])
     launch.click(save_trial, [project, trial] + VALUES, 
-        [project, trial, delete, output]).then(
-        launch_trial, [project, trial] + VALUES, output
+        [project, trial, delete, output], trigger_mode='multiple'
+    ).then(launch_trial, [project, trial] + VALUES, output
     ).then(*update_task_status_event_args)
     stop.click(stop_trial, [project, trial], output).then(
         *update_task_status_event_args)
     resume.click(save_trial, [project, trial] + VALUES, 
-        [project, trial, delete, output]).then(
-    resume_trial, [project, trial] + VALUES, output
+        [project, trial, delete, output], trigger_mode='multiple'
+    ).then(resume_trial, [project, trial] + VALUES, output
     ).then(*update_task_status_event_args)
     for v in VALUES: v.input(verify_trial, [project, trial] + VALUES, 
         VALUES + [output], show_progress='hidden')
-    model.blur(lambda: gr.update(visible=True), outputs=algo_coloumn)
-    model.focus(lambda: gr.update(visible=False), 
-        outputs=algo_coloumn, show_progress='hidden')
+    model.focus(lambda: off, outputs=algo_coloumn, 
+        show_progress='hidden')
+    model.blur(lambda: on, outputs=algo_coloumn)
     for e in [device_kind.input, device_kind.focus]: 
         e(on_device_kind_change, [project, device_kind], device_num)
     for e in [device_kind.input, device_kind.focus, 
