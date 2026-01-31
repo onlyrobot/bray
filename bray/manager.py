@@ -337,7 +337,7 @@ def delete_trial(project, trial, delete: str) -> tuple:
         return [gr.update()] * 2 + [f'任务 {trial} 不存在']
     on, off = gr.update(visible=True), gr.update(visible=False)
     if delete == '删除任务': 
-        return gr.update(), '确认删除', '请确认删除，或者取消'
+        return gr.update(), '确认删除', '请确认删除，或者等待取消'
     url = f'/dist/task/remove?project={project}&trial={trial}'
     if r := request_json(f'{BASE_URL}{url}'):
         return [gr.update()] * 2 + [r]
@@ -1046,11 +1046,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         minimum=0, visible=False, min_width=120)
         load_balance = gr.Dropdown(['HASH', 'RR', 'NONE'], scale=1,
         label='Load Balance', visible=False, min_width=100)
-    with gr.Group() as execute_group:
-        (conda, code, script, script_cfg, docker_image, 
-        user, user_group, resource_group, 
-        node_alive, resource_cfg, env_code,
-        ) = build_execute_group(project, trial, saves)
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
         allow_custom_value=True, scale=2, min_width=200)
@@ -1128,6 +1123,11 @@ with gr.Blocks(title='Bray Cloud') as platform:
         top_k = gr.Number(50, label='Top K', scale=1)
     with reward_group: rewards = gr.Dataframe(type='array',
         headers=REWARD_HEADERS, column_widths=REWARD_WIDTHS)
+    with gr.Group() as execute_group:
+        (conda, code, script, script_cfg, docker_image, 
+        user, user_group, resource_group, 
+        node_alive, resource_cfg, env_code,
+        ) = build_execute_group(project, trial, saves)
     with gr.Row(equal_height=True) as operate_row:
         node_btn = gr.Button('节点', elem_id='node', min_width=70)
         export_btn = gr.Button(
@@ -1227,13 +1227,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         instance_num, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_LOAD_BALANCE': (
         load_balance, set(TASK_CHOICES) - SERVE_TASKS),
-    'DIST_CONDA_ENV': (conda, {}), 'ENV_CODE': (env_code, {}),
-    'DIST_DOCKER_IMAGE': (docker_image, {}), 
-    'DIST_USER': (user, {}), 'DIST_USER_GROUP': (user_group, {}),
-    'DIST_RESOURCE_GROUP': (resource_group, {}), 
-    'DIST_NODE_ALIVE': (node_alive, {}), 
-    'DIST_RESOURCE_CONFIG': (resource_cfg, {}),
-    'DIST_CODE': (code, {}), 'DIST_SCRIPT': (script, {}),
     'DIST_MODEL': (model, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
     'DIST_DEEPSPEED_STAGE': (deepspeed_stage, NO_TRAIN_TASKS),
@@ -1272,6 +1265,13 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_TOP_P': (top_p, set(TASK_CHOICES) - RL_TASKS),
     'DIST_TOP_K': (top_k, set(TASK_CHOICES) - RL_TASKS),
     'REWARDS': (rewards, set(TASK_CHOICES) - RL_TASKS), 
+    'DIST_CONDA_ENV': (conda, {}), 'ENV_CODE': (env_code, {}),
+    'DIST_CODE': (code, {}), 'DIST_SCRIPT': (script, {}),
+    'DIST_DOCKER_IMAGE': (docker_image, {}), 
+    'DIST_USER': (user, {}), 'DIST_USER_GROUP': (user_group, {}),
+    'DIST_RESOURCE_GROUP': (resource_group, {}), 
+    'DIST_NODE_ALIVE': (node_alive, {}), 
+    'DIST_RESOURCE_CONFIG': (resource_cfg, {}),
     'EVALS': (evals, {}), 'EVAL_INPUT': (eval_input, {}),
     'EVAL_CODE': (eval_code, set(TASK_CHOICES)),
     'DIST_NOTIFY_USERS': (notify_users, {}),
@@ -1296,8 +1296,9 @@ with gr.Blocks(title='Bray Cloud') as platform:
     update_task_status_event_args = (update_task_status, 
         [project, trial], 
     [delete, dependent, save, launch, stop, resume, clean])
-    gr.Timer(2).tick(*update_task_status_event_args).then(
-    update_tasks_type_and_status, tasks, tasks, show_progress=False)
+    (timer := gr.Timer(2)).tick(*update_task_status_event_args
+    ).then(update_tasks_type_and_status, tasks, tasks, 
+        show_progress=False)
     trial.change(lambda: '', None, output).then(
         on_trial_change, [template, project, trial], VALUES
     ).then(*update_task_status_event_args
@@ -1306,9 +1307,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ).success(lambda _: None, selected, 
     js='(id) => {document.getElementById(id).click()}')
     trial.blur(on_project_input, project, trial)
-    delete.click(delete_trial, [project, trial, delete], 
-        [trial, delete, output])
-    on, off = gr.update(visible=True), gr.update(visible=False)
+    delete.click(lambda: gr.Timer(active=False), None, timer).then(
+        delete_trial, [project, trial, delete], 
+        [trial, delete, output]).then(
+    lambda: time.sleep(3) or gr.Timer(active=True), None, timer)
     save.click(save_trial, [project, trial] + VALUES, 
         [project, trial, delete, output])
     launch.click(save_trial, [project, trial] + VALUES, 
@@ -1323,9 +1325,9 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ).then(*update_task_status_event_args)
     for v in VALUES: v.input(verify_trial, [project, trial] + VALUES, 
         VALUES + [output], show_progress='hidden')
-    model.focus(lambda: off, outputs=algo_coloumn, 
+    model.focus(lambda: off, None, algo_coloumn, 
         show_progress='hidden')
-    model.blur(lambda: on, outputs=algo_coloumn)
+    model.blur(lambda: on, None, algo_coloumn)
     for e in [device_kind.input, device_kind.focus]: 
         e(on_device_kind_change, [project, device_kind], device_num)
     for e in [device_kind.input, device_kind.focus, 

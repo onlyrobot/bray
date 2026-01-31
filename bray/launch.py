@@ -64,6 +64,8 @@ class TaskInfo:
         if env is not None: self.env = env
         try: save_task_config(*task_id.split('/', 1), self.env)
         except: logging.warning(f'fail to save task env')
+    def config(self) -> dict:
+        return self.env | {'DIST_TASK_STATUS': self.status()}
 CREATED_TASK_ID2INFO: 'dict[str: TaskInfo]' = {}
 ROUTERS: 'dict[str: list[str]]' = {}
 PENDING_TASK_ID2INFO: 'dict[str: TaskInfo]' = {}
@@ -72,13 +74,10 @@ CLUSTER = os.environ.pop('DIST_CLUSTER', f'{HOST}:{PORT}')
 def set_cluster(c): global CLUSTER; CLUSTER = c; return c
 
 async def restore_task_on_start(wait_for_start: float):
-    envs = {f'{p}/{t}': env for p, ts in (await dist_task_query()
-        ).items() for t, env in ts.items() if env}
-    for task_id, env in envs.items():
-        CREATED_TASK_ID2INFO[task_id] = TaskInfo(env)
-    await asyncio.sleep(wait_for_start)
+    await dist_task_query(); await asyncio.sleep(wait_for_start)
+    envs = [i.env for i in CREATED_TASK_ID2INFO.values()]
     await asyncio.gather(*[dist_task_launch(e.copy(), '') 
-        for e in envs.values() if e and not 
+        for e in envs if e and not 
     (e.get('DIST_DEPENDENT') or e.get('DIST_TASK_STATUS'))])
 
 async def register_to_master_on_start(_: fastapi.FastAPI):
@@ -527,29 +526,29 @@ async def dist_task_remove(project: str, trial: str) -> str:
     if t in PENDING_TASK_ID2INFO: return '任务等待调度中，无法移除'
     info.env.clear() if info else None; return ''
 
-def dist_task_query_(project: str, trial='') -> dict:
-    if info := CREATED_TASK_ID2INFO.get(f'{project}/{trial}'): 
-        return {trial: info.env}
-    project_path = get_project_path(project)
-    if not os.path.isdir(project_path): return {}
-    trials = [trial] if trial else os.listdir(project_path)
-    trials = [t for t in trials if os.path.isdir(
-        get_trial_path(project, t))]
-    tasks = {id: i.env for id, i in CREATED_TASK_ID2INFO.items()
-        if i and id.startswith(project)}
-    def try_load_task(project, trial) -> dict:
-        try: return load_task_config(project, trial)
-        except: return {}
-    tasks = {k: tasks[k] for k in trials if k in tasks}
-    tasks.update({id: try_load_task(*id.split('/', 1)) for id in 
-    (f'{project}/{t}' for t in trials) if id not in tasks})
-    return {k.split('/', 1)[-1]: v for k, v in tasks.items()}
-
 @app.get('/dist/task/query')
 async def dist_task_query(project='', trial='') -> dict:
     ps = [project] if project else os.listdir(get_project_path())
     return {p: dist_task_query_(p, trial) 
     for p in ps if os.path.isdir(get_project_path(p))}
+
+def dist_task_query_(project: str, trial: str='') -> dict:
+    if info := CREATED_TASK_ID2INFO.get(f'{project}/{trial}'): 
+        return {trial: info.config()}
+    project_path = get_project_path(project)
+    if not os.path.isdir(project_path): return {}
+    trials = [trial] if trial else os.listdir(project_path)
+    trials = [t for t in trials if os.path.isdir(
+        get_trial_path(project, t))]
+    task_ids = [f'{project}/{t}' for t in trials]
+    tasks = [CREATED_TASK_ID2INFO.get(t) for t in task_ids]
+    def try_load_task(trial: str) -> dict:
+        try: return load_task_config(project, trial)
+        except: return {}
+    loads = (i for i, t in enumerate(tasks) if not t)
+    for i in loads: tasks[i] = CREATED_TASK_ID2INFO[task_ids[i]
+        ] = TaskInfo(try_load_task(trials[i]))
+    return {t: i.config() for t, i in zip(trials, tasks)}
 
 @app.get('/dist/task/resource')
 async def dist_task_resource(project: str, trial: str) -> dict:
@@ -577,7 +576,8 @@ def add_task_dep(task_id: str, dep: str):
     else: CREATED_TASK_ID2INFO[task_id] = TaskInfo({}, {dep})
 
 def restore_task(dep: str, env: dict, info: TaskInfo):
-    for t in env.get('DIST_TASKS', '').split(' '): add_task_dep(t, dep)
+    for task_id in env.get('DIST_TASKS', '').split(' '): 
+        add_task_dep(task_id, dep)
     if not env.get('DIST_DEPENDENT'): info.deps.add('')
     
 async def initialize_task_if_needed(env: dict) -> tuple:
