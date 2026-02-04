@@ -618,10 +618,10 @@ async def dist_task_register(env: dict) -> bool:
     if info.is_done(): return False
     status = env.get('DIST_TASK_STATUS', 'FAILED')
     if info.is_serve(): status = 'FAILED'
-    async def change_status_later(timeout: float):
+    async def change_status_later(timeout=60 * 2):
         await asyncio.sleep(timeout)
         await remove_task_and_clean(task_id, status)
-    info.task = asyncio.create_task(change_status_later(timeout))
+    info.task = asyncio.create_task(change_status_later())
     return task_id not in PENDING_TASK_ID2INFO
 
 @app.post('/dist/node/register')
@@ -651,7 +651,7 @@ async def dist_node_register(req: fastapi.Request) -> tuple:
     logging.info(f'launch task {host} {info.tasks[0]}')
     data[-1] = info.tasks[0]; return data
 
-async def wait_for_task(info: NodeInfo, timeout=60):
+async def wait_for_task(info: NodeInfo, timeout: float):
     async with info.cond: await asyncio.wait_for(
     info.cond.wait_for(lambda: info.tasks 
     or not info.is_alive() or info.routers != {}), timeout)

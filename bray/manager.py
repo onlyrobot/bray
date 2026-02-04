@@ -122,8 +122,8 @@ def build_task_type_and_status(task: list) -> list:
     return task[:3] + [task_type, status]
 
 def update_tasks_type_and_status(tasks: list) -> list | dict:
-    tasks_ = [build_task_type_and_status(task) for task in tasks]
-    return tasks_ if tasks_ != tasks else gr.update()
+    new_tasks = [build_task_type_and_status(t) for t in tasks]
+    return new_tasks if new_tasks != tasks else gr.update()
 
 def update_task_status(project: str, trial: str) -> tuple:
     on, off = gr.update(visible=True), gr.update(visible=False)
@@ -136,10 +136,10 @@ def update_task_status(project: str, trial: str) -> tuple:
         u = gr.update(value='删除任务', link='') | down
     d = gr.update(visible=True, link=f'?task={dep}')
     launch = down | gr.update(value=status)
-    if status in ['RUNNING', 'PENDING']: 
+    if status in ['RUNNING', 'PENDING', 'SYNCING']: 
         return [u, d if dep else off, off, launch, on, off, down]
     active = gr.update(interactive=True)
-    if status == 'SUCCESS': 
+    if status in ['SUCCESS', 'SERVING']: 
         return [u | active, off, on, launch, off, off, active]
     launch = active | gr.update(value='启动任务')
     if not os.path.exists(get_trial_path(project, trial)): 
@@ -255,7 +255,7 @@ def build_trial_config(project, trial, kwargs: dict) -> dict:
     for k in kinds: env[f'{k}_DATASET'] = ' '.join([d[2] for 
         d in datasets if d[0].startswith(k)] )
     
-    names = NAMES[len(names):NAMES.index('DIST_NUM_GENS')]
+    names = NAMES[len(names):NAMES.index('DIST_GEN_TEMP')]
     env.update({k: kwargs[k] for k in names if kwargs.get(k) 
         is not None and k.startswith('DIST_')})
     
@@ -268,7 +268,7 @@ def build_trial_config(project, trial, kwargs: dict) -> dict:
         p for p in set(r[2] for r in rewards if r[2])])
     if reward_plugins: env['DIST_REWARD_PLUGINS'] = reward_plugins
 
-    names = NAMES[NAMES.index('DIST_NUM_GENS'):]
+    names = NAMES[NAMES.index('DIST_GEN_TEMP'):]
     return env | {k: kwargs[k] for k in names if 
     kwargs.get(k) is not None and k.startswith('DIST_')}
 
@@ -561,6 +561,16 @@ def on_code_or_script_change(code: str, script: str) -> dict:
 def on_script_key_up(code: str, data: gr.KeyUpData):
     return on_code_or_script_change(code, data.input_value)
 
+def on_path_nevigate_change(leaf: str, parent: str='') -> dict:
+    path = os.path.join(parent, l_d := os.path.dirname(leaf or ''))
+    if not os.path.isdir(path): return gr.update()
+    return gr.update(choices=[os.path.join(l_d, d + '/' if 
+        os.path.isdir(os.path.join(path, d)) else d) 
+    for d in os.listdir(path) if l_d or d.startswith(leaf or '')])
+
+def on_path_nevigate_key_up(data: gr.KeyUpData, parent: str=''):
+    return on_path_nevigate_change(data.input_value, parent)
+
 def on_script_select(code, script, evt: gr.SelectData) -> str:
     return replace_script_path(code, script, evt.value)
 
@@ -635,20 +645,19 @@ def build_execute_group(project, trial, saves) -> tuple:
     with conda_row as conda_code_row:
         conda_code = gr.Code(language='shell', label='conda.sh')
     script_row = gr.Row(visible=False)
-    with script_row, gr.Column(min_width=240) as script_column:
+    with script_row, gr.Column(min_width=240):
         env_code = gr.Code(language='shell', label='env.sh')
         script_cfg = gr.Code(language='json', label='config.json')
     with script_row: script_code = gr.Code(language='shell')
     script_mtime = gr.Number(0.0, visible=False)
     on, off = gr.update(visible=True), gr.update(visible=False)
-    script.blur(lambda: [on] * 2, None, [code, conda])
-    script.focus(lambda: [off] * 2, None, 
+    script.blur(lambda: [on, on], None, [code, conda])
+    script.focus(lambda: [off, off], None, 
         [code, conda], show_progress='hidden')
-    code.focus(lambda: (off, off), None, [conda_row, script_row])
-    code.blur(lambda: [on] * 2, None, [script, conda])
-    code.focus(lambda: [off] * 2, None, 
-        [script, conda], show_progress='hidden')
-    conda.focus(lambda: (on, off), None, [conda_row, script_row])
+    code.blur(lambda: [on, on], None, [script, conda])
+    code.focus(lambda: [off] * 4, None, [script, conda, script_row, 
+        conda_row], show_progress='hidden')
+    conda.focus(lambda: (off, on), None, [script_row, conda_row])
     conda.change(on_conda_input, conda, [conda_code, conda_mtime])
     script.change(on_script_change, [script, code], 
         [script_code, script_mtime])
@@ -664,6 +673,9 @@ def build_execute_group(project, trial, saves) -> tuple:
     code.change(on_code_or_script_change, 
         [code, script], script).then(
     on_script_change, [script, code], [script_code, script_mtime])
+    code.change(on_path_nevigate_change, code, code)
+    code.key_up(on_path_nevigate_key_up, None, code, 
+        show_progress='hidden')
     script.input(on_code_or_script_change, [code, script], script)
     script.key_up(on_script_key_up, 
         [code], script, show_progress='hidden')
@@ -783,10 +795,10 @@ def build_dataset_preview(dataset, preview, ds):
     with column, operate_row as page_row: 
         page = gr.Slider(label='Page', scale=2)
     with column, gr.Row(equal_height=True) as diff_row:
-        diff_data = gr.Dataframe(type='array', 
-        interactive=True, show_row_numbers=True, visible=False)
+        diff_data = gr.Dataframe(type='array', interactive=True, 
+        max_height=800, show_row_numbers=True, visible=False)
     with column, diff_row as data_row:
-        data = gr.Dataframe(type='array', 
+        data = gr.Dataframe(type='array', max_height=800,
         interactive=True, show_row_numbers=True)
     with column, gr.Row(equal_height=True) as markdown_row: pass
     with column, markdown_row, gr.Column(scale=2):
@@ -797,6 +809,9 @@ def build_dataset_preview(dataset, preview, ds):
         [preview, dataset, name, split, diff, file, 
         filter, page_size, page], [name, split, 
     diff, file, page, diff_data, data, markdown, config])
+    diff.change(on_path_nevigate_change, diff, diff)
+    diff.key_up(on_path_nevigate_key_up, None, diff, 
+        show_progress='hidden')
     for c in [name, split, diff, file, page_size, page]:
         c.input(*on_preview_change_event_args)
     preview.click(preview_dataset, preview, [preview, ds, column]
@@ -1062,15 +1077,14 @@ with gr.Blocks(title='Bray Cloud') as platform:
     with algo_row as quant_row:
         quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=1, 
         label='Quantization', min_width=100)
-    with algo_row as context_paralle_row:
-        cp_size = gr.Dropdown(label='CP Size', 
-        allow_custom_value=True, scale=1, min_width=80)
-    with algo_row as ep_tp_pp_row:
-        ep_size = gr.Dropdown(label='EP Size', 
-        allow_custom_value=True, scale=1, min_width=80)
+    with algo_row as tp_pp_cp_ep_row:
         tp_size = gr.Dropdown(label='TP Size', 
         allow_custom_value=True, scale=1, min_width=80)
         pp_size = gr.Dropdown(label='PP Size', 
+        allow_custom_value=True, scale=1, min_width=80)
+        cp_size = gr.Dropdown(label='CP Size', 
+        allow_custom_value=True, scale=1, min_width=80)
+        ep_size = gr.Dropdown(label='EP Size', 
         allow_custom_value=True, scale=1, min_width=80)
     with gr.Row(equal_height=True, visible=False) as lora_row:
         lora_rank = gr.Number(8, label='LoRA Rank')
@@ -1115,12 +1129,12 @@ with gr.Blocks(title='Bray Cloud') as platform:
         reward = gr.Dropdown(REWARDS, scale=1, 
         label='Reward', value=None)
     with reward_row as generate_row:
-        gen_num = gr.Number(value=8, label='Num Gens', scale=1)
         gen_temp = gr.Number(value=0.9, label='Gen Temp', 
         scale=1, minimum=0, maximum=1)
         top_p = gr.Number(value=0.9, label='Top P', scale=1, 
         minimum=0, maximum=1)
         top_k = gr.Number(50, label='Top K', scale=1)
+        gen_num = gr.Number(value=8, label='Num Gens', scale=1)
     with reward_group: rewards = gr.Dataframe(type='array',
         headers=REWARD_HEADERS, column_widths=REWARD_WIDTHS)
     with gr.Group() as execute_group:
@@ -1233,10 +1247,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_QUANTIZE': (
         quantize, NO_TRAIN_TASKS - MODEL_TASKS), 
-    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
-    'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
+    'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
     'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
     'DIST_LORA_ALPHA': (lora_alpha, NO_TRAIN_TASKS),
@@ -1259,11 +1273,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_SAVE_STEP': (save_step, NO_TRAIN_TASKS),
     'DIST_SAVE_LIMIT': (save_limit, NO_TRAIN_TASKS),
     'DIST_LOG_STEP': (log_step, NO_TRAIN_TASKS),
-    'DIST_NUM_GENS': (gen_num, set(TASK_CHOICES) - RL_TASKS),
-    'DIST_GEN_TEMP': (
-        gen_temp, set(TASK_CHOICES) - RL_TASKS),
+    'DIST_GEN_TEMP': (gen_temp, set(TASK_CHOICES) - RL_TASKS),
     'DIST_TOP_P': (top_p, set(TASK_CHOICES) - RL_TASKS),
     'DIST_TOP_K': (top_k, set(TASK_CHOICES) - RL_TASKS),
+    'DIST_NUM_GENS': (gen_num, set(TASK_CHOICES) - RL_TASKS),
     'REWARDS': (rewards, set(TASK_CHOICES) - RL_TASKS), 
     'DIST_CONDA_ENV': (conda, {}), 'ENV_CODE': (env_code, {}),
     'DIST_CODE': (code, {}), 'DIST_SCRIPT': (script, {}),
@@ -1328,6 +1341,12 @@ with gr.Blocks(title='Bray Cloud') as platform:
     model.focus(lambda: off, None, algo_coloumn, 
         show_progress='hidden')
     model.blur(lambda: on, None, algo_coloumn)
+    model.change(on_path_nevigate_change, [model, code], model)
+    model.key_up(on_path_nevigate_key_up, code, model, 
+        show_progress='hidden')
+    dataset.change(on_path_nevigate_change, [dataset, code], dataset)
+    dataset.key_up(on_path_nevigate_key_up, code, dataset, 
+        show_progress='hidden')
     for e in [device_kind.input, device_kind.focus]: 
         e(on_device_kind_change, [project, device_kind], device_num)
     for e in [device_kind.input, device_kind.focus, 
