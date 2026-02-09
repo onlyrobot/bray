@@ -49,7 +49,8 @@ class TaskInfo:
         self.env, self.deps, self.msg = env, deps or set(), ''
     def task_type(self): return self.env.get('DIST_TASK_TYPE')
     def status(self) -> str: 
-        if self.resources: return 'RUNNING'
+        if self.resources: return ('TIMEDOUT' if 
+        self.task and self.task.done() else 'RUNNING')
         if self.deps: return 'PENDING'
         return self.env.get('DIST_TASK_STATUS') or 'UNKNOWN'
     def update_status(self, status: str): 
@@ -248,14 +249,11 @@ async def dist_task_create(env: dict, dep: str='') -> str:
     if dep == '' and dep in task.deps: 
         await notify_user(task_id, 'CREATED', '创建成功')
     if not (r := await schedule_task(task_id, task)): return ''
-    if task.is_done(): return '创建失败，任务已经结束'
+    if task.is_done() or env is not task.env: 
+        return '创建失败，任务已经结束'
     task_deps_on = task.env['DIST_TASK_DEPS'] == 'ON'
     if task_deps_on or '' not in task.deps or dep: return ''
     await remove_task_and_clean(task_id, 'FAILED'); return r
-    # if dep in task.deps: task.deps.remove(dep)
-    # task.update_status('FAILED'); task.save_env(task_id)
-    # await notify_user(task_id, 'FAILED', '调度失败')
-    # PENDING_TASK_ID2INFO.pop(task_id, None); return r
 
 def is_task_deps_ready(task_id: str, root=True) -> bool:
     if not (task := CREATED_TASK_ID2INFO.get(task_id)): return False
@@ -374,7 +372,7 @@ async def notify_user(dep: str, status: str, msg, task_id=''):
     for d in task.deps - {''}: await notify_user(
         d, status, f'的子任务\n{dep}\n{msg}', task_id)
     if '' not in task.deps: return
-    if not (user := task.env.get('DIST_NOTIFY_USERS')): return
+    if not (user := task.env.get('DIST_NOTIFY_USER')): return
     from bray.monitor import try_notify_user_msg
     await try_notify_user_msg(user, dep, msg, status, task_id)
 
@@ -458,6 +456,7 @@ async def schedule_task_(task_id, task: TaskInfo) -> str:
     for a in extra: merge_a_to_allocated(allocated, a)
 
     env = env | {'DIST_NUM_NODES': str(len(allocated))}
+    if not allocated: return '任务没有申请任何资源，调度失败'
     master = env['DIST_MASTER'] = allocated[0][0][0]
     port = env['DIST_MASTER_PORT'] = HOST2NODE_INFO[master
         ].port(env.get('DIST_MASTER_PORT'))
@@ -618,9 +617,9 @@ async def dist_task_register(env: dict) -> bool:
     if info.is_done(): return False
     status = env.get('DIST_TASK_STATUS', 'FAILED')
     if info.is_serve(): status = 'FAILED'
-    async def change_status_later(timeout=60 * 2):
+    async def change_status_later(timeout=timeout * 2):
         await asyncio.sleep(timeout)
-        await remove_task_and_clean(task_id, status)
+    if not timeout: await remove_task_and_clean(task_id, status)
     info.task = asyncio.create_task(change_status_later())
     return task_id not in PENDING_TASK_ID2INFO
 
@@ -734,38 +733,37 @@ async def router(request: fastapi.Request) -> fastapi.Response:
     logging.warning(f'router {request.url} err: {err}')
     raise fastapi.HTTPException(500, detail=f'err: {err}')
 
+@app.websocket('/{path:path}')
+async def router_websocket(websocket: fastapi.WebSocket):
+    path = websocket.url.path; parts = path.split('/')
+    if len(parts) > 2: task_id = '/'.join(parts[1:3])
+    else: return await websocket.close(1008, 'path err')
+    if not (rules := ROUTERS.get(task_id)):
+        return await websocket.close(1008, 'no router')
+    rule, query = random.choice(rules), websocket.url.query
+    url = f'ws://{rule}/{"/".join(parts[3:])}?{query}'
+    logging.info(f'router {websocket.url} to {url}')
+    try: return await handle_websocket(url, websocket)
+    except websockets.exceptions.ConnectionClosed: return
+    except Exception as e: err = e
+    logging.warning(f'router {websocket.url} err: {err}')
+
+async def read_from_origin(origin, target) -> None:
+    while True:
+        message = await origin.receive()
+        data = message.get('bytes') or message.get('text')
+        if not data: break
+        await target.send(data)
+async def read_from_target(origin, target) -> None:
+    while True:
+        data = await target.recv()
+        if isinstance(data, str): await origin.send_text(data)
+        else: await origin.send_bytes(data)
 async def handle_websocket(url, origin: fastapi.WebSocket):
-    async def read_from_origin(origin, target):
-        while True:
-            msg = await origin.receive()
-            data = msg.get('bytes') or msg.get('text')
-            if not data: break
-            await target.send(data)
-    async def read_from_target(origin, target):
-        while True:
-            data = await target.recv()
-            is_text = isinstance(data, str)
-            if is_text: await origin.send_text(data)
-            else: await origin.send_bytes(data)
     await origin.accept()
     async with websockets.connect(url) as target:
         await asyncio.gather(read_from_origin(
     origin, target), read_from_target(origin, target))
-
-@app.websocket('/{path:path}')
-async def router_websocket(origin: fastapi.WebSocket):
-    path = origin.url.path; parts = path.split('/')
-    if len(parts) > 2: task_id = '/'.join(parts[1:3])
-    else: await origin.close(1008, reason='path err'); return
-    if not (rules := ROUTERS.get(task_id)):
-        await origin.close(1008, reason='no router'); return
-    rule = random.choice(rules)
-    url = f'ws://{rule}/{"/".join(parts[3:])}?{origin.url.query}'
-    logging.info(f'router {origin.url} to {url}')
-    try: return await handle_websocket(url, origin)
-    except websockets.exceptions.ConnectionClosed: return
-    except Exception as e: err = e
-    logging.warning(f'router {origin.url} err: {err}')
 
 async def launch_dist_task(host: str, env: str):
     nnode, node = env['DIST_NUM_NODES'], env['DIST_NODE_RANK']

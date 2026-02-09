@@ -136,11 +136,11 @@ def update_task_status(project: str, trial: str) -> tuple:
         u = gr.update(value='删除任务', link='') | down
     d = gr.update(visible=True, link=f'?task={dep}')
     launch = down | gr.update(value=status)
-    if status in ['RUNNING', 'PENDING', 'SYNCING']: 
+    if status in ['RUNNING', 'PENDING', 'TIMEDOUT']: 
         return [u, d if dep else off, off, launch, on, off, down]
     active = gr.update(interactive=True)
-    if status in ['SUCCESS', 'SERVING']: 
-        return [u | active, off, on, launch, off, off, active]
+    # if status in ['SUCCESS', 'SERVING']: 
+    #     return [u | active, off, on, launch, off, off, active]
     launch = active | gr.update(value='启动任务')
     if not os.path.exists(get_trial_path(project, trial)): 
         return [u | down, off, on, launch, off, off, down]
@@ -259,14 +259,11 @@ def build_trial_config(project, trial, kwargs: dict) -> dict:
     env.update({k: kwargs[k] for k in names if kwargs.get(k) 
         is not None and k.startswith('DIST_')})
     
-    rewards = [r for r in kwargs.get('REWARDS', []) if r[0]]
-    if reward_weights := ' '.join([r[1] for r in rewards]):
-        env['DIST_REWARD_WEIGHTS'] = reward_weights
-    reward_funcs = ' '.join([r[0] for r in rewards])
-    if rewards: env['DIST_REWARD_FUNCS'] = reward_funcs
-    reward_plugins = ' '.join([
-        p for p in set(r[2] for r in rewards if r[2])])
-    if reward_plugins: env['DIST_REWARD_PLUGINS'] = reward_plugins
+    rewards = [list(row) for row in zip(*[c for c in zip(
+        *kwargs.get('REWARDS', [])) if c[0]])]
+    if rewards and len(rewards) > 1: 
+        env['DIST_REWARD_WEIGHTS'] = ' '.join(rewards[1])
+    if rewards: env['DIST_REWARD_FUNCS'] = ' '.join(rewards[0])
 
     names = NAMES[NAMES.index('DIST_GEN_TEMP'):]
     return env | {k: kwargs[k] for k in names if 
@@ -388,9 +385,9 @@ def on_cpu_num_change(*args):
     return on_device_num_change(*args, device_cpus=None, cpu=True)
 
 def on_reward_select(reward: str, rewards: list) -> list:
-    if [r for r in rewards if r[0] == reward]: return rewards
-    r = [r for r in r_.REWARDS if r['name'] == reward][0]
-    return rewards + [[reward, '1', r['path'], r['desc']]]
+    if [r for r in rewards[0] if r == reward]: return rewards
+    if len(r := [reward] * len(rewards)) > 1: r[1] = '1.0'
+    return [reward + [new] for reward, new in zip(rewards, r)]
 
 def on_ckpt_step_change(project, trial, model, ckpt_step=-1) -> dict:
     path = f'{get_trial_path(project, trial)}/output'
@@ -1126,8 +1123,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
         label='LR Scheduelr', choices=LR_SCHEDULER_CHOICES)
     reward_group = gr.Group(visible=True)
     with reward_group, gr.Row(equal_height=True) as reward_row:
-        reward = gr.Dropdown(REWARDS, scale=1, 
-        label='Reward', value=None)
+        reward_plugin = gr.Dropdown(
+        allow_custom_value=True, scale=2, label='Reward Plugin')
+        reward = gr.Dropdown(
+        REWARDS, scale=1, label='Reward', value=None)
     with reward_row as generate_row:
         gen_temp = gr.Number(value=0.9, label='Gen Temp', 
         scale=1, minimum=0, maximum=1)
@@ -1135,8 +1134,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         minimum=0, maximum=1)
         top_k = gr.Number(50, label='Top K', scale=1)
         gen_num = gr.Number(value=8, label='Num Gens', scale=1)
-    with reward_group: rewards = gr.Dataframe(type='array',
-        headers=REWARD_HEADERS, column_widths=REWARD_WIDTHS)
+    with reward_group: rewards = gr.Dataframe(
+        value=[['', ''], ['', '']], type='array')
     with gr.Group() as execute_group:
         (conda, code, script, script_cfg, docker_image, 
         user, user_group, resource_group, 
@@ -1172,8 +1171,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         log_filter = gr.Dropdown(LOG_FILTER_CHOICES, scale=1,
         label='Log Filter', allow_custom_value=True, min_width=100)
     with log_group, log_row:
-        node = gr.Dropdown(label='Node', scale=1, min_width=60, 
-        visible=False, type='index')
+        node = gr.Dropdown(label='Node', scale=1, visible=False, 
+        min_width=60, type='index', allow_custom_value=True)
     with log_group, log_row, gr.Column(scale=1, min_width=100):
         clean = gr.Button('清理日志', interactive=False)
         flush = gr.Button('刷新日志')
@@ -1191,7 +1190,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     schedule_row = gr.Row(visible=False, equal_height=True)
     file_row = gr.Row(visible=False, equal_height=True)
     monitor_row = gr.Row(visible=False, equal_height=True)
-    with monitor_row: notify_users = gr.Textbox(label='Notify Users')
+    with monitor_row: notify_user = gr.Textbox(label='Notify User')
     export_btn.click(on_ckpt_step_change, 
         [project, trial, model], ckpt_step)
     selected = gr.Button('log', visible=False, elem_id='selected')
@@ -1249,7 +1248,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         quantize, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
-    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS),
+    'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
     'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
@@ -1277,6 +1276,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_TOP_P': (top_p, set(TASK_CHOICES) - RL_TASKS),
     'DIST_TOP_K': (top_k, set(TASK_CHOICES) - RL_TASKS),
     'DIST_NUM_GENS': (gen_num, set(TASK_CHOICES) - RL_TASKS),
+    'DIST_REWARD_PLUGIN': (
+        reward_plugin, set(TASK_CHOICES) - RL_TASKS),
     'REWARDS': (rewards, set(TASK_CHOICES) - RL_TASKS), 
     'DIST_CONDA_ENV': (conda, {}), 'ENV_CODE': (env_code, {}),
     'DIST_CODE': (code, {}), 'DIST_SCRIPT': (script, {}),
@@ -1287,7 +1288,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_RESOURCE_CONFIG': (resource_cfg, {}),
     'EVALS': (evals, {}), 'EVAL_INPUT': (eval_input, {}),
     'EVAL_CODE': (eval_code, set(TASK_CHOICES)),
-    'DIST_NOTIFY_USERS': (notify_users, {}),
+    'DIST_NOTIFY_USER': (notify_user, {}),
     'METRIC': (metric, {}), 'AXIS_X': (axis_x, {}), 
     'METRIC_LABEL': (metric_label, {}), 'NODE': (node, {}),
     'FILTER_LOG': (log_filter, {}), 'DATASET': (dataset, {})}
@@ -1346,6 +1347,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
         show_progress='hidden')
     dataset.change(on_path_nevigate_change, [dataset, code], dataset)
     dataset.key_up(on_path_nevigate_key_up, code, dataset, 
+        show_progress='hidden')
+    reward_plugin.change(on_path_nevigate_change, 
+        [reward_plugin, code], reward_plugin)
+    reward_plugin.key_up(on_path_nevigate_key_up, code, reward_plugin, 
         show_progress='hidden')
     for e in [device_kind.input, device_kind.focus]: 
         e(on_device_kind_change, [project, device_kind], device_num)
