@@ -2,7 +2,8 @@ import os, httpx, json, socket, asyncio, threading
 
 def cached_session(flush=False) -> httpx.AsyncClient:
     if not flush and CACHED_SESSION: return CACHED_SESSION
-    session = httpx.AsyncClient(verify=False)
+    timeout = httpx.Timeout(timeout=5.0, read=10.0)
+    session = httpx.AsyncClient(verify=False, timeout=timeout)
     set_session(session); return CACHED_SESSION
 
 def set_session(s): global CACHED_SESSION; CACHED_SESSION = s

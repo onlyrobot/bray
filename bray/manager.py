@@ -2,8 +2,8 @@ import requests, os, json, shutil, pandas, time
 from bray.launch import app, HOST, PORT, uvicorn, executor
 from bray.common import (load_trial_config, 
     get_trial_path, get_output_path, get_project_path)
-import bray.dataset as d_; import bray.reward as r_
-import bray.template as t_; import bray.model as m_
+import bray.dataset as m_d_; import bray.reward as m_r_
+import bray.template as m_t_; import bray.model as m_m_
 import gradio as gr; import importlib
 from datasets import (load_dataset, 
     load_dataset_builder, get_dataset_config_names)
@@ -12,16 +12,16 @@ BASE_URL = f'http://127.0.0.1:{PORT}'
 
 TASK_CHOICES = ['GRPO', 'SFT', 'DL', 'RLOO', 'DAPO', 'RM', 
     'DPO', 'KTO', 'PPO', 'RL', 'EVAL', 'NONE', 'RAY']
-SERVE_TASKS = ['SERVE', 'MODEL', 'WEB', 'API', 'SGLANG', 'VLLM']
+SERVE_TASKS = ['SERVE', 'MODEL', 'WEB', 'SGLANG', 'VLLM']
 TASK_CHOICES += SERVE_TASKS; SERVE_TASKS = set(SERVE_TASKS)
 MODEL_TASKS = {'MODEL', 'SGLANG', 'VLLM', 'EVAL'}
 RL_TASKS = {'GRPO', 'PPO', 'RL', 'RLOO', 'DAPO'}
 NO_TRAIN_TASKS = {'NONE', 'RAY', 'EVAL'} | SERVE_TASKS
 
 TASK_HEADERS = ['Task', 'Name', 'Description', 'Type', 'Status']
-TASK_WIDTHS = [3, 2, 2, 1, 1]
+TASK_WIDTHS = [5, 3, 3, 1, 1]
 TRAIN_TYPE_CHOICES = ['Full', 'LoRA']
-QUANTIZE_CHOICES = ['None', 'FP4', 'FP8', 'BF16', 'FP16']
+DATA_TYPE_CHOICES = ['None', 'FP4', 'FP8', 'BF16', 'FP16']
 BOOST_CHOICES = ['default', 'flashattn', 'unsloth']
 
 AXIS_X_CHOICES = ['step', 'time', 'data']
@@ -51,23 +51,23 @@ CACHED_TRIAL2CONFIGS: dict[str: dict] = {}
 CONDAS = SCRIPTS = REWARDS = MODELS = DATASETS = []
 
 def reload_modules_and_flush_disk(interval: float = 60):
-    try: [importlib.reload(m) for m in [d_, r_, m_, t_]]
+    try: [importlib.reload(m) for m in [m_d_, m_r_, m_t_, m_m_]]
     except Exception as e: print(f'重新加载失败，请检查文件状态 {e}')
     global CONDAS, SCRIPTS, REWARDS, MODELS, DATASETS
     CONDAS = sorted(os.listdir('./conda'))
     SCRIPTS = [os.path.join(root, f)[2:] for root, _, fs in 
         os.walk('./script') for f in fs]
-    REWARDS = [r['name'] for r in r_.REWARDS]
-    MODELS = [m['path'] for m in m_.MODELS]
-    DATASETS = d_.DATASETS; time.sleep(interval)
+    REWARDS = [r['name'] for r in m_r_.REWARDS]
+    MODELS = [m['path'] for m in m_m_.MODELS]
+    DATASETS = m_d_.DATASETS; time.sleep(interval)
     executor.submit(reload_modules_and_flush_disk, interval)
 
 executor.submit(reload_modules_and_flush_disk, interval=60)
 
 def request_json(url: str, method='POST', **kwargs) -> object:
-    response = requests.request(method, url, **kwargs)
-    if response.status_code == 200: return response.json()
-    raise Exception(f'request {url} err: {response.text}')
+    resp = requests.request(method, url, verify=False, **kwargs)
+    if resp.status_code == 200: return resp.json()
+    raise Exception(f'request {url} err: {resp.text}')
 
 def initialize_platform(request: gr.Request) -> tuple[dict]:
     trials = request_json(f'{BASE_URL}/dist/task/query', 'GET')
@@ -229,7 +229,7 @@ def on_trial_change(template, project, trial) -> tuple:
     return update_param(updates, 'DIST_NUM_NODES', node_num)
 
 def build_trial_config(project, trial, kwargs: dict) -> dict:
-    name, template = t_.match_template(**kwargs)
+    name, template = m_t_.match_template(**kwargs)
     env = {k: v for k, v in template.items() if k != 'VERIFY' and 
         not isinstance(v, (list, dict))}
     env.update({'TEMPLATE': name})
@@ -277,7 +277,7 @@ def handle_match_template(updates, name, template) -> list:
 def verify_trial(project: str, trial: str, *args) -> tuple:
     updates = [gr.update() for _ in range(len(PARAMS))]
     kwargs = {n: args[i] for i, n in enumerate(PARAMS)}
-    name, template = t_.match_template(**kwargs)
+    name, template = m_t_.match_template(**kwargs)
     if name != kwargs['TEMPLATE']: 
         handle_match_template(updates, name, template)
     verify = template.get('VERIFY', lambda **_: None)
@@ -292,7 +292,7 @@ def verify_trial(project: str, trial: str, *args) -> tuple:
 def launch_trial(project, trial, *args, resume=False) -> str:
     if not project or not trial: return '缺失实验名'
     kwargs = {n: args[i] for i, n in enumerate(PARAMS)}
-    name, template = t_.match_template(**kwargs)
+    name, template = m_t_.match_template(**kwargs)
     verify = template.get('VERIFY', lambda **_: None)
     if err_msg := verify(**kwargs): 
         return f'启动失败 模版校验错误 {name} {err_msg}'
@@ -513,26 +513,28 @@ def on_eval_start(project, trial, api, method, input):
 
 def parse_path_from_script(code: str, script: str) -> str:
     def is_valid_path(code: str, part: str) -> bool:
-        return bool(on_code_or_script_change(code, part)['choices'])
+        return bool(on_script_focus_or_input(code, part)['choices'])
     for part in (parts := script.split(' ')):
         if part and is_valid_path(code, part): return part
     if (s := script.split('python -m ')[1:]) and s[0]:
         return s[0].split(' ')[0].replace('.', '/') + '.py'
     else: return '' if '' in parts else script
 
-def replace_script_path(code, script, path: str) -> str:
+def replace_script_path(code, script, s: str) -> str:
+    if len(parts := s.split(' - - - - - - ', 1)) > 1: s, script = parts
     old_script_path = parse_path_from_script(code, script)
-    exec = script.split(old_script_path, 1)[0].split(' ')[-1]
-    postfix2exec = {'.sh': 'source', '.py': 'python'}
-    if path and path[0] not in ['/', '.']: path = f'./{path}'
-    for p, e in postfix2exec.items():
-        if path.endswith(p) and exec != e: path = f'{e} {path}'; break
-    return script.replace(old_script_path, path, 1)
+    if ' ' in script: return script.replace(old_script_path, s, 1)
+    if s and s[0] not in ['/', '.']: s = f'./{s}'
+    exe = script.split(old_script_path, 1)[0].split(' ')[-1]
+    postfix2exe = {'.sh': 'source', '.py': 'python'}
+    for p, e in postfix2exe.items():
+        if s.endswith(p) and exe != e: s = f'{e} {s}'; break
+    return script.replace(old_script_path, s, 1)
 
-def on_script_change(script, code) -> tuple[dict, float]:
+def on_script_or_code_change(script, code) -> tuple:
     script = parse_path_from_script(code, script)
     path = os.path.join(code or './', script)
-    if script.startswith('script/') and not os.path.exists(path):
+    if script.startswith('./script/') and not os.path.exists(path):
         path = os.path.join('./', script)
     updates = gr.update(value=None, label=script, visible=True)
     if not os.path.isfile(path): return updates, 0.0
@@ -541,22 +543,24 @@ def on_script_change(script, code) -> tuple[dict, float]:
     updates |= gr.update(value=code, language=language)
     return updates, os.path.getmtime(path)
 
-def on_code_or_script_change(code: str, script: str) -> dict:
+def on_script_focus_or_input(code: str, script: str) -> dict:
     if ' ' in script: script = parse_path_from_script(code, script)
-    if code != './' and script.startswith('script/'): 
-        defaults = on_code_or_script_change('./', script)
+    if code != './' and script.startswith('./script/'): 
+        defaults = on_script_focus_or_input('./', script)
     else: defaults = gr.update(choices=[])
-    if not script: defaults['choices'].append('script/')
+    if not script: defaults['choices'].append('./script/')
     path = os.path.join(code, s_dir := os.path.dirname(script))
-    if not os.path.isdir(path): return defaults
+    if path and not os.path.isdir(path): return defaults
     choices = [os.path.join(s_dir, d + '/' if os.path.isdir(
-        os.path.join(path, d)) else d) 
-    for d in os.listdir(path) if s_dir or d.startswith(script)]
+        os.path.join(path, d)) else d) for d in 
+    os.listdir(path or './') if os.path.basename(script) in d]
     return gr.update(choices=choices + [
     c for c in defaults['choices'] if c not in choices])
 
-def on_script_key_up(code: str, data: gr.KeyUpData):
-    return on_code_or_script_change(code, data.input_value)
+def on_script_key_up(code: str, data: gr.KeyUpData) -> dict:
+    update = on_script_focus_or_input(code, data.input_value)
+    return gr.update(choices=[f'{c} - - - - - - {data.input_value}' if 
+    ' ' in data.input_value else c for c in update['choices']])
 
 def on_path_nevigate_change(leaf: str, parent: str='') -> dict:
     path = os.path.join(parent, l_d := os.path.dirname(leaf or ''))
@@ -649,17 +653,25 @@ def build_execute_group(project, trial, saves) -> tuple:
     script_mtime = gr.Number(0.0, visible=False)
     on, off = gr.update(visible=True), gr.update(visible=False)
     script.blur(lambda: [on, on], None, [code, conda])
-    script.focus(lambda: [off, off], None, 
-        [code, conda], show_progress='hidden')
+    script.focus(on_script_focus_or_input, [code, script], script
+    ).then(lambda: [off, off], None, [code, conda], 
+        show_progress='hidden')
+    script.focus(lambda: (on, off), None, [script_row, conda_row])
+    script.key_up(on_script_key_up, [code], script, 
+        show_progress='hidden')
+    script.select(on_script_select, [code, script], script)
+    script.change(on_script_or_code_change, 
+        [script, code], [script_code, script_mtime])
+    conda.focus(lambda: (off, on), None, [script_row, conda_row])
     code.blur(lambda: [on, on], None, [script, conda])
     code.focus(lambda: [off] * 4, None, [script, conda, script_row, 
         conda_row], show_progress='hidden')
-    conda.focus(lambda: (off, on), None, [script_row, conda_row])
+    code.key_up(on_path_nevigate_key_up, None, code, 
+        show_progress='hidden')
+    code.input(on_path_nevigate_change, code, code)
+    code.change(on_script_or_code_change, 
+        [script, code], [script_code, script_mtime])
     conda.change(on_conda_input, conda, [conda_code, conda_mtime])
-    script.change(on_script_change, [script, code], 
-        [script_code, script_mtime])
-    script.select(on_script_select, [code, script], script)
-    script.focus(lambda: (on, off), None, [script_row, conda_row])
     for c in saves: c.click(save_script_code, 
         [code, script, script_code, script_mtime], script_mtime)
     script_code.input(lambda x: -abs(x), script_mtime, script_mtime)
@@ -667,15 +679,6 @@ def build_execute_group(project, trial, saves) -> tuple:
         [conda, conda_code, conda_mtime], conda_mtime
     ).then(lambda: gr.update(choices=CONDAS), None, conda)
     conda_code.input(lambda x: -abs(x), conda_mtime, conda_mtime)
-    code.change(on_code_or_script_change, 
-        [code, script], script).then(
-    on_script_change, [script, code], [script_code, script_mtime])
-    code.change(on_path_nevigate_change, code, code)
-    code.key_up(on_path_nevigate_key_up, None, code, 
-        show_progress='hidden')
-    script.input(on_code_or_script_change, [code, script], script)
-    script.key_up(on_script_key_up, 
-        [code], script, show_progress='hidden')
     resource = [user, user_group, resource_group, node_alive]
     return (conda, code, script, script_cfg, 
     docker_image, *resource, resource_cfg, env_code)
@@ -806,7 +809,7 @@ def build_dataset_preview(dataset, preview, ds):
         [preview, dataset, name, split, diff, file, 
         filter, page_size, page], [name, split, 
     diff, file, page, diff_data, data, markdown, config])
-    diff.change(on_path_nevigate_change, diff, diff)
+    diff.input(on_path_nevigate_change, diff, diff)
     diff.key_up(on_path_nevigate_key_up, None, diff, 
         show_progress='hidden')
     for c in [name, split, diff, file, page_size, page]:
@@ -1061,28 +1064,28 @@ with gr.Blocks(title='Bray Cloud') as platform:
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
         allow_custom_value=True, scale=2, min_width=200)
-    with model_row: algo_coloumn = gr.Column(scale=6)
+    with model_row: algo_coloumn = gr.Column(scale=8)
     with algo_coloumn, gr.Row() as algo_row:
-        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=1, 
+        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=4, 
         label='Train Type', min_width=120)
     with algo_row as deepspeed_row:
         deepspeed_stage = gr.Dropdown(label='DeepSpeed', 
-        scale=1, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
+        scale=5, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
     with algo_row as boost_row:
         boost = gr.Dropdown(BOOST_CHOICES, 
-        scale=1, label='Booster Method', min_width=120)
-    with algo_row as quant_row:
-        quantize = gr.Dropdown(QUANTIZE_CHOICES, scale=1, 
-        label='Quantization', min_width=100)
+        scale=5, label='Booster Method', min_width=120)
+    with algo_row as data_type_row:
+        data_type = gr.Dropdown(DATA_TYPE_CHOICES, scale=4, 
+        label='Data Type', min_width=100)
     with algo_row as tp_pp_cp_ep_row:
         tp_size = gr.Dropdown(label='TP Size', 
-        allow_custom_value=True, scale=1, min_width=80)
+        allow_custom_value=True, scale=3, min_width=80)
         pp_size = gr.Dropdown(label='PP Size', 
-        allow_custom_value=True, scale=1, min_width=80)
+        allow_custom_value=True, scale=3, min_width=80)
         cp_size = gr.Dropdown(label='CP Size', 
-        allow_custom_value=True, scale=1, min_width=80)
+        allow_custom_value=True, scale=3, min_width=80)
         ep_size = gr.Dropdown(label='EP Size', 
-        allow_custom_value=True, scale=1, min_width=80)
+        allow_custom_value=True, scale=3, min_width=80)
     with gr.Row(equal_height=True, visible=False) as lora_row:
         lora_rank = gr.Number(8, label='LoRA Rank')
         lora_alpha = gr.Number(16, label='LoRA Alpha')
@@ -1110,7 +1113,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
         grad_accum = gr.Number(1,
         label='Grad Accum', minimum=1, min_width=100)
         grad_clip = gr.Number(1.0, label='Grad Clip', min_width=80)
-        lr_rate = gr.Number(
+        lr_rate = gr.Textbox(
         placeholder='1e-5', label='LR Rate', min_width=80)
     with train_and_eval_row as eval_save_row:
         val_step = gr.Number(50, label='Val Step', min_width=80)
@@ -1244,8 +1247,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
     'DIST_DEEPSPEED_STAGE': (deepspeed_stage, NO_TRAIN_TASKS),
     'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
-    'DIST_QUANTIZE': (
-        quantize, NO_TRAIN_TASKS - MODEL_TASKS), 
+    'DIST_DATA_TYPE': (
+        data_type, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS - MODEL_TASKS),
@@ -1342,13 +1345,13 @@ with gr.Blocks(title='Bray Cloud') as platform:
     model.focus(lambda: off, None, algo_coloumn, 
         show_progress='hidden')
     model.blur(lambda: on, None, algo_coloumn)
-    model.change(on_path_nevigate_change, [model, code], model)
+    model.input(on_path_nevigate_change, [model, code], model)
     model.key_up(on_path_nevigate_key_up, code, model, 
         show_progress='hidden')
-    dataset.change(on_path_nevigate_change, [dataset, code], dataset)
+    dataset.input(on_path_nevigate_change, [dataset, code], dataset)
     dataset.key_up(on_path_nevigate_key_up, code, dataset, 
         show_progress='hidden')
-    reward_plugin.change(on_path_nevigate_change, 
+    reward_plugin.input(on_path_nevigate_change, 
         [reward_plugin, code], reward_plugin)
     reward_plugin.key_up(on_path_nevigate_key_up, code, reward_plugin, 
         show_progress='hidden')

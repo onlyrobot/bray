@@ -7,8 +7,8 @@ from bray.common import (HOST,
 from concurrent.futures import ThreadPoolExecutor
 
 executor = ThreadPoolExecutor(max_workers=4)
-START_TIME, START_WAIT = time.time(), 10
-MASTER_PORTS, PORT = [str(8418 + i) for i in range(10)], 8413
+PORT = int(os.environ.pop('DIST_PORT', '') or '8413')
+MASTER_PORTS = [str(8418 + i) for i in range(10)]
 class NodeInfo:
     def __init__(self, env, kind, gpu, cpu):
         self.reset(env, kind, gpu, cpu)
@@ -72,6 +72,7 @@ ROUTERS: 'dict[str: list[str]]' = {}
 PENDING_TASK_ID2INFO: 'dict[str: TaskInfo]' = {}
 
 CLUSTER = os.environ.pop('DIST_CLUSTER', f'{HOST}:{PORT}')
+START_TIME, START_WAIT = time.time(), 60
 def set_cluster(c): global CLUSTER; CLUSTER = c; return c
 
 async def restore_task_on_start(wait_for_start: float):
@@ -90,6 +91,17 @@ async def register_to_master_on_start(_: fastapi.FastAPI):
     asyncio.create_task(register_dist_node(env, device_kind)); yield
 
 app = fastapi.FastAPI(lifespan=register_to_master_on_start)
+
+@app.get('/dist/file/pull/{path:path}')
+async def dist_file_pull(path: str) -> fastapi.Response:
+    if not os.path.isfile(path): raise fastapi.HTTPException(
+        404, detail="file not found")
+    return fastapi.responses.FileResponse(path)
+
+@app.post('/dist/file/push/{path:path}')
+def dist_file_push(path: str, req: fastapi.Request):
+    with open(path, 'wb') as f: f.write(file.file.read())
+    return fastapi.Response(status_code=200)
 
 async def notify_all_nodes(nodes: 'tuple[NodeInfo]', index):
     async with nodes[0].cond: nodes[0].cond.notify_all()
@@ -252,7 +264,7 @@ async def dist_task_create(env: dict, dep: str='') -> str:
     if task.is_done() or env is not task.env: 
         return '创建失败，任务已经结束'
     task_deps_on = task.env['DIST_TASK_DEPS'] == 'ON'
-    if task_deps_on or '' not in task.deps or dep: return ''
+    if task_deps_on or task.resources or dep: return ''
     await remove_task_and_clean(task_id, 'FAILED'); return r
 
 def is_task_deps_ready(task_id: str, root=True) -> bool:
@@ -636,7 +648,7 @@ async def dist_node_register(req: fastapi.Request) -> tuple:
     if None in [info.routers, routers]: 
         asyncio.create_task(schedule_all_tasks())
     if routers == info.routers: info.routers = {}
-    if routers is None: info.router = None
+    if routers is None: info.routers = None
     try: await wait_for_task(info, timeout=60)
     except asyncio.TimeoutError: pass
     if info.task: info.task.cancel(); info.task = None
@@ -749,14 +761,12 @@ async def router_websocket(websocket: fastapi.WebSocket):
     logging.warning(f'router {websocket.url} err: {err}')
 
 async def read_from_origin(origin, target) -> None:
-    while True:
-        message = await origin.receive()
+    while message := await origin.receive():
         data = message.get('bytes') or message.get('text')
         if not data: break
         await target.send(data)
 async def read_from_target(origin, target) -> None:
-    while True:
-        data = await target.recv()
+    while data := await target.recv():
         if isinstance(data, str): await origin.send_text(data)
         else: await origin.send_bytes(data)
 async def handle_websocket(url, origin: fastapi.WebSocket):
@@ -801,7 +811,7 @@ async def launch_dist_task(host: str, env: str):
     t.add_done_callback(lambda _: t.result())
 
 async def register_dist_task_(env: dict, url: str) -> bool:
-    try: return await request('POST', url, timeout=60, json=env)
+    try: return await request('POST', url, timeout=80, json=env)
     except: await asyncio.sleep(10); return True
 
 async def register_dist_task(env, popen: subprocess.Popen):
@@ -823,10 +833,10 @@ async def register_dist_task(env, popen: subprocess.Popen):
     if r is None: await register_dist_task_(env, url)
 
 def wait_all_process(): os.wait(); wait_all_process()
-SIGS = [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]
 def handle_exit_signal(*_): 
     try: os.system(f'pkill -P {os.getpid()}'); wait_all_process()
     except OSError: os._exit(0)
+SIGS = [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]
 import atexit; atexit.register(handle_exit_signal)
 for sig in SIGS: signal.signal(sig, handle_exit_signal)
 
@@ -837,6 +847,7 @@ async def register_dist_node(env: dict, device_kind: str):
     except: gpu_kind, gpu = None, None
     device_kind = device_kind or gpu_kind or 'CPU'
     data = ['', env, [device_kind, gpu, os.cpu_count()], None, {}]
+    if device_kind == 'localhost': data[0] = '127.0.0.1'
     url = f'http://{CLUSTER}/dist/node/register'
     while data[2][0]: data = await register_dist_node_(url, data)
     if data[2][0] != '': asyncio.create_task(handle_async_exit())
@@ -851,7 +862,7 @@ async def handle_async_exit(timeout: float=1.0):
     logging.info(f'exit with {res}'); handle_exit_signal()
 
 async def register_dist_node_(url: str, data: list) -> list:
-    try: data = await request('POST', url, timeout=60, json=data)
+    try: data = await request('POST', url, timeout=80, json=data)
     except asyncio.CancelledError: data[2][0] = ''; return data
     except: await asyncio.sleep(10); return data
     for k, v in data[-2].items(): update_router_rules(k, v)
