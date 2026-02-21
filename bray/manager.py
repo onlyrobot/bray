@@ -116,10 +116,10 @@ def build_task_type_and_status(task: list) -> list:
     color = status2color.get(status, 'red')
     template = task[-1].split('template=')[-1].split('&')[0]
     if not template or status != 'UNKNOWN': template = task[0]
-    status = f'''<a href="./?template={template}&project={
+    status_url = f'''<a href="./?template={template}&project={
         parts[0]}&trial={parts[1]}" 
     target="_blank" style="color: {color};">{status}</a>'''
-    return task[:3] + [task_type, status]
+    return task[:3] + [task_type, status_url]
 
 def update_tasks_type_and_status(tasks: list) -> list | dict:
     new_tasks = [build_task_type_and_status(t) for t in tasks]
@@ -1066,17 +1066,17 @@ with gr.Blocks(title='Bray Cloud') as platform:
         allow_custom_value=True, scale=2, min_width=200)
     with model_row: algo_coloumn = gr.Column(scale=8)
     with algo_coloumn, gr.Row() as algo_row:
-        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=4, 
+        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=3, 
         label='Train Type', min_width=120)
     with algo_row as deepspeed_row:
         deepspeed_stage = gr.Dropdown(label='DeepSpeed', 
-        scale=5, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
+        scale=4, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
     with algo_row as boost_row:
         boost = gr.Dropdown(BOOST_CHOICES, 
-        scale=5, label='Booster Method', min_width=120)
+        scale=4, label='Booster Method', min_width=120)
     with algo_row as data_type_row:
-        data_type = gr.Dropdown(DATA_TYPE_CHOICES, scale=4, 
-        label='Data Type', min_width=100)
+        data_type = gr.Dropdown(DATA_TYPE_CHOICES, scale=3, 
+        label='Data Type', min_width=120)
     with algo_row as tp_pp_cp_ep_row:
         tp_size = gr.Dropdown(label='TP Size', 
         allow_custom_value=True, scale=3, min_width=80)
@@ -1386,7 +1386,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ).then(*update_task_status_event_args
     ).then(lambda: '清理日志', None, clean)
     for c in [log_filter, node]: c.input(*flush_event_args)
-    for c in [metric, metric_label, axis_x]: c.change(
+    for c in [metric, metric_label, axis_x]: c.input(
         lambda: None, None, plot).then(*update_metric_event_args)
     metric_label.change(lambda x: gr.update(show_label=not x), 
         metric_label, metric_label)

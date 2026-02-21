@@ -72,7 +72,6 @@ ROUTERS: 'dict[str: list[str]]' = {}
 PENDING_TASK_ID2INFO: 'dict[str: TaskInfo]' = {}
 
 CLUSTER = os.environ.pop('DIST_CLUSTER', f'{HOST}:{PORT}')
-START_TIME, START_WAIT = time.time(), 60
 def set_cluster(c): global CLUSTER; CLUSTER = c; return c
 
 async def restore_task_on_start(wait_for_start: float):
@@ -83,13 +82,14 @@ async def restore_task_on_start(wait_for_start: float):
     (e.get('DIST_DEPENDENT') or e.get('DIST_TASK_STATUS'))])
 
 async def register_to_master_on_start(_: fastapi.FastAPI):
-    asyncio.create_task(restore_task_on_start(START_WAIT + 1))
+    if CLUSTER == f'{HOST}:{PORT}': device_kind = 'localhost'
+    else: device_kind = os.environ.pop('DIST_DEVICE_KIND', '')
     env = {k: v for k, v in os.environ.items() if 
         k.startswith('DIST_')}
-    if CLUSTER == f'{HOST}:{PORT}': device_kind = 'localhost'
-    else: device_kind = env.pop('DIST_DEVICE_KIND', '')
-    asyncio.create_task(register_dist_node(env, device_kind)); yield
+    asyncio.create_task(register_dist_node(env, device_kind))
+    asyncio.create_task(restore_task_on_start(START_WAIT)); yield
 
+START_TIME, START_WAIT = time.time(), 60
 app = fastapi.FastAPI(lifespan=register_to_master_on_start)
 
 @app.get('/dist/file/pull/{path:path}')
@@ -381,12 +381,24 @@ async def schedule_all_tasks(task_ids: tuple=None, index=0):
 async def notify_user(dep: str, status: str, msg, task_id=''):
     if not (task := CREATED_TASK_ID2INFO.get(dep)): return
     if not task_id: task_id = dep
-    for d in task.deps - {''}: await notify_user(
-        d, status, f'的子任务\n{dep}\n{msg}', task_id)
+    for d in task.deps - {''}: await notify_user(d, status, 
+        f'的子任务\n{dep}\n{msg}', task_id)
     if '' not in task.deps: return
     if not (user := task.env.get('DIST_NOTIFY_USER')): return
     from bray.monitor import try_notify_user_msg
     await try_notify_user_msg(user, dep, msg, status, task_id)
+
+async def allocate_resource(task_id, task: TaskInfo) -> str:
+    try: r = await allocate_resource_(task, f'{HOST}:{PORT}')
+    except Exception as e: r = f'allocate resource err {e}'
+    if r: await notify_user(task_id, 'ERROR', r); return r
+
+async def allocate_resource_(task: TaskInfo, cluster: str) -> str:
+    env = {**os.environ, **task.env, 'DIST_CLUSTER': cluster}
+    process = await asyncio.create_subprocess_shell(
+        'source ./allocate.sh', env=env, shell=True,
+    start_new_session=True, stderr=asyncio.subprocess.PIPE)
+    return (await process.communicate())[1].decode()
 
 async def schedule_task(task_id, task: TaskInfo, retry=0) -> str:
     if retry > 0: await asyncio.sleep(retry * 60)
@@ -399,18 +411,6 @@ async def schedule_task(task_id, task: TaskInfo, retry=0) -> str:
     asyncio.create_task(schedule_task(task_id, task, retry + 1))
     logging.warning(f'allocate resource err {r}'); return r
 
-async def allocate_resource(task_id, task: TaskInfo):
-    try: r = await allocate_resource_(task, f'{HOST}:{PORT}')
-    except Exception as e: r = f'allocate resource err {e}'
-    if r: await notify_user(task_id, 'ERROR', r); return r
-
-async def allocate_resource_(task: TaskInfo, cluster: str) -> str:
-    env = {**os.environ, **task.env, 'DIST_CLUSTER': cluster}
-    process = await asyncio.create_subprocess_shell(
-        'source ./allocate.sh', env=env, shell=True,
-    start_new_session=True, stderr=asyncio.subprocess.PIPE)
-    return (await process.communicate())[1].decode()
-
 async def schedule_task_(task_id, task: TaskInfo) -> str:
     if not task.env or not task.deps: return '任务已经结束'
     if task.is_ready(): return '任务已经就绪'
@@ -420,7 +420,7 @@ async def schedule_task_(task_id, task: TaskInfo) -> str:
     node_affinity = env.get('DIST_NODE_AFFINITY', '')
     host2infos = [] if not env.get('DIST_DEVICE_KIND') else [
         (h, i) for h, i in HOST2NODE_INFO.items()
-        if env['DIST_DEVICE_KIND'] in [i.kind, h]
+    if i.kind and env['DIST_DEVICE_KIND'] in [i.kind, h]
     and all(v == env.get(k, v) for k, v in i.env.items())]
     def remain_gpu_num(h2i: tuple) -> float:
         priority = 0.0 if h2i[0] in node_affinity else 10000
@@ -449,7 +449,7 @@ async def schedule_task_(task_id, task: TaskInfo) -> str:
 
     host2infos = [] if not env.get('DIST_CPU_KIND') else [
         (h, i) for h, i in HOST2NODE_INFO.items() 
-        if env['DIST_CPU_KIND'] in [i.kind, h]
+    if i.kind and env['DIST_CPU_KIND'] in [i.kind, h]
     and all(v == env.get(k, v) for k, v in i.env.items())]
     def remain_cpu_num(h2i: tuple) -> float:
         priority = 0.0 if h2i[0] in node_affinity else 10000
@@ -728,13 +728,16 @@ async def handle(method, url, data, headers, params):
 @app.api_route('/{path:path}', methods=['GET', 'POST', 
     'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'])
 async def router(request: fastapi.Request) -> fastapi.Response:
-    path = request.url.path; parts = path.split('/')
-    if len(parts) > 2: task_id = '/'.join(parts[1:3])
-    else: raise fastapi.HTTPException(404, detail='path err')
+    if len(p := request.scope['raw_path'].split(b'/')) <= 2: 
+        raise fastapi.HTTPException(404, detail='path err')
+    task_id = b'/'.join(p[1:3]).decode()
     if not (rules := ROUTERS.get(task_id)): 
         raise fastapi.HTTPException(404, detail=f'no router')
+    path = b"/".join(p[3:]).decode("ascii")
     rule = random.choice(rules)
-    url = f'http://{rule}/{"/".join(parts[3:])}?{request.url.query}'
+    if q := request.scope['query_string']:
+        url = f'http://{rule}/{path}?{q.decode("ascii")}'
+    else: url = f'http://{rule}/{path}'
     if request.query_params.get('proxy') == '0':
         return fastapi.responses.RedirectResponse(url)
     logging.info(f'router {request.url} to {url}')
@@ -747,13 +750,16 @@ async def router(request: fastapi.Request) -> fastapi.Response:
 
 @app.websocket('/{path:path}')
 async def router_websocket(websocket: fastapi.WebSocket):
-    path = websocket.url.path; parts = path.split('/')
-    if len(parts) > 2: task_id = '/'.join(parts[1:3])
-    else: return await websocket.close(1008, 'path err')
-    if not (rules := ROUTERS.get(task_id)):
+    if len(p := websocket.scope['raw_path'].split(b'/')) <= 2: 
+        return await websocket.close(1008, 'path err')
+    task_id = b'/'.join(p[1:3]).decode()
+    if not (rules := ROUTERS.get(task_id)): 
         return await websocket.close(1008, 'no router')
-    rule, query = random.choice(rules), websocket.url.query
-    url = f'ws://{rule}/{"/".join(parts[3:])}?{query}'
+    path = b"/".join(p[3:]).decode("ascii")
+    rule = random.choice(rules)
+    if q := websocket.scope['query_string']:
+        url = f'ws://{rule}/{path}?{q.decode("ascii")}'
+    else: url = f'ws://{rule}/{path}'
     logging.info(f'router {websocket.url} to {url}')
     try: return await handle_websocket(url, websocket)
     except websockets.exceptions.ConnectionClosed: return
@@ -847,7 +853,6 @@ async def register_dist_node(env: dict, device_kind: str):
     except: gpu_kind, gpu = None, None
     device_kind = device_kind or gpu_kind or 'CPU'
     data = ['', env, [device_kind, gpu, os.cpu_count()], None, {}]
-    if device_kind == 'localhost': data[0] = '127.0.0.1'
     url = f'http://{CLUSTER}/dist/node/register'
     while data[2][0]: data = await register_dist_node_(url, data)
     if data[2][0] != '': asyncio.create_task(handle_async_exit())
