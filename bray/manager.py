@@ -1063,11 +1063,17 @@ with gr.Blocks(title='Bray Cloud') as platform:
         label='Load Balance', visible=False, min_width=100)
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
-        allow_custom_value=True, scale=2, min_width=200)
-    with model_row: algo_coloumn = gr.Column(scale=8)
-    with algo_coloumn, gr.Row() as algo_row:
-        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=3, 
-        label='Train Type', min_width=120)
+        allow_custom_value=True, scale=2, min_width=180)
+    with model_row: parallel_column = gr.Column(scale=3, min_width=350)
+    with parallel_column, gr.Row() as tp_pp_cp_ep_row:
+        tp_size = gr.Number(label='TP Size', scale=3, min_width=80)
+        pp_size = gr.Number(label='PP Size', scale=3, min_width=80)
+        cp_size = gr.Number(label='CP Size', scale=3, min_width=80)
+        ep_size = gr.Number(label='EP Size', scale=3, min_width=80)
+    with model_row: algo_column = gr.Column(scale=4, min_width=500)
+    with algo_column, gr.Row() as algo_row:
+        data_type = gr.Dropdown(DATA_TYPE_CHOICES, scale=3, 
+        label='Data Type', min_width=120)
     with algo_row as deepspeed_row:
         deepspeed_stage = gr.Dropdown(label='DeepSpeed', 
         scale=4, choices=DEEPSPEED_ZERO_CHOICES, min_width=100)
@@ -1075,17 +1081,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         boost = gr.Dropdown(BOOST_CHOICES, 
         scale=4, label='Booster Method', min_width=120)
     with algo_row as data_type_row:
-        data_type = gr.Dropdown(DATA_TYPE_CHOICES, scale=3, 
-        label='Data Type', min_width=120)
-    with algo_row as tp_pp_cp_ep_row:
-        tp_size = gr.Dropdown(label='TP Size', 
-        allow_custom_value=True, scale=3, min_width=80)
-        pp_size = gr.Dropdown(label='PP Size', 
-        allow_custom_value=True, scale=3, min_width=80)
-        cp_size = gr.Dropdown(label='CP Size', 
-        allow_custom_value=True, scale=3, min_width=80)
-        ep_size = gr.Dropdown(label='EP Size', 
-        allow_custom_value=True, scale=3, min_width=80)
+        train_type = gr.Dropdown(TRAIN_TYPE_CHOICES, scale=3, 
+        label='Train Type', min_width=120)
     with gr.Row(equal_height=True, visible=False) as lora_row:
         lora_rank = gr.Number(8, label='LoRA Rank')
         lora_alpha = gr.Number(16, label='LoRA Alpha')
@@ -1131,14 +1128,15 @@ with gr.Blocks(title='Bray Cloud') as platform:
         reward = gr.Dropdown(
         REWARDS, scale=1, label='Reward', value=None)
     with reward_row as generate_row:
-        gen_temp = gr.Number(value=0.9, label='Gen Temp', 
-        scale=1, minimum=0, maximum=1)
-        top_p = gr.Number(value=0.9, label='Top P', scale=1, 
-        minimum=0, maximum=1)
-        top_k = gr.Number(50, label='Top K', scale=1)
-        gen_num = gr.Number(value=8, label='Num Gens', scale=1)
+        gen_temp = gr.Number(0.9, label='Gen Temp', scale=1, 
+        minimum=0, maximum=1, min_width=100)
+        top_p = gr.Number(0.9, label='Top P', scale=1, 
+        minimum=0, maximum=1, min_width=100)
+        top_k = gr.Number(50, label='Top K', scale=1, min_width=100)
+        gen_num = gr.Number(
+        8, label='Num Gens', scale=1, min_width=100)
     with reward_group: rewards = gr.Dataframe(
-        value=[['', ''], ['', '']], type='array')
+        value=[['', ''], ['', '']], type='array', row_count=2)
     with gr.Group() as execute_group:
         (conda, code, script, script_cfg, docker_image, 
         user, user_group, resource_group, 
@@ -1244,15 +1242,15 @@ with gr.Blocks(title='Bray Cloud') as platform:
     'DIST_LOAD_BALANCE': (
         load_balance, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_MODEL': (model, NO_TRAIN_TASKS - MODEL_TASKS),
-    'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS),
-    'DIST_DEEPSPEED_STAGE': (deepspeed_stage, NO_TRAIN_TASKS),
-    'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
-    'DIST_DATA_TYPE': (
-        data_type, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_CP_SIZE': (cp_size, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_EP_SIZE': (ep_size, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_DATA_TYPE': (
+        data_type, NO_TRAIN_TASKS - MODEL_TASKS), 
+    'DIST_DEEPSPEED_STAGE': (deepspeed_stage, NO_TRAIN_TASKS),
+    'DIST_BOOST': (boost, NO_TRAIN_TASKS - MODEL_TASKS),
+    'DIST_TRAIN_TYPE': (train_type, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_LORA_RANK': (lora_rank, NO_TRAIN_TASKS),
     'DIST_LORA_DROPOUT': (lora_dropout, NO_TRAIN_TASKS),
     'DIST_LORA_ALPHA': (lora_alpha, NO_TRAIN_TASKS),
@@ -1342,9 +1340,9 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ).then(*update_task_status_event_args)
     for v in VALUES: v.input(verify_trial, [project, trial] + VALUES, 
         VALUES + [output], show_progress='hidden')
-    model.focus(lambda: off, None, algo_coloumn, 
-        show_progress='hidden')
-    model.blur(lambda: on, None, algo_coloumn)
+    model.focus(lambda: (off, off), None, 
+        [algo_column, parallel_column], show_progress='hidden')
+    model.blur(lambda: (on, on), None, [algo_column, parallel_column])
     model.input(on_path_nevigate_change, [model, code], model)
     model.key_up(on_path_nevigate_key_up, code, model, 
         show_progress='hidden')
