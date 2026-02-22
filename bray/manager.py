@@ -1059,17 +1059,21 @@ with gr.Blocks(title='Bray Cloud') as platform:
     with task_row as instance_row:
         instance_num = gr.Number(1, label='Num Instances', scale=1, 
         minimum=0, visible=False, min_width=120)
-        load_balance = gr.Dropdown(['HASH', 'RR', 'NONE'], scale=1,
-        label='Load Balance', visible=False, min_width=100)
+        task_retry = gr.Dropdown(allow_custom_value=True,
+        scale=1, label='Task Retry', visible=False, min_width=100)
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
         allow_custom_value=True, scale=2, min_width=180)
     with model_row: parallel_column = gr.Column(scale=3, min_width=350)
     with parallel_column, gr.Row() as tp_pp_cp_ep_row:
-        tp_size = gr.Number(label='TP Size', scale=3, min_width=80)
-        pp_size = gr.Number(label='PP Size', scale=3, min_width=80)
-        cp_size = gr.Number(label='CP Size', scale=3, min_width=80)
-        ep_size = gr.Number(label='EP Size', scale=3, min_width=80)
+        tp_size = gr.Dropdown(label='TP Size', 
+        allow_custom_value=True, scale=3, min_width=80)
+        pp_size = gr.Dropdown(label='PP Size', 
+        allow_custom_value=True, scale=3, min_width=80)
+        cp_size = gr.Dropdown(label='CP Size', 
+        allow_custom_value=True, scale=3, min_width=80)
+        ep_size = gr.Dropdown(label='EP Size', 
+        allow_custom_value=True, scale=3, min_width=80)
     with model_row: algo_column = gr.Column(scale=4, min_width=500)
     with algo_column, gr.Row() as algo_row:
         data_type = gr.Dropdown(DATA_TYPE_CHOICES, scale=3, 
@@ -1239,8 +1243,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         cpu_node_num, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_INSTANCES': (
         instance_num, set(TASK_CHOICES) - SERVE_TASKS),
-    'DIST_LOAD_BALANCE': (
-        load_balance, set(TASK_CHOICES) - SERVE_TASKS),
+    'DIST_TASK_RETRY': (
+        task_retry, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_MODEL': (model, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),

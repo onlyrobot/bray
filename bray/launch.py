@@ -108,7 +108,7 @@ async def notify_all_nodes(nodes: 'tuple[NodeInfo]', index):
     if index >= len(nodes): return
     asyncio.create_task(notify_all_nodes(nodes, index + 1))
 
-def insert_router(task_id: str, host: str, port=''):
+def insert_router(task_id: str, host: str, port: str=''):
     rule = f'{host}:{port}' if port else host
     if task_id not in ROUTERS: ROUTERS[task_id] = []
     elif rule in ROUTERS[task_id]: return
@@ -118,7 +118,7 @@ def insert_router(task_id: str, host: str, port=''):
     for n in nodes: n.routers[task_id] = rules
     asyncio.create_task(notify_all_nodes(nodes, index=0))
 
-def remove_router(task_id: str, host: str, port=''):
+def remove_router(task_id: str, host: str, port: str=''):
     rule = f'{host}:{port}' if port else host
     if rule not in ROUTERS.get(task_id, []): return
     (rules := ROUTERS[task_id]).remove(rule)
@@ -629,9 +629,9 @@ async def dist_task_register(env: dict) -> bool:
     if info.is_done(): return False
     status = env.get('DIST_TASK_STATUS', 'FAILED')
     if info.is_serve(): status = 'FAILED'
+    if not timeout: await remove_task_and_clean(task_id, status)
     async def change_status_later(timeout=timeout * 2):
         await asyncio.sleep(timeout)
-    if not timeout: await remove_task_and_clean(task_id, status)
     info.task = asyncio.create_task(change_status_later())
     return task_id not in PENDING_TASK_ID2INFO
 

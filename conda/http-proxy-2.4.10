@@ -1,0 +1,7 @@
+export https_proxy=http://10.99.37.115:8411
+conda install python=3.10 -q -y
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+pip install proxy.py==2.4.10
+
+unset https_proxy PIP_INDEX_URL

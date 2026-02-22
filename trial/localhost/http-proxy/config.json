@@ -1,0 +1,33 @@
+{
+    "DIST_CONDA_ENV": "http-proxy-2.4.10",
+    "DIST_RESUMABLE": "value",
+    "DIST_SCRIPT": "proxy --hostname 0.0.0.0 --port 8415",
+    "TEMPLATE": "swift.default",
+    "DIST_TASK_DEPS": "OFF",
+    "DIST_TASK_TYPE": "API",
+    "DIST_DEVICE_KIND": "localhost",
+    "DIST_DEVICE_CPUS": "0",
+    "DIST_NUM_NODES": "1",
+    "DIST_DATASET_SPLIT": 0.01,
+    "DIST_CODE": "",
+    "DIST_DOCKER_IMAGE": "",
+    "DIST_USER": "",
+    "DIST_USER_GROUP": "",
+    "DIST_RESOURCE_GROUP": "",
+    "DIST_NODE_ALIVE": 0,
+    "DIST_RESOURCE_CONFIG": "",
+    "DIST_NOTIFY_USER": "",
+    "REWARDS": [
+        [
+            "",
+            ""
+        ],
+        [
+            "",
+            ""
+        ]
+    ],
+    "DIST_TRIAL_PATH": "/Users/onlyrobot/git/bray/trial/localhost/http-proxy",
+    "DIST_DEPENDENT": "",
+    "DIST_RESUME_PATH": ""
+}
