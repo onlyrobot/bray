@@ -102,3 +102,4 @@ _buildlogs/*
 
 cache/*
 .conda/*
+trial/*

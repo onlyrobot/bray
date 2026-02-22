@@ -1,0 +1,18 @@
+{
+    "DIST_CONDA_ENV": "code-server-4.107.0",
+    "DIST_RESUMABLE": "value",
+    "DIST_SCRIPT": "code-server --bind-addr 0.0.0.0:$DIST_MASTER_PORT --auth none $PWD",
+    "TEMPLATE": "swift.default",
+    "DIST_TASK_DEPS": "OFF",
+    "DIST_TASK_TYPE": "WEB",
+    "DIST_DEVICE_KIND": "localhost",
+    "DIST_NUM_DEVICES": "",
+    "DIST_DEVICE_CPUS": "0",
+    "DIST_NUM_NODES": "1",
+    "DIST_NUM_INSTANCES": 1,
+    "DIST_DATASET_SPLIT": 0.01,
+    "DIST_CODE": "",
+    "DIST_USER": "",
+    "DIST_NODE_ALIVE": 600,
+    "DIST_RESOURCE_CONFIG": ""
+}

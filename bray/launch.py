@@ -13,11 +13,12 @@ class NodeInfo:
     def __init__(self, env, kind, gpu, cpu):
         self.reset(env, kind, gpu, cpu)
         self.cond, self.task = asyncio.Condition(), None
-        self.tasks: 'list[dict]' = []; self.mtime = time.time()
+        self.tasks: 'list[dict]' = []
         self.used_ports, self.routers = [], None
         self.used_gpus, self.used_cpus = [], []
     def reset(self, env, kind, gpu, cpu):
         self.env = {} if env is None else env
+        self.mtime = time.time()
         self.kind, self.gpu, self.cpu = kind, gpu, cpu
     def is_share(self) -> bool:
         return not self.env.get('DIST_NODE_ALIVE')
@@ -784,8 +785,8 @@ async def handle_websocket(url, origin: fastapi.WebSocket):
 async def launch_dist_task(host: str, env: str):
     nnode, node = env['DIST_NUM_NODES'], env['DIST_NODE_RANK']
     nproc_per_node = len(env.get('DIST_DEVICES', '').split(','))
-    code = env.get('DIST_CODE') or os.getcwd()
     conda = os.path.join(os.getcwd(), 'conda.sh')
+    code = os.path.abspath(env.get('DIST_CODE') or os.getcwd())
     script = (f'source {conda} && cd {code} && '
     f'MASTER_ADDR={env["DIST_MASTER"]} NODE_RANK={node} '
     f'MASTER_PORT={env["DIST_MASTER_PORT"]} '

@@ -315,7 +315,8 @@ def save_trial(project: str, trial: str, *args) -> tuple:
     if tasks := [t[:-2] + [t[-1].split('template=')[-1].split(
     '&')[0]] for t in kwargs['TASKS'] if t[0]]: 
         config['TASKS'] = tasks
-    if r := kwargs['REWARDS']: config['REWARDS'] = r
+    if is_task_valid(kwargs['DIST_TASK_TYPE'], 'REWARDS'): 
+        config['REWARDS'] = kwargs['REWARDS']
     trial_path = get_trial_path(project, trial)
     os.makedirs(trial_path, exist_ok=True)
     with open(f'{trial_path}/config.json', 'w') as f: 
@@ -1200,15 +1201,15 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, trial, model], ckpt_step)
     selected = gr.Button('log', visible=False, elem_id='selected')
     code_frame = lambda code: f'''<iframe allowfullscreen
-    src='http://{HOST}:{PORT}/localhost/code-server/?folder={code}' 
+    src='/localhost/code-server/?folder={code}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     code_html = gr.HTML(visible=False, padding=False, autoscroll=True)
     code_btn.click(code_frame, code, code_html)
     record_btn.click(on_record_click, 
         [project, record_btn, rec_md], rec_md)
     rec_md.change(lambda x: x, rec_md, view_rec, show_progress=False)
-    tb_frame = lambda p, t: f'''<iframe allowfullscreen src='
-    http://{HOST}:{PORT}/localhost/tensorboard/''' + \
+    tb_frame = lambda p, t: f'''<iframe allowfullscreen 
+    src='/localhost/tensorboard/''' + \
     f'''?runFilter={p}/{t}#scalars&regexInput={p}/{t}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     tb_html = gr.HTML(visible=False, padding=False, autoscroll=True)

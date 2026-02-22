@@ -1,4 +1,4 @@
-set -o errexit; echo "执行 Conda 的当前工作目录 $PWD"
+set -eo pipefail; echo "执行 Conda 的当前工作目录 $PWD"
 
 export DIST_CONDA_PATH=${DIST_CONDA_PATH:-$PWD/.conda}
 if [ -n "$DIST_CONDA_ENV" ]; then
@@ -24,6 +24,7 @@ CURRENT_CONDA_ENV=$PWD/conda/$DIST_CONDA_ENV
 CACHED_CONDA_ENV=$PWD/cache/$DIST_CONDA_ENV
 if [ -n "$DIST_DOCKER_IMAGE" ]; then
 CACHED_CONDA_ENV=$CACHED_CONDA_ENV.${DIST_DOCKER_IMAGE////_}; fi
+mkdir -p $(dirname $CACHED_CONDA_ENV)
 CONDA_ENV_PATH=$CONDA_ENVS_PATH/$DIST_CONDA_ENV
 
 LOCAL_CONDA_ENV=$DIST_CONDA_PATH/cache/$DIST_CONDA_ENV
