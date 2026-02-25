@@ -1,10 +1,10 @@
 {
-    "DIST_CONDA_ENV": "code-server-4.107.0",
+    "DIST_CONDA_ENV": "",
     "DIST_RESUMABLE": "value",
-    "DIST_SCRIPT": "code-server --bind-addr 0.0.0.0:$DIST_MASTER_PORT --auth none $PWD",
+    "DIST_SCRIPT": "DIST_SSL=SSL DIST_PORT=8414 DIST_HOST=HTTPS DIST_CLUSTER=\"$DIST_MASTER:8413\" python3 -u -m bray.launch",
     "TEMPLATE": "swift.default",
     "DIST_TASK_DEPS": "OFF",
-    "DIST_TASK_TYPE": "WEB",
+    "DIST_TASK_TYPE": "SERVE",
     "DIST_NUM_INSTANCES": 1,
     "DIST_DEVICE_KIND": "localhost",
     "DIST_NUM_DEVICES": "",
@@ -13,6 +13,5 @@
     "DIST_DATASET_SPLIT": 0.01,
     "DIST_CODE": "",
     "DIST_USER": "",
-    "DIST_NODE_ALIVE": 600,
     "DIST_RESOURCE_CONFIG": ""
 }

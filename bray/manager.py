@@ -640,7 +640,7 @@ def build_execute_group(project, trial, saves) -> tuple:
         resource_group = gr.Dropdown(
         allow_custom_value=True, label='Resource Group', scale=3)
         node_alive = gr.Number(
-        600, label='Node Alive', scale=1, min_width=100)
+        None, label='Node Alive', scale=1, min_width=100)
     conda_mtime = gr.Number(0.0, visible=False)
     with conda_row, conda_column as resource_column:
         resource_cfg = gr.Code(label='Resource Config')
@@ -1036,6 +1036,11 @@ with gr.Blocks(title='Bray Cloud') as platform:
     with task_row as task_type_row:
         task_type = gr.Dropdown(label='Task Type', scale=1,
         choices=TASK_CHOICES, allow_custom_value=True, min_width=100)
+    with task_row as instance_row:
+        instance_num = gr.Number(1, label='Num Instances', scale=1, 
+        minimum=0, visible=False, min_width=120)
+        task_retry = gr.Dropdown(allow_custom_value=True,
+        scale=1, label='Task Retry', visible=False, min_width=100)
     with task_row as device_resource_row:
         device_kind = gr.Dropdown(label='Device Kind', scale=2,
         allow_custom_value=True, min_width=100)
@@ -1057,11 +1062,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         cpu_node_num = gr.Dropdown(
         label='Num Nodes', visible=False, 
         min_width=100, allow_custom_value=True, scale=1)
-    with task_row as instance_row:
-        instance_num = gr.Number(1, label='Num Instances', scale=1, 
-        minimum=0, visible=False, min_width=120)
-        task_retry = gr.Dropdown(allow_custom_value=True,
-        scale=1, label='Task Retry', visible=False, min_width=100)
     with gr.Row(equal_height=True) as model_row:
         model = gr.Dropdown(MODELS, label='Model or Path', 
         allow_custom_value=True, scale=2, min_width=180)
@@ -1201,7 +1201,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, trial, model], ckpt_step)
     selected = gr.Button('log', visible=False, elem_id='selected')
     code_frame = lambda code: f'''<iframe allowfullscreen
-    src='/localhost/code-server/?folder={code}' 
+    src='/localhost/code-server/''' + \
+    f'''?folder={os.path.join(os.getcwd(), code)}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     code_html = gr.HTML(visible=False, padding=False, autoscroll=True)
     code_btn.click(code_frame, code, code_html)
@@ -1231,6 +1232,10 @@ with gr.Blocks(title='Bray Cloud') as platform:
     PARAMS = { 'TEMPLATE': (template, {}), 
     'DIST_TASK_DEPS': (task_deps, {}),
     'TASKS': (tasks, {}), 'DIST_TASK_TYPE': (task_type, {}), 
+    'DIST_TASK_RETRY': (
+        task_retry, set(TASK_CHOICES) - SERVE_TASKS),
+    'DIST_NUM_INSTANCES': (
+        instance_num, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_DEVICE_KIND': (device_kind, {}), 
     'DIST_NUM_DEVICES': (device_num, {}),
     'DIST_DEVICE_CPUS': (device_cpus, {}),
@@ -1242,10 +1247,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         cpu_memory, set(TASK_CHOICES) - {'RAY'}),
     'DIST_NUM_CPU_NODES': (
         cpu_node_num, set(TASK_CHOICES) - {'RAY'}),
-    'DIST_NUM_INSTANCES': (
-        instance_num, set(TASK_CHOICES) - SERVE_TASKS),
-    'DIST_TASK_RETRY': (
-        task_retry, set(TASK_CHOICES) - SERVE_TASKS),
     'DIST_MODEL': (model, NO_TRAIN_TASKS - MODEL_TASKS),
     'DIST_TP_SIZE': (tp_size, NO_TRAIN_TASKS - MODEL_TASKS), 
     'DIST_PP_SIZE': (pp_size, NO_TRAIN_TASKS - MODEL_TASKS),

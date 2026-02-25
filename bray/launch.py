@@ -7,7 +7,7 @@ from bray.common import (HOST,
 from concurrent.futures import ThreadPoolExecutor
 
 executor = ThreadPoolExecutor(max_workers=4)
-PORT = int(os.environ.pop('DIST_PORT', '') or '8413')
+PORT = int(os.environ.pop('DIST_PORT', '') or 8413)
 MASTER_PORTS = [str(8418 + i) for i in range(10)]
 class NodeInfo:
     def __init__(self, env, kind, gpu, cpu):
@@ -72,25 +72,25 @@ CREATED_TASK_ID2INFO: 'dict[str: TaskInfo]' = {}
 ROUTERS: 'dict[str: list[str]]' = {}
 PENDING_TASK_ID2INFO: 'dict[str: TaskInfo]' = {}
 
-CLUSTER = os.environ.pop('DIST_CLUSTER', f'{HOST}:{PORT}')
 def set_cluster(c): global CLUSTER; CLUSTER = c; return c
-
-async def restore_task_on_start(wait_for_start: float):
-    await dist_task_query(); await asyncio.sleep(wait_for_start)
-    envs = [i.env for i in CREATED_TASK_ID2INFO.values()]
-    await asyncio.gather(*[dist_task_launch(e.copy(), '') 
-        for e in envs if e and not 
-    (e.get('DIST_DEPENDENT') or e.get('DIST_TASK_STATUS'))])
+HOST = os.environ.get('DIST_HOST') or HOST
+CLUSTER = os.environ.pop('DIST_CLUSTER', f'{HOST}:{PORT}')
+START_WAIT = float(os.environ.pop('DIST_START_WAIT', '') or 60)
+START_TIME = time.time() + START_WAIT
 
 async def register_to_master_on_start(_: fastapi.FastAPI):
-    if CLUSTER == f'{HOST}:{PORT}': device_kind = 'localhost'
-    else: device_kind = os.environ.pop('DIST_DEVICE_KIND', '')
-    env = {k: v for k, v in os.environ.items() if 
-        k.startswith('DIST_')}
-    asyncio.create_task(register_dist_node(env, device_kind))
-    asyncio.create_task(restore_task_on_start(START_WAIT)); yield
+    asyncio.create_task(register_dist_node({k: v for k, v in 
+        os.environ.items() if k.startswith('DIST_')}))
+    asyncio.create_task(restore_task_on_start()); yield
 
-START_TIME, START_WAIT = time.time(), 60
+async def restore_task_on_start(start_wait: float=None):
+    await asyncio.sleep(start_wait or START_WAIT)
+    await asyncio.gather(*[dist_task_launch({}, p, t) 
+    for p, configs in (await dist_task_query()).items() 
+        for t, config in configs.items() 
+    if len(config) > 1 and not config.get('DIST_DEPENDENT') 
+    and config.get('DIST_TASK_STATUS') == 'UNKNOWN'])
+
 app = fastapi.FastAPI(lifespan=register_to_master_on_start)
 
 @app.get('/dist/file/pull/{path:path}')
@@ -187,7 +187,7 @@ def get_latest_ckpt_path(project: str, trial: str) -> str:
 async def dist_task_launch(env={}, project='', trial='', dep='', 
         template='', resume: bool=None, 
         request: fastapi.Request=None) -> str:
-    if time.time() - START_TIME < START_WAIT: return f'请稍后重试...'
+    if time.time() < START_TIME: return f'请稍后重试...'
     if not env and request and await request.body(): 
         env = await request.json()
     if not project: project = env.pop('DIST_PROJECT', '')
@@ -201,9 +201,9 @@ async def dist_task_launch(env={}, project='', trial='', dep='',
         if r := clone_trial(template, trial_path): return r
     config = load_trial_config(project, trial)
     if env: update_trial_by_env(config, env)
-    is_task_serve = config['DIST_TASK_TYPE'] == 'SERVE'
+    is_serve = 'DIST_NUM_INSTANCES' in config
     task_exist = os.path.exists(f'{trial_path}/output/out.0.txt')
-    resumable = is_task_serve or config.get('DIST_RESUMABLE')
+    resumable = is_serve or config.get('DIST_RESUMABLE')
     if task_exist and resume is None: resume = True
     if resume and task_exist and not resumable:
         return '任务不支持断点续跑，请重新清理日志后重试'
@@ -557,7 +557,7 @@ def dist_task_query_(project: str, trial: str='') -> dict:
     def try_load_task(trial: str) -> dict:
         try: return load_task_config(project, trial)
         except: return {}
-    loads = (i for i, t in enumerate(tasks) if not t)
+    loads = (i for i, t in enumerate(tasks) if t is None)
     for i in loads: tasks[i] = CREATED_TASK_ID2INFO[task_ids[i]
         ] = TaskInfo(try_load_task(trials[i]))
     return {t: i.config() for t, i in zip(trials, tasks)}
@@ -786,7 +786,7 @@ async def launch_dist_task(host: str, env: str):
     nnode, node = env['DIST_NUM_NODES'], env['DIST_NODE_RANK']
     nproc_per_node = len(env.get('DIST_DEVICES', '').split(','))
     conda = os.path.join(os.getcwd(), 'conda.sh')
-    code = os.path.abspath(env.get('DIST_CODE') or os.getcwd())
+    code = os.path.join(os.getcwd(), env.get('DIST_CODE', ''))
     script = (f'source {conda} && cd {code} && '
     f'MASTER_ADDR={env["DIST_MASTER"]} NODE_RANK={node} '
     f'MASTER_PORT={env["DIST_MASTER_PORT"]} '
@@ -847,13 +847,16 @@ SIGS = [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]
 import atexit; atexit.register(handle_exit_signal)
 for sig in SIGS: signal.signal(sig, handle_exit_signal)
 
-async def register_dist_node(env: dict, device_kind: str):
+async def register_dist_node(env: dict, host: str=''):
     for s in SIGS: asyncio.get_running_loop().add_signal_handler(
     s, lambda: asyncio.create_task(handle_async_exit()))
+    host = env.pop('DIST_HOST', '') or host
     try: gpu_kind, gpu = parse_gpu_kind_for_nvidia_device()
     except: gpu_kind, gpu = None, None
-    device_kind = device_kind or gpu_kind or 'CPU'
-    data = ['', env, [device_kind, gpu, os.cpu_count()], None, {}]
+    if CLUSTER == f'{HOST}:{PORT}': device_kind = 'localhost'
+    else: device_kind = env.pop('DIST_DEVICE_KIND', '')
+    kind = device_kind or gpu_kind or 'CPU'
+    data = [host, env, [kind, gpu, os.cpu_count()], None, {}]
     url = f'http://{CLUSTER}/dist/node/register'
     while data[2][0]: data = await register_dist_node_(url, data)
     if data[2][0] != '': asyncio.create_task(handle_async_exit())
@@ -883,7 +886,9 @@ def parse_gpu_kind_for_nvidia_device() -> tuple:
     parse = lambda f: f.readline().split(' ')[-1].strip()
     with open(info_path) as f: return parse(f), len(gpus)
 
+ssl = {'ssl_keyfile': './key.pem', 'ssl_certfile': './cert.pem'}
 if __name__ == '__main__': 
-    uvicorn.run(app, host='0.0.0.0', port=PORT, log_level='warning')
+    uvicorn.run(app, host='0.0.0.0', port=PORT, log_level='warning', 
+    **{} if os.environ.pop('DIST_SSL', None) is None else ssl)
 
 logging.basicConfig(filename='./manager.log', level=logging.INFO)

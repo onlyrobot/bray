@@ -1,0 +1,9 @@
+export https_proxy=http://47.84.5.93:8415
+
+conda install python=3.12 -q -y
+
+pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu124
+
+cd $DIST_CODE && pip install -r requirements.txt
+
+pip install -r manager_requirements.txt
