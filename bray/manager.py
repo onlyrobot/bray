@@ -624,11 +624,12 @@ def build_execute_group(project, trial, saves) -> tuple:
     # script_scope = gr.Button('code scope', size='sm')
     with gr.Row(equal_height=True) as execute_row:
         script = gr.Dropdown(allow_custom_value=True, value='', 
-        label='Script', scale=3) #, buttons=[script_scope])
+        label='Script') #, buttons=[script_scope])
+    with execute_row, gr.Row(scale=1) as code_conda_row:
         code = gr.Dropdown(allow_custom_value=True, value='',
-        label='Code', scale=2, min_width=100)
+        label='Code', scale=1, min_width=100)
         conda = gr.Dropdown(allow_custom_value=True, value='', 
-        label='Conda', scale=2) #, buttons=[conda_scope])
+        label='Conda', scale=1) #, buttons=[conda_scope])
     conda_row = gr.Row(visible=False)
     with conda_row, gr.Column(min_width=240) as conda_column:
         docker_image = gr.Dropdown(
@@ -653,9 +654,9 @@ def build_execute_group(project, trial, saves) -> tuple:
     with script_row: script_code = gr.Code(language='shell')
     script_mtime = gr.Number(0.0, visible=False)
     on, off = gr.update(visible=True), gr.update(visible=False)
-    script.blur(lambda: [on, on], None, [code, conda])
+    script.blur(lambda: on, None, code_conda_row)
     script.focus(on_script_focus_or_input, [code, script], script
-    ).then(lambda: [off, off], None, [code, conda], 
+    ).then(lambda: off, None, code_conda_row, 
         show_progress='hidden')
     script.focus(lambda: (on, off), None, [script_row, conda_row])
     script.key_up(on_script_key_up, [code], script, 
@@ -754,6 +755,8 @@ def on_preview_change(preview, dataset, name, split, diff,
     page = min(max(page, 1), maximum)
     try: data |= build_preview_ds(dataset, page_size, page)
     except: data |= gr.update(value=[])
+    data |= gr.update(show_row_numbers=page_size != 1, 
+        wrap=page_size == 1)
     if not diff and ds: return origin_dataset, data
     page = gr.update(value=page, maximum=maximum, 
         minimum=min(minimum, maximum - 1))
@@ -791,13 +794,13 @@ def build_dataset_preview(dataset, preview, ds):
         label='File', allow_custom_value=True, scale=2)
     with column, operate_row as page_size_row: 
         page_size = gr.Dropdown(
-        [f'{i}/Page' for i in [10, 20, 50, 100]], scale=1,
+        ['1/Page', '10/Pg', '50/Pg', '100/Pg'], scale=1,
         show_label=False, min_width=100)
     with column, operate_row as page_row: 
         page = gr.Slider(label='Page', scale=2)
     with column, gr.Row(equal_height=True) as diff_row:
-        diff_data = gr.Dataframe(type='array', interactive=True, 
-        max_height=800, show_row_numbers=True, visible=False)
+        diff_data = gr.Dataframe(type='array', max_height=800, 
+        interactive=True, show_row_numbers=True, visible=False)
     with column, diff_row as data_row:
         data = gr.Dataframe(type='array', max_height=800,
         interactive=True, show_row_numbers=True)
@@ -1165,7 +1168,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ckpt_step = gr.Slider(value=-1, visible=False,
         minimum=0, maximum=0, step=1, label='Checkpoint Step')
     with gr.Group(visible=True) as log_group: plot = gr.LinePlot(
-        color_title='', title='Metric', height=320)
+        color_title='', visible=False, height=320)
     with log_group, gr.Row(equal_height=True) as log_row:
         metric = gr.Dropdown(label='Metric', 
         allow_custom_value=True, scale=2, min_width=100)
@@ -1182,7 +1185,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     with log_group, log_row, gr.Column(scale=1, min_width=100):
         clean = gr.Button('清理日志', interactive=False)
         flush = gr.Button('刷新日志')
-    with log_group: logger = gr.TextArea(label='Output Logs')
+    with log_group: log = gr.TextArea(max_lines=36, show_label=False)
     with gr.Group(visible=False) as eval_group: 
         (evals, eval_input, eval_code, eval_info
         ) = build_eval_group(project, trial, eval_btn, saves)
@@ -1382,7 +1385,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     ckpt_step.input(on_ckpt_step_change,
         [project, trial, model, ckpt_step], ckpt_step)
     flush_event_args = (flush_log_and_metric, [project, trial, metric, 
-        log_filter, node], [metric, metric_label, node, logger])
+        log_filter, node], [metric, metric_label, node, log])
     update_metric_event_args = (on_metric_select, 
         [project, trial, metric, metric_label, axis_x], plot)
     for c in [log_btn, flush]: c.click(*flush_event_args
@@ -1394,6 +1397,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         lambda: None, None, plot).then(*update_metric_event_args)
     metric_label.change(lambda x: gr.update(show_label=not x), 
         metric_label, metric_label)
+    metric.change(lambda x: (gr.update(visible=bool(x)),
+        gr.update(max_lines=36 if x else 20)), [plot, log])
     clean.click(clean_log, [project, trial, clean, node], 
         [clean, output]).then(
     *flush_event_args).then(*update_task_status_event_args)
