@@ -47,7 +47,7 @@ EVAL_WIDTHS = [2, 1, 2, 2, 1]
 EVAL_METHODS = ['HTTP_POST', 'PYTHON', 'HTTP_GET', 'CHAT_BOT']
 
 TRIALS: dict[str: dict[str: dict[str: str]]] = {}
-CACHED_TRIAL2CONFIGS: dict[str: dict] = {}
+CACHED_TRIAL2CONFIG: dict[str: dict] = {}
 CONDAS = SCRIPTS = REWARDS = MODELS = DATASETS = []
 
 def reload_modules_and_flush_disk(interval: float = 60):
@@ -166,14 +166,14 @@ def on_trial_change(template, project, trial) -> tuple:
         build_task_type_and_status([f'{project}/{t}', '', '', '']
     ) for t in sorted(TRIALS.get(project, {}))])
     # update trial buttons if trial not exist
-    if not os.path.exists(config_path): return updates
+    if not os.path.exists(config_path): return updates + ['']
     # load trial config from file
     with open(config_path, 'r') as f: env = json.load(f)
     updates = [gr.update(value=env.get(n, DEFAULTS[i])) 
-        for i, n in enumerate(PARAMS)]
-    cached_config = CACHED_TRIAL2CONFIGS.get(
+        for i, n in enumerate(PARAMS)] + ['']
+    cached_config = CACHED_TRIAL2CONFIG.get(
         f'{project}/{trial}') or (
-    CACHED_TRIAL2CONFIGS.get(env.get('DIST_TEMPLATE')) or {})
+    CACHED_TRIAL2CONFIG.get(env.get('DIST_TEMPLATE')) or {})
     for k in NAMES[-6:]: update_param(
         updates, k, cached_config.get(k) or gr.update())
     update_param(updates, 'TASKS', [build_task_type_and_status(
@@ -284,7 +284,7 @@ def verify_trial(project: str, trial: str, *args) -> tuple:
     if err_msg := verify(**kwargs): 
         return updates + [f'模版校验失败 {name} {err_msg}']
     model = kwargs['DIST_MODEL']
-    CACHED_TRIAL2CONFIGS[f'{project}/{trial}'] = kwargs
+    CACHED_TRIAL2CONFIG[f'{project}/{trial}'] = kwargs
     if not model or os.path.exists(model):
         return updates + [f'匹配模版 {name} 成功']
     else: return updates + [f'模型不存在 {model}']
@@ -519,10 +519,12 @@ def parse_path_from_script(code: str, script: str) -> str:
         if part and is_valid_path(code, part): return part
     if (s := script.split('python -m ')[1:]) and s[0]:
         return s[0].split(' ')[0].replace('.', '/') + '.py'
+    if (s := script.split('python3 -m ')[1:]) and s[0]:
+        return s[0].split(' ')[0].replace('.', '/') + '.py'
     else: return '' if '' in parts else script
 
 def replace_script_path(code, script, s: str) -> str:
-    if len(parts := s.split(' - - - - - - ', 1)) > 1: s, script = parts
+    if len(parts := s.split(' - - - - - ', 1)) > 1: s, script = parts
     old_script_path = parse_path_from_script(code, script)
     if ' ' in script: return script.replace(old_script_path, s, 1)
     if s and s[0] not in ['/', '.']: s = f'./{s}'
@@ -560,7 +562,7 @@ def on_script_focus_or_input(code: str, script: str) -> dict:
 
 def on_script_key_up(code: str, data: gr.KeyUpData) -> dict:
     update = on_script_focus_or_input(code, data.input_value)
-    return gr.update(choices=[f'{c} - - - - - - {data.input_value}' if 
+    return gr.update(choices=[f'{c} - - - - - {data.input_value}' if 
     ' ' in data.input_value else c for c in update['choices']])
 
 def on_path_nevigate_change(leaf: str, parent: str='') -> dict:
@@ -799,7 +801,7 @@ def build_dataset_preview(dataset, preview, ds):
     with column, operate_row as page_row: 
         page = gr.Slider(label='Page', scale=2)
     with column, gr.Row(equal_height=True) as diff_row:
-        diff_data = gr.Dataframe(type='array', max_height=800, 
+        dd = gr.Dataframe(type='array', max_height=800, 
         interactive=True, show_row_numbers=True, visible=False)
     with column, diff_row as data_row:
         data = gr.Dataframe(type='array', max_height=800,
@@ -812,7 +814,7 @@ def build_dataset_preview(dataset, preview, ds):
     on_preview_change_event_args = (on_preview_change, 
         [preview, dataset, name, split, diff, file, 
         filter, page_size, page], [name, split, 
-    diff, file, page, diff_data, data, markdown, config])
+    diff, file, page, dd, data, markdown, config])
     diff.input(on_path_nevigate_change, diff, diff)
     diff.key_up(on_path_nevigate_key_up, None, diff, 
         show_progress='hidden')
@@ -1167,25 +1169,6 @@ with gr.Blocks(title='Bray Cloud') as platform:
         log_btn = gr.Button('日志', elem_id='log', min_width=70)
     ckpt_step = gr.Slider(value=-1, visible=False,
         minimum=0, maximum=0, step=1, label='Checkpoint Step')
-    with gr.Group(visible=True) as log_group: plot = gr.LinePlot(
-        color_title='', visible=False, height=320)
-    with log_group, gr.Row(equal_height=True) as log_row:
-        metric = gr.Dropdown(label='Metric', 
-        allow_custom_value=True, scale=2, min_width=100)
-        axis_x = gr.Dropdown(AXIS_X_CHOICES, label='Axis-X', 
-        allow_custom_value=True, scale=1, min_width=100)
-        metric_label = gr.Dropdown(label='Metric Label', scale=3, 
-        multiselect=True, allow_custom_value=True)
-    with log_group, log_row:
-        log_filter = gr.Dropdown(LOG_FILTER_CHOICES, scale=1,
-        label='Log Filter', allow_custom_value=True, min_width=100)
-    with log_group, log_row:
-        node = gr.Dropdown(label='Node', scale=1, visible=False, 
-        min_width=60, type='index', allow_custom_value=True)
-    with log_group, log_row, gr.Column(scale=1, min_width=100):
-        clean = gr.Button('清理日志', interactive=False)
-        flush = gr.Button('刷新日志')
-    with log_group: log = gr.TextArea(max_lines=36, show_label=False)
     with gr.Group(visible=False) as eval_group: 
         (evals, eval_input, eval_code, eval_info
         ) = build_eval_group(project, trial, eval_btn, saves)
@@ -1204,8 +1187,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, trial, model], ckpt_step)
     selected = gr.Button('log', visible=False, elem_id='selected')
     code_frame = lambda code: f'''<iframe allowfullscreen
-    src='/localhost/code-server/''' + \
-    f'''?folder={os.path.join(os.getcwd(), code)}' 
+        src='/localhost/code-server/''' + \
+        f'''?folder={os.path.join(os.getcwd(), code)}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     code_html = gr.HTML(visible=False, padding=False, autoscroll=True)
     code_btn.click(code_frame, code, code_html)
@@ -1213,11 +1196,30 @@ with gr.Blocks(title='Bray Cloud') as platform:
         [project, record_btn, rec_md], rec_md)
     rec_md.change(lambda x: x, rec_md, view_rec, show_progress=False)
     tb_frame = lambda p, t: f'''<iframe allowfullscreen 
-    src='/localhost/tensorboard/''' + \
-    f'''?runFilter={p}/{t}#scalars&regexInput={p}/{t}' 
+        src='/localhost/tensorboard/''' + \
+        f'''?runFilter={p}/{t}#scalars&regexInput={p}/{t}' 
     style="width: 100%; height: 90vh" frameborder='0'> </iframe>'''
     tb_html = gr.HTML(visible=False, padding=False, autoscroll=True)
     tb_btn.click(tb_frame, [project, trial], tb_html)
+    with gr.Group(visible=True) as log_group: plot = gr.LinePlot(
+        color_title='', visible=False, height=320)
+    with log_group, gr.Row(equal_height=True) as log_row:
+        metric = gr.Dropdown(label='Metric', 
+        allow_custom_value=True, scale=2, min_width=100)
+        axis_x = gr.Dropdown(AXIS_X_CHOICES, label='Axis-X', 
+        allow_custom_value=True, scale=1, min_width=100)
+        metric_label = gr.Dropdown(label='Metric Label', scale=3, 
+        multiselect=True, allow_custom_value=True)
+    with log_group, log_row:
+        log_filter = gr.Dropdown(LOG_FILTER_CHOICES, scale=1,
+        label='Log Filter', allow_custom_value=True, min_width=100)
+    with log_group, log_row:
+        node = gr.Dropdown(label='Node', scale=1, visible=False, 
+        min_width=60, type='index', allow_custom_value=True)
+    with log_group, log_row, gr.Column(scale=1, min_width=100):
+        clean = gr.Button('清理日志', interactive=False)
+        flush = gr.Button('刷新日志')
+    with log_group: log = gr.TextArea(lines=30, show_label=False)
     operates = [export_btn, eval_btn, record_btn, node_btn, code_btn, 
     schedule_btn, file_btn, monitor_btn, tb_btn, log_btn]
     on, off = gr.update(visible=True), gr.update(visible=False)
@@ -1323,8 +1325,8 @@ with gr.Blocks(title='Bray Cloud') as platform:
     (timer := gr.Timer(2)).tick(*update_task_status_event_args
     ).then(update_tasks_type_and_status, tasks, tasks, 
         show_progress=False)
-    trial.change(lambda: '', None, output).then(
-        on_trial_change, [template, project, trial], VALUES
+    trial.change(on_trial_change, [template, project, trial], 
+        VALUES + [output]
     ).then(*update_task_status_event_args
     ).then(*task_deps_change_event_args).then(*init_ds_event_args
     ).then(build_config, [project, trial] + VALUES, script_cfg
@@ -1398,7 +1400,7 @@ with gr.Blocks(title='Bray Cloud') as platform:
     metric_label.change(lambda x: gr.update(show_label=not x), 
         metric_label, metric_label)
     metric.change(lambda x: (gr.update(visible=bool(x)),
-        gr.update(max_lines=36 if x else 20)), [plot, log])
+        gr.update(lines=20 if x else 30)), metric, [plot, log])
     clean.click(clean_log, [project, trial, clean, node], 
         [clean, output]).then(
     *flush_event_args).then(*update_task_status_event_args)

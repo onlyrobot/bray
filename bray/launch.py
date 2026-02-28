@@ -84,11 +84,12 @@ async def register_to_master_on_start(_: fastapi.FastAPI):
     asyncio.create_task(restore_task_on_start()); yield
 
 async def restore_task_on_start(start_wait: float=None):
+    project2trial2config = await dist_task_query()
     await asyncio.sleep(start_wait or START_WAIT)
     await asyncio.gather(*[dist_task_launch({}, p, t) 
-    for p, configs in (await dist_task_query()).items() 
-        for t, config in configs.items() 
-    if len(config) > 1 and not config.get('DIST_DEPENDENT') 
+    for p, trial2config in project2trial2config.items() 
+        for t, config in trial2config.items() 
+    if 'DIST_TRIAL' in config and not config.get('DIST_DEPENDENT') 
     and config.get('DIST_TASK_STATUS') == 'UNKNOWN'])
 
 app = fastapi.FastAPI(lifespan=register_to_master_on_start)
@@ -791,7 +792,7 @@ async def launch_dist_task(host: str, env: str):
     f'MASTER_ADDR={env["DIST_MASTER"]} NODE_RANK={node} '
     f'MASTER_PORT={env["DIST_MASTER_PORT"]} '
     f'CUDA_VISIBLE_DEVICES={env.get("DIST_DEVICES", "")} '
-    f'NPROC_PER_NODE={nproc_per_node} NNODES={nnode} ')
+    f'NPROC_PER_NODE={nproc_per_node} NNODES={nnode}')
     if script_envs := env.get('DIST_SCRIPT_ENVS'): 
         script = f'{script} {script_envs}'
     script = f'{script} {env["DIST_SCRIPT"]}'
